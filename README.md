@@ -1,0 +1,31 @@
+# e-Comet Skills + Local MCP
+
+Public test marketplace for installing the e-Comet Wildberries skills and their bundled local MCP server in one step.
+
+## Install in Codex
+
+```powershell
+codex plugin marketplace add ShadyAV/ecomet-skills-local-mcp --ref main
+codex plugin add e-comet-skills@e-comet-local-mcp-test
+```
+
+Restart Codex Desktop and open a new task after installation.
+
+## User flow
+
+1. Codex installs this repository's `e-comet-skills` plugin.
+2. The plugin provides four typed Wildberries skills and registers its bundled STDIO MCP through `.mcp.json`.
+3. On first MCP start, `launch-windows.cmd` verifies and expands the bundled Windows x64 SEA executable.
+4. The MCP connects only to `127.0.0.1:17361`; the e-Comet Chrome extension performs WB requests in the user's browser session.
+5. Full WB responses remain on the user's computer under `%LOCALAPPDATA%\e-comet\local-agent`.
+
+The user does not need Node.js, Python, a `hosts` modification, a separate MCP download, or an e-Comet backend relay.
+
+## Requirements
+
+- Windows x64;
+- Codex Desktop with plugin support;
+- Chrome with the compatible e-Comet extension;
+- an authorized `wildberries.ru` tab for authenticated WB requests.
+
+This is an MVP test build. Local pairing is intentionally disabled by the bundled launcher.
