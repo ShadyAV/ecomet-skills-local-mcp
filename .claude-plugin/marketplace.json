@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "e-comet-skills",
+  "description": "e-Comet Wildberries skills with a bundled local MCP server.",
+  "owner": {
+    "name": "e-Comet"
+  },
+  "plugins": [
+    {
+      "name": "e-comet-skills",
+      "description": "Wildberries skills that communicate with the e-Comet Chrome extension through a bundled local MCP server.",
+      "source": "./plugins/e-comet-skills",
+      "category": "developer-tools"
+    }
+  ]
+}

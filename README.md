@@ -11,6 +11,17 @@ codex plugin add e-comet-skills@e-comet-local-mcp-test
 
 Restart Codex Desktop and open a new task after installation.
 
+## Install in Claude Code
+
+Run inside Claude Code:
+
+```text
+/plugin marketplace add ShadyAV/ecomet-skills-local-mcp
+/plugin install e-comet-skills@e-comet-skills
+```
+
+Restart Claude Code and open a new session after installation.
+
 ## User flow
 
 1. Codex installs this repository's `e-comet-skills` plugin.
