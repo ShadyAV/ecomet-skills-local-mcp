@@ -1,14 +1,10 @@
 # e-Comet local MCP
 
-Windows Codex launches `launch-windows.cmd` from the plugin cache. On first start the launcher:
-
-1. expands `bin/win32-x64/ecomet-mcp-win32-x64.zip`;
-2. verifies `ecomet-mcp.exe.sha256`;
-3. starts the verified SEA executable over STDIO.
+Windows Codex launches `launch-windows.cmd` from the plugin cache. The launcher starts the bundled
+`bin/win32-x64/ecomet-mcp.exe` SEA executable directly over STDIO.
 
 The user does not need Node.js. Server source, tests, and the SEA build pipeline live in the separate
-`ecomet-local-mcp` repository. This plugin contains only the distribution boundary: launcher, unpack helper, ZIP,
-and checksum.
+`ecomet-local-mcp` repository. This plugin contains only the distribution boundary: launcher and executable.
 
 The MCP listens only on `127.0.0.1:17361`. The Windows MVP launcher enables automatic extension connection without
 manual pairing. The P-256 ECDH, user-confirmed SAS, and HMAC-authenticated mode remains available for production by
