@@ -11,7 +11,7 @@
         "/d",
         "/s",
         "/c",
-        "mcp\\launch-windows.cmd"
+        "if defined CLAUDE_PLUGIN_ROOT (call \"%CLAUDE_PLUGIN_ROOT%\\mcp\\launch-windows.cmd\") else (call \"mcp\\launch-windows.cmd\")"
       ],
       "cwd": "."
     }
