@@ -25,7 +25,7 @@ Restart Claude Code and open a new session after installation.
 ## User flow
 
 1. Codex installs this repository's `e-comet-skills` plugin.
-2. The plugin provides four typed Wildberries skills and registers its bundled STDIO MCP through `.mcp.json`.
+2. The plugin provides four typed Wildberries skills and registers its bundled STDIO MCP through the host-specific plugin manifests.
 3. On MCP start, `launch-windows.cmd` runs the bundled Windows x64 SEA executable directly.
 4. The MCP connects only to `127.0.0.1:17361`; the e-Comet Chrome extension performs WB requests in the user's browser session.
 5. Full WB responses remain on the user's computer under `%LOCALAPPDATA%\e-comet\local-agent`.
@@ -39,4 +39,4 @@ The user does not need Node.js, Python, a `hosts` modification, a separate MCP d
 - Chrome with the compatible e-Comet extension;
 - an authorized `wildberries.ru` tab for authenticated WB requests.
 
-This is an MVP test build. Local pairing is intentionally disabled by the bundled launcher.
+This is an MVP test build. It has no pairing flow.

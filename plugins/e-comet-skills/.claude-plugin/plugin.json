@@ -7,16 +7,9 @@
     "url": "https://e-comet.io/"
   },
   "mcpServers": {
-    "e-comet": {
-      "type": "http",
-      "url": "https://mcp.e-comet.io/mcp"
-    },
     "e-comet-local": {
       "type": "stdio",
-      "command": "${CLAUDE_PLUGIN_ROOT}/mcp/bin/win32-x64/ecomet-mcp.exe",
-      "env": {
-        "ECOMET_LOCAL_BRIDGE_ALLOW_UNPAIRED_DEV": "true"
-      }
+      "command": "${CLAUDE_PLUGIN_ROOT}/mcp/bin/win32-x64/ecomet-mcp.exe"
     }
   },
   "repository": "https://github.com/ShadyAV/ecomet-skills-local-mcp",

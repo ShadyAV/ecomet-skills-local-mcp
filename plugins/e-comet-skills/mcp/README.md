@@ -6,10 +6,9 @@ Windows Codex launches `launch-windows.cmd` from the plugin cache. The launcher 
 The user does not need Node.js. Server source, tests, and the SEA build pipeline live in the separate
 `ecomet-local-mcp` repository. This plugin contains only the distribution boundary: launcher and executable.
 
-The MCP listens only on `127.0.0.1:17361`. The Windows MVP launcher enables automatic extension connection without
-manual pairing. The P-256 ECDH, user-confirmed SAS, and HMAC-authenticated mode remains available for production by
-starting the server without `ECOMET_LOCAL_BRIDGE_ALLOW_UNPAIRED_DEV=true`. Full WB responses are stored in
-`%LOCALAPPDATA%\e-comet\local-agent`; MCP tool results contain only compact summaries and local paths.
+The MCP listens only on `127.0.0.1:17361`, and the extension connects automatically while local access is enabled.
+There is no pairing flow in the MVP. Full WB responses are stored in `%LOCALAPPDATA%\e-comet\local-agent`; MCP tool
+results contain only compact summaries and local paths.
 
 Typed local tools:
 
@@ -24,4 +23,4 @@ through e-Comet backend services.
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
 their bounded WB fetches through that primary process. If the primary task closes, a remaining process retries the port
-and takes ownership. The peer channel is disabled when protected pairing mode is enabled.
+and takes ownership.
