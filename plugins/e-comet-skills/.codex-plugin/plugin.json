@@ -16,7 +16,23 @@
     "e-comet"
   ],
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
+  "mcpServers": {
+    "e-comet": {
+      "type": "http",
+      "url": "https://mcp.e-comet.io/mcp"
+    },
+    "e-comet-local": {
+      "type": "stdio",
+      "command": "cmd.exe",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "mcp\\launch-windows.cmd"
+      ],
+      "cwd": "."
+    }
+  },
   "interface": {
     "displayName": "e-Comet Skills",
     "shortDescription": "WB and e-Comet agent skills",
