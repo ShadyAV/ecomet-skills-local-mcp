@@ -6,6 +6,7 @@
   "license": "Apache-2.0",
   "mcpServers": {
     "e-comet-local": {
+      "type": "stdio",
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/src/server.mjs"]
     }
