@@ -40,7 +40,7 @@
 
 Обозначения требований:
 
-- 🔌 `MCP` — сервер входит в плагин; Codex требует Node.js 22+, Claude использует runtime Desktop-приложения
+- 🔌 `MCP` — сервер входит в плагин и запускается через Node.js 22+
 - 🧩 `Расширение` — нужно [расширение для браузера e-Comet](https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh) с введённым ключом
 
 Скиллы без обозначений работают сразу после установки плагина.
