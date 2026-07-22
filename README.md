@@ -10,9 +10,8 @@
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Локальный MCP-сервер e-Comet запускается на компьютере пользователя и общается с расширением через `127.0.0.1`.
-Данные ответов Wildberries не проходят через backend e-Comet, отдельного входа в MCP нет. Для Codex исходники MCP
-входят в плагин и запускаются через установленный Node.js 22+. Для Claude тот же сервер устанавливается отдельным
-MCPB-файлом и работает на встроенном в Claude Desktop Node.js.
+Данные ответов Wildberries не проходят через backend e-Comet, отдельного входа в MCP нет. Для Codex и Claude исходники
+MCP входят в плагин и запускаются через установленный Node.js 22+.
 
 ## Быстрый старт (установка за минуту)
 
@@ -24,12 +23,11 @@ MCPB-файлом и работает на встроенном в Claude Deskto
 
 ### Claude Cowork
 
-1. Скачайте `e-comet-local-mcp.mcpb` из [последнего релиза](https://github.com/e-comet/skills/releases/latest/download/e-comet-local-mcp.mcpb) и откройте файл в Claude Desktop
-2. Подтвердите установку локального MCP в открывшемся окне Claude
-3. Профиль > `Settings` > `Capabilities` > Вкл. `Allow network egress` > `Domain allowlist` > `All domains`
-4. `Customize` на панели слева > `Plugins` > `Add` > `Add marketplace`
-5. `Add from repository` > поле URL: `https://github.com/e-comet/skills` > `Sync`
-6. Откройте marketplace `e-comet-skills` > установите плагин `e-Comet Skills`
+1. Установите [Node.js 22 или новее](https://nodejs.org/) и убедитесь, что команда `node` доступна в `PATH`
+2. Профиль > `Settings` > `Capabilities` > Вкл. `Allow network egress` > `Domain allowlist` > `All domains`
+3. `Customize` на панели слева > `Plugins` > `Add` > `Add marketplace`
+4. `Add from repository` > поле URL: `https://github.com/e-comet/skills` > `Sync`
+5. Откройте marketplace `e-comet-skills` > установите плагин `e-Comet Skills`
 
 ### Codex Desktop
 
@@ -43,7 +41,7 @@ MCPB-файлом и работает на встроенном в Claude Deskto
 
 Обозначения требований:
 
-- 🔌 `MCP` — для Codex сервер входит в плагин и требует Node.js 22+; для Claude устанавливается отдельный MCPB
+- 🔌 `MCP` — сервер входит в плагин и требует Node.js 22+ в Codex и Claude
 - 🧩 `Расширение` — нужно [расширение для браузера e-Comet](https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh) с введённым ключом
 
 Скиллы без обозначений работают сразу после установки плагина.

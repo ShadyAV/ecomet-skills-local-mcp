@@ -3,5 +3,11 @@
   "displayName": "e-Comet Skills",
   "description": "Public WB and e-Comet agent skills with helper scripts.",
   "repository": "https://github.com/e-comet/skills",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "e-comet-local": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/src/server.mjs"]
+    }
+  }
 }

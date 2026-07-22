@@ -8,8 +8,8 @@
 ### Changed
 - Replaced the remote authenticated MCP with a bundled local STDIO server that communicates with the e-Comet Chrome
   extension over loopback and keeps full WB responses on the user's computer. The plugin ships its dependency-free
-  JavaScript source for Codex instead of distributing a SEA executable. Claude uses a separately installed MCPB release
-  asset so Claude Desktop can run the same source with its bundled Node.js runtime without nesting a ZIP in the plugin.
+  JavaScript source instead of distributing a SEA executable. Codex and Claude launch the same source directly from the
+  plugin through Node.js 22+.
 
 ## [2026.7.5] - 2026-07-12
 
