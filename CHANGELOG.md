@@ -8,8 +8,8 @@
 ### Changed
 - Replaced the remote authenticated MCP with a bundled local STDIO server that communicates with the e-Comet Chrome
   extension over loopback and keeps full WB responses on the user's computer. The plugin ships its dependency-free
-  JavaScript source instead of distributing a SEA executable. Codex and Claude launch the same source directly from the
-  plugin; Codex uses system Node.js 22+, while Claude Desktop provides the plugin runtime.
+  JavaScript source instead of distributing a SEA executable. Plugin manifests launch the same source directly with
+  the `node` command; Node.js 22+ is required.
 - Added generation-aware primary handoff so a newer MCP release drains active requests, takes over the fixed loopback
   port, and reconnects existing conversations and the extension without requiring a desktop-agent restart.
 

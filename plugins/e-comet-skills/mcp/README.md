@@ -1,8 +1,7 @@
 # e-Comet local MCP
 
 Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` command. The server has no npm runtime
-dependencies; all required source modules are included in this directory. Codex requires Node.js 22+ in the system
-`PATH`; Claude Desktop provides the runtime to plugin MCP processes.
+dependencies; all required source modules are included in this directory. Node.js 22+ is required.
 
 The canonical source and tests live in the separate `ecomet-local-mcp` repository. This plugin contains a release
 snapshot of its `src/` directory.
