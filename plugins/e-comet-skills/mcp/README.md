@@ -1,10 +1,13 @@
 # e-Comet local MCP
 
-Windows Codex launches `launch-windows.cmd` from the plugin cache. The launcher starts the bundled
-`bin/win32-x64/ecomet-mcp.exe` SEA executable directly over STDIO.
+Codex launches `src/server.mjs` directly over STDIO with the user's `node` command. The server has no npm runtime
+dependencies; all required source modules are included in this directory. Node.js 22 or newer is required.
 
-The user does not need Node.js. Server source, tests, and the SEA build pipeline live in the separate
-`ecomet-local-mcp` repository. This plugin contains only the distribution boundary: launcher and executable.
+Claude installs the same source separately as `e-comet-local-mcp.mcpb` and uses Claude Desktop's bundled Node.js
+runtime. The MCPB must remain a release asset rather than a file inside this plugin because it is itself a ZIP archive.
+
+The canonical source and tests live in the separate `ecomet-local-mcp` repository. This plugin contains a release
+snapshot of its `src/` directory.
 
 The MCP listens only on `127.0.0.1:17361`, and the extension connects automatically while local access is enabled.
 There is no pairing flow in the MVP. Full WB responses are stored in `%LOCALAPPDATA%\e-comet\local-agent`; MCP tool

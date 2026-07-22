@@ -1,42 +1,80 @@
-# e-Comet Skills + Local MCP
+# e-Comet Skills
 
-Public test marketplace for installing the e-Comet Wildberries skills and their bundled local MCP server in one step.
+Агентские скиллы e-Comet помогают продавцам работать с платформой Wildberries: находить данные, проверять гипотезы,
+собирать операционные отчеты и автоматизировать повторяющиеся действия. Они спроектированы как небольшие и надежные
+строительные блоки для сложных рабочих процессов продавца.
 
-## Install in Codex
+Скиллы устанавливаются как marketplace-плагин в Claude Cowork и Codex Desktop.
 
-```powershell
-codex plugin marketplace add ShadyAV/ecomet-skills-local-mcp --ref main
-codex plugin add e-comet-skills@e-comet-local-mcp-test
-```
+Предложения по улучшению принимаются через pull request. Порядок обработки описан в
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-Restart Codex Desktop and open a new task after installation.
+Локальный MCP-сервер e-Comet запускается на компьютере пользователя и общается с расширением через `127.0.0.1`.
+Данные ответов Wildberries не проходят через backend e-Comet, отдельного входа в MCP нет. Для Codex исходники MCP
+входят в плагин и запускаются через установленный Node.js 22+. Для Claude тот же сервер устанавливается отдельным
+MCPB-файлом и работает на встроенном в Claude Desktop Node.js.
 
-## Install in Claude Code
+## Быстрый старт (установка за минуту)
 
-Run inside Claude Code:
+### Браузер и расширение
 
-```text
-/plugin marketplace add ShadyAV/ecomet-skills-local-mcp
-/plugin install e-comet-skills@e-comet-skills
-```
+1. Установите [расширение для браузера e-Comet](https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh). Рекомендуем использовать браузер Chrome
+2. Активируйте его, введя API-ключ для расширения из [личного кабинета аккаунта e-Comet](https://app.e-comet.io/account)
+3. Удостоверьтесь, что вы также залогинены на [wildberries.ru](https://www.wildberries.ru/lk)
 
-Restart Claude Code and open a new session after installation.
+### Claude Cowork
 
-## User flow
+1. Скачайте `e-comet-local-mcp.mcpb` из [последнего релиза](https://github.com/e-comet/skills/releases/latest/download/e-comet-local-mcp.mcpb) и откройте файл в Claude Desktop
+2. Подтвердите установку локального MCP в открывшемся окне Claude
+3. Профиль > `Settings` > `Capabilities` > Вкл. `Allow network egress` > `Domain allowlist` > `All domains`
+4. `Customize` на панели слева > `Plugins` > `Add` > `Add marketplace`
+5. `Add from repository` > поле URL: `https://github.com/e-comet/skills` > `Sync`
+6. Откройте marketplace `e-comet-skills` > установите плагин `e-Comet Skills`
 
-1. Codex installs this repository's `e-comet-skills` plugin.
-2. The plugin provides four typed Wildberries skills and registers its bundled STDIO MCP through the host-specific plugin manifests.
-3. On MCP start, `launch-windows.cmd` runs the bundled Windows x64 SEA executable directly.
-4. The MCP connects only to `127.0.0.1:17361`; the e-Comet Chrome extension performs WB requests in the user's browser session.
-5. Full WB responses remain on the user's computer under `%LOCALAPPDATA%\e-comet\local-agent`.
+### Codex Desktop
 
-The user does not need Node.js, Python, a `hosts` modification, a separate MCP download, or an e-Comet backend relay.
+1. Установите [Node.js 22 или новее](https://nodejs.org/) и убедитесь, что команда `node` доступна в `PATH`
+2. `Settings` на панели слева > `Settings` > `Configuration` > Вкл. `Allow network access`
+3. `Plugins` на панели слева > `+` в правом верхнем углу > `Add marketplace`
+4. Поле `Source`: `https://github.com/e-comet/skills` > `Add marketplace`
+5. `Personal` > `e-Comet Skills` > `Add`
 
-## Requirements
+## Список скиллов
 
-- Windows x64;
-- Codex Desktop with plugin support;
-- Chrome with the compatible e-Comet extension;
-- an authorized `wildberries.ru` tab for authenticated WB requests.
+Обозначения требований:
 
-This is an MVP test build. It has no pairing flow.
+- 🔌 `MCP` — для Codex сервер входит в плагин и требует Node.js 22+; для Claude устанавливается отдельный MCPB
+- 🧩 `Расширение` — нужно [расширение для браузера e-Comet](https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh) с введённым ключом
+
+Скиллы без обозначений работают сразу после установки плагина.
+
+**wb-product-images** - получение ссылок (URL) на фото артикулов ВБ
+> Сделай HTML галерею фото артикулов ВБ 791050753 и 913357757: строка на артикул, клик открывает полный размер, стрелки переключают фото.
+
+**wb-product-card** 🔌 🧩 - информация из карточки товара ВБ: цена, рейтинг, остатки по складам и размерам, склейка, описание и др.
+> Покажи остатки по складам и размерам для артикула 791050753.
+
+**wb-search-by-query** 🔌 🧩 - поисковая выдача ВБ: топ по запросу и позиции артикулов по одной или нескольким ключевым фразам
+> На какой позиции артикул 791050753 в поиске ВБ по запросу «тушенка»?
+
+**wb-recommendations-by-product** 🔌 🧩 - товары из рекомендательных полок карточки одного или нескольких артикулов ВБ
+> Покажи первые две страницы рекомендаций для артикула 791050753.
+
+## FAQ
+
+1. Зачем нужно расширение?
+
+Для надежного выполнения запросов к ВБ через браузер. Без него ВБ будет блокировать запросы или выдавать неполную информацию.
+
+2. Работает ли это в Claude Code / Codex CLI
+
+Да, потребуется вручную установить скиллы в глобальную папку skills и MCP сервер через конфиг.
+
+
+## Ошибки / не работает скилл?
+
+Создайте issue на github с детальным описанием:
+- Название ИИ-платформы
+- Последовательность шагов для воспроизведения (конкретный пример)
+- Ожидание
+- Реальность

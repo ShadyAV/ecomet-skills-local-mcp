@@ -1,17 +1,7 @@
 {
   "name": "e-comet-skills",
   "displayName": "e-Comet Skills",
-  "description": "e-Comet Wildberries skills with a bundled local MCP server.",
-  "author": {
-    "name": "e-Comet",
-    "url": "https://e-comet.io/"
-  },
-  "mcpServers": {
-    "e-comet-local": {
-      "type": "stdio",
-      "command": "${CLAUDE_PLUGIN_ROOT}/mcp/bin/win32-x64/ecomet-mcp.exe"
-    }
-  },
-  "repository": "https://github.com/ShadyAV/ecomet-skills-local-mcp",
+  "description": "Public WB and e-Comet agent skills with helper scripts.",
+  "repository": "https://github.com/e-comet/skills",
   "license": "Apache-2.0"
 }

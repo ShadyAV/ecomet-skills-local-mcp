@@ -1,7 +1,7 @@
 {
-  "name": "e-comet-local-mcp-test",
+  "name": "e-comet-skills",
   "interface": {
-    "displayName": "e-Comet Local MCP Test"
+    "displayName": "e-Comet Skills"
   },
   "plugins": [
     {

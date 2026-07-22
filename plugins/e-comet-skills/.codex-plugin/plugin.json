@@ -1,31 +1,21 @@
 {
   "name": "e-comet-skills",
-  "version": "2026.7.6",
+  "version": "2026.7.6+codex.20260722125255",
   "description": "Public WB and e-Comet agent skills with helper scripts.",
   "author": {
     "name": "e-Comet",
     "url": "https://e-comet.io/"
   },
   "homepage": "https://github.com/e-comet/skills",
-  "repository": "https://github.com/ShadyAV/ecomet-skills-local-mcp",
+  "repository": "https://github.com/e-comet/skills",
   "license": "Apache-2.0",
-  "keywords": [
-    "agent-skills",
-    "wildberries",
-    "wb",
-    "e-comet"
-  ],
+  "keywords": ["agent-skills", "wildberries", "wb", "e-comet"],
   "skills": "./skills/",
   "mcpServers": {
     "e-comet-local": {
       "type": "stdio",
-      "command": "cmd.exe",
-      "args": [
-        "/d",
-        "/s",
-        "/c",
-        "mcp\\launch-windows.cmd"
-      ],
+      "command": "node",
+      "args": ["mcp/src/server.mjs"],
       "cwd": "."
     }
   },
@@ -35,9 +25,7 @@
     "longDescription": "Public WB and e-Comet agent skills with helper scripts.",
     "developerName": "e-Comet",
     "category": "Developer Tools",
-    "capabilities": [
-      "Interactive"
-    ],
+    "capabilities": ["Interactive"],
     "websiteURL": "https://e-comet.io/",
     "defaultPrompt": [
       "Find WB image URLs for product IDs",
