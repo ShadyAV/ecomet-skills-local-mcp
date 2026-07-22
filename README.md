@@ -10,8 +10,8 @@
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Локальный MCP-сервер e-Comet запускается на компьютере пользователя и общается с расширением через `127.0.0.1`.
-Данные ответов Wildberries не проходят через backend e-Comet, отдельного входа в MCP нет. Для Codex и Claude исходники
-MCP входят в плагин и запускаются через установленный Node.js 22+.
+Данные ответов Wildberries не проходят через backend e-Comet, отдельного входа в MCP нет. Исходники MCP входят в
+плагин: Codex запускает их через установленный Node.js 22+, а Claude — через предоставляемый Desktop-приложением runtime.
 
 ## Быстрый старт (установка за минуту)
 
@@ -23,11 +23,10 @@ MCP входят в плагин и запускаются через устан
 
 ### Claude Cowork
 
-1. Установите [Node.js 22 или новее](https://nodejs.org/) и убедитесь, что команда `node` доступна в `PATH`
-2. Профиль > `Settings` > `Capabilities` > Вкл. `Allow network egress` > `Domain allowlist` > `All domains`
-3. `Customize` на панели слева > `Plugins` > `Add` > `Add marketplace`
-4. `Add from repository` > поле URL: `https://github.com/e-comet/skills` > `Sync`
-5. Откройте marketplace `e-comet-skills` > установите плагин `e-Comet Skills`
+1. Профиль > `Settings` > `Capabilities` > Вкл. `Allow network egress` > `Domain allowlist` > `All domains`
+2. `Customize` на панели слева > `Plugins` > `Add` > `Add marketplace`
+3. `Add from repository` > поле URL: `https://github.com/e-comet/skills` > `Sync`
+4. Откройте marketplace `e-comet-skills` > установите плагин `e-Comet Skills`
 
 ### Codex Desktop
 
@@ -41,7 +40,7 @@ MCP входят в плагин и запускаются через устан
 
 Обозначения требований:
 
-- 🔌 `MCP` — сервер входит в плагин и требует Node.js 22+ в Codex и Claude
+- 🔌 `MCP` — сервер входит в плагин; Codex требует Node.js 22+, Claude использует runtime Desktop-приложения
 - 🧩 `Расширение` — нужно [расширение для браузера e-Comet](https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh) с введённым ключом
 
 Скиллы без обозначений работают сразу после установки плагина.

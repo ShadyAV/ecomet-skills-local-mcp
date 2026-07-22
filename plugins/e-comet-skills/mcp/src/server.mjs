@@ -5,9 +5,15 @@ import { createServer } from 'node:http';
 
 import {
     ALLOWED_EXTENSION_IDS,
+    BRIDGE_GENERATION,
+    BRIDGE_VERSION,
+    CONTROL_PROTOCOL_VERSION,
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
     EXTENSION_PATH as PATH,
+    EXTENSION_PROTOCOL_VERSION,
+    HANDOFF_DRAIN_POLL_MS,
+    HANDOFF_RECONNECT_GRACE_MS,
     HOST,
     IMAGE_BASKET_BOUNDS,
     IMAGE_CONCURRENCY,
@@ -60,14 +66,23 @@ if (!Number.isInteger(nodeMajor) || nodeMajor < 22) {
     console.error(`[e-comet-local-bridge] Node.js 22 or newer is required; found ${process.versions.node}`);
     process.exit(1);
 }
+if (!Number.isInteger(BRIDGE_GENERATION) || BRIDGE_GENERATION < 1) {
+    console.error(`[e-comet-local-bridge] bridge generation must be a positive integer; found ${BRIDGE_GENERATION}`);
+    process.exit(1);
+}
 
+const INSTANCE_ID = randomUUID();
 let extensionSocket = null;
 let extensionReady = false;
 let peerSocket = null;
 let peerReady = false;
 let peerExtensionReady = false;
 let peerReconnectTimer = null;
-const peerSockets = new Set();
+let takeoverGranted = false;
+let listenerYieldUntil = 0;
+let handoffTarget = null;
+let bridgeTransitioning = false;
+const peerStates = new Set();
 const pendingRequests = new Map();
 const inFlightFetches = new Map();
 
@@ -96,18 +111,30 @@ const rejectPendingRequests = (message) => {
 
 const effectiveExtensionReady = () => extensionReady || (peerReady && peerExtensionReady);
 
+const finishBridgeTransitionIfRoutable = () => {
+    if (effectiveExtensionReady()) {
+        bridgeTransitioning = false;
+    }
+};
+
 const peerStatusMessage = () => ({
     type: 'peer_status',
     extensionConnected: extensionReady,
+    bridgeTransitioning,
+    controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+    extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+    bridgeGeneration: BRIDGE_GENERATION,
+    bridgeVersion: BRIDGE_VERSION,
+    instanceId: INSTANCE_ID,
 });
 
 const broadcastPeerStatus = () => {
     const message = peerStatusMessage();
-    for (const socket of peerSockets) {
+    for (const state of peerStates) {
         try {
-            sendWs(socket, message);
+            sendWs(state.socket, message);
         } catch {
-            peerSockets.delete(socket);
+            peerStates.delete(state);
         }
     }
 };
@@ -152,11 +179,17 @@ const handleExtensionMessage = async (state, rawMessage) => {
             socket.end(encodeFrame('', 0x8));
             return;
         }
+        if (payload.protocolVersion !== undefined && payload.protocolVersion !== EXTENSION_PROTOCOL_VERSION) {
+            log(`rejected extension protocol ${payload.protocolVersion}; expected ${EXTENSION_PROTOCOL_VERSION}`);
+            socket.end(encodeFrame('', 0x8));
+            return;
+        }
         if (extensionSocket && extensionSocket !== socket) {
             extensionSocket.end(encodeFrame('', 0x8));
         }
         extensionSocket = socket;
         extensionReady = true;
+        finishBridgeTransitionIfRoutable();
         log(`extension connected, version ${payload.extensionVersion || 'unknown'}`);
         broadcastPeerStatus();
         return;
@@ -190,11 +223,129 @@ const server = createServer((request, response) => {
     response.end();
 });
 
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const sendPeerControl = (state, message) => {
+    try {
+        sendWs(state.socket, message);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const relinquishBridge = () => {
+    listenerYieldUntil = Date.now() + HANDOFF_RECONNECT_GRACE_MS;
+    const currentExtensionSocket = extensionSocket;
+    extensionSocket = null;
+    extensionReady = false;
+
+    server.close(() => {
+        clearTimeout(peerReconnectTimer);
+        peerReconnectTimer = setTimeout(connectToPrimaryBridge, 250);
+    });
+
+    if (currentExtensionSocket) {
+        currentExtensionSocket.end(encodeFrame('', 0x8));
+    }
+    for (const state of [...peerStates]) {
+        state.socket.end(encodeFrame('', 0x8));
+    }
+    setTimeout(() => {
+        currentExtensionSocket?.destroy();
+        for (const state of [...peerStates]) {
+            state.socket.destroy();
+        }
+    }, 100);
+};
+
+const beginHandoff = async (targetState) => {
+    if (handoffTarget || targetState.peerGeneration <= BRIDGE_GENERATION) {
+        return;
+    }
+    handoffTarget = targetState;
+    bridgeTransitioning = true;
+    const notice = {
+        type: 'peer_handoff',
+        controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+        targetInstanceId: targetState.peerInstanceId,
+        targetGeneration: targetState.peerGeneration,
+        reconnectGraceMs: HANDOFF_RECONNECT_GRACE_MS,
+    };
+    for (const state of peerStates) {
+        sendPeerControl(state, notice);
+    }
+    log(
+        `handoff requested by generation ${targetState.peerGeneration} instance ${targetState.peerInstanceId}; ` +
+            `draining ${pendingRequests.size} active request(s)`
+    );
+
+    while (pendingRequests.size > 0 && handoffTarget === targetState && !targetState.socket.destroyed) {
+        await delay(HANDOFF_DRAIN_POLL_MS);
+    }
+    if (handoffTarget !== targetState || targetState.socket.destroyed) {
+        handoffTarget = null;
+        bridgeTransitioning = false;
+        for (const state of peerStates) {
+            sendPeerControl(state, { type: 'peer_handoff_cancelled', controlProtocolVersion: CONTROL_PROTOCOL_VERSION });
+        }
+        return;
+    }
+
+    const granted = sendPeerControl(targetState, {
+        type: 'peer_takeover_granted',
+        controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+        targetInstanceId: targetState.peerInstanceId,
+        targetGeneration: targetState.peerGeneration,
+    });
+    if (!granted) {
+        handoffTarget = null;
+        return;
+    }
+    log(`handoff granted to generation ${targetState.peerGeneration} instance ${targetState.peerInstanceId}`);
+    await delay(HANDOFF_DRAIN_POLL_MS);
+    relinquishBridge();
+};
+
 const handlePeerMessage = async (state, rawMessage) => {
     let message;
     try {
         message = JSON.parse(rawMessage);
     } catch {
+        return;
+    }
+    if (message?.type === 'peer_hello') {
+        if (
+            message.controlProtocolVersion !== CONTROL_PROTOCOL_VERSION ||
+            !Number.isInteger(message.bridgeGeneration) ||
+            message.bridgeGeneration < 1 ||
+            typeof message.instanceId !== 'string' ||
+            message.instanceId.length === 0
+        ) {
+            sendPeerControl(state, {
+                type: 'peer_rejected',
+                reason: 'Unsupported peer control protocol',
+                controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+            });
+            state.socket.end(encodeFrame('', 0x8));
+            return;
+        }
+        state.peerGeneration = message.bridgeGeneration;
+        state.peerInstanceId = message.instanceId;
+        state.peerHandshakeComplete = true;
+        sendPeerControl(state, {
+            type: 'peer_welcome',
+            extensionConnected: extensionReady,
+            controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+            extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+            bridgeGeneration: BRIDGE_GENERATION,
+            bridgeVersion: BRIDGE_VERSION,
+            instanceId: INSTANCE_ID,
+            handoffSupported: true,
+        });
+        if (state.peerGeneration > BRIDGE_GENERATION) {
+            void beginHandoff(state).catch((error) => log('handoff failed:', error.message));
+        }
         return;
     }
     if (message?.type === 'peer_status_request') {
@@ -260,7 +411,10 @@ server.on('upgrade', (request, socket) => {
         fragmentBytes: 0,
     };
     const close = () => {
-        peerSockets.delete(socket);
+        peerStates.delete(state);
+        if (handoffTarget === state) {
+            handoffTarget = null;
+        }
         if (extensionSocket === socket) {
             extensionSocket = null;
             extensionReady = false;
@@ -272,13 +426,21 @@ server.on('upgrade', (request, socket) => {
     };
 
     if (request.url === PEER_PATH) {
-        peerSockets.add(socket);
-        sendWs(socket, peerStatusMessage());
+        peerStates.add(state);
     }
 
     if (request.url === PATH) {
         state.helloId = randomUUID();
-        sendWs(socket, localMessage(state.helloId, 'hello', { clientName: 'e-comet-local-bridge', clientVersion: '0.3.0', sessionNonce: SESSION_NONCE }));
+        sendWs(
+            socket,
+            localMessage(state.helloId, 'hello', {
+                clientName: 'e-comet-local-bridge',
+                clientVersion: BRIDGE_VERSION,
+                protocolVersion: EXTENSION_PROTOCOL_VERSION,
+                bridgeGeneration: BRIDGE_GENERATION,
+                sessionNonce: SESSION_NONCE,
+            })
+        );
     }
 
     socket.on('data', (chunk) => {
@@ -298,6 +460,17 @@ server.on('upgrade', (request, socket) => {
     socket.on('error', close);
 });
 
+const waitForBridgeTransition = async (timeout) => {
+    if (!bridgeTransitioning) return;
+    const deadline = Date.now() + Math.min(timeout, 10000);
+    while (bridgeTransitioning) {
+        if (Date.now() >= deadline) {
+            throw new Error('Local bridge upgrade did not complete before the request timeout');
+        }
+        await delay(HANDOFF_DRAIN_POLL_MS);
+    }
+};
+
 const requestWbFetch = (url, timeout = REQUEST_TIMEOUT_MS) => {
     const dedupeKey = `${url}\n${timeout}`;
     const existing = inFlightFetches.get(dedupeKey);
@@ -305,28 +478,31 @@ const requestWbFetch = (url, timeout = REQUEST_TIMEOUT_MS) => {
         return existing;
     }
 
-    const request = new Promise((resolve, reject) => {
-        const requestId = randomUUID();
-        const timer = setTimeout(() => {
-            pendingRequests.delete(requestId);
-            reject(new Error(`WB request timed out after ${timeout} ms`));
-        }, timeout);
+    const request = (async () => {
+        await waitForBridgeTransition(timeout);
+        return new Promise((resolve, reject) => {
+            const requestId = randomUUID();
+            const timer = setTimeout(() => {
+                pendingRequests.delete(requestId);
+                reject(new Error(`WB request timed out after ${timeout} ms`));
+            }, timeout);
 
             pendingRequests.set(requestId, { resolve, reject, timer });
-        try {
-            if (extensionReady) {
-                sendWs(extensionSocket, localMessage(requestId, 'wb_fetch', { url, timeout }));
-            } else if (peerReady && peerSocket?.readyState === WebSocket.OPEN) {
-                peerSocket.send(JSON.stringify({ type: 'peer_wb_fetch', requestId, url, timeout }));
-            } else {
-                throw new Error('The e-Comet Chrome extension is not connected');
+            try {
+                if (extensionReady) {
+                    sendWs(extensionSocket, localMessage(requestId, 'wb_fetch', { url, timeout }));
+                } else if (peerReady && peerSocket?.readyState === WebSocket.OPEN) {
+                    peerSocket.send(JSON.stringify({ type: 'peer_wb_fetch', requestId, url, timeout }));
+                } else {
+                    throw new Error('The e-Comet Chrome extension is not connected');
+                }
+            } catch (error) {
+                clearTimeout(timer);
+                pendingRequests.delete(requestId);
+                reject(error);
             }
-        } catch (error) {
-            clearTimeout(timer);
-            pendingRequests.delete(requestId);
-            reject(error);
-        }
-    });
+        });
+    })();
     inFlightFetches.set(dedupeKey, request);
     void request.then(
         () => inFlightFetches.delete(dedupeKey),
@@ -342,7 +518,15 @@ const connectToPrimaryBridge = () => {
     const socket = new WebSocket(`ws://${HOST}:${PORT}${PEER_PATH}`);
     peerSocket = socket;
     socket.addEventListener('open', () => {
-        socket.send(JSON.stringify({ type: 'peer_status_request' }));
+        socket.send(
+            JSON.stringify({
+                type: 'peer_hello',
+                controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+                bridgeGeneration: BRIDGE_GENERATION,
+                bridgeVersion: BRIDGE_VERSION,
+                instanceId: INSTANCE_ID,
+            })
+        );
     });
     socket.addEventListener('message', (event) => {
         let message;
@@ -351,11 +535,56 @@ const connectToPrimaryBridge = () => {
         } catch {
             return;
         }
+        if (message?.type === 'peer_handoff') {
+            bridgeTransitioning = true;
+            if (message.targetInstanceId !== INSTANCE_ID) {
+                listenerYieldUntil = Math.max(
+                    listenerYieldUntil,
+                    Date.now() + (Number(message.reconnectGraceMs) || HANDOFF_RECONNECT_GRACE_MS)
+                );
+            }
+            return;
+        }
+        if (message?.type === 'peer_handoff_cancelled') {
+            bridgeTransitioning = false;
+            return;
+        }
+        if (message?.type === 'peer_takeover_granted' && message.targetInstanceId === INSTANCE_ID) {
+            takeoverGranted = true;
+            return;
+        }
+        if (message?.type === 'peer_rejected') {
+            log(`primary rejected peer handshake: ${message.reason || 'unknown reason'}`);
+            socket.close();
+            return;
+        }
+        if (message?.type === 'peer_welcome') {
+            if (message.controlProtocolVersion !== CONTROL_PROTOCOL_VERSION) {
+                log(`primary uses unsupported peer control protocol ${message.controlProtocolVersion}`);
+                socket.close();
+                return;
+            }
+            const wasReady = peerReady;
+            peerReady = true;
+            peerExtensionReady = message.extensionConnected === true;
+            finishBridgeTransitionIfRoutable();
+            if (!wasReady) {
+                log(
+                    `connected to primary local bridge generation ${message.bridgeGeneration} version ${message.bridgeVersion || 'unknown'} ` +
+                        `at ${HOST}:${PORT}`
+                );
+            }
+            return;
+        }
         if (message?.type === 'peer_status') {
             const wasReady = peerReady;
             peerReady = true;
             peerExtensionReady = message.extensionConnected === true;
-            if (!wasReady) log(`connected to primary local bridge at ${HOST}:${PORT}`);
+            finishBridgeTransitionIfRoutable();
+            if (!wasReady) {
+                const versionLabel = message.controlProtocolVersion ? `generation ${message.bridgeGeneration}` : 'legacy generation';
+                log(`connected to primary local bridge ${versionLabel} at ${HOST}:${PORT}`);
+            }
             return;
         }
         if (message?.type !== 'peer_wb_fetch_result' || typeof message.requestId !== 'string') return;
@@ -368,12 +597,16 @@ const connectToPrimaryBridge = () => {
     });
     const disconnected = () => {
         if (peerSocket !== socket) return;
+        const shouldTakeover = takeoverGranted;
+        takeoverGranted = false;
         peerSocket = null;
         peerReady = false;
         peerExtensionReady = false;
+        bridgeTransitioning = true;
         rejectPendingRequests('Primary local bridge disconnected before returning the WB response');
         clearTimeout(peerReconnectTimer);
-        peerReconnectTimer = setTimeout(startBridgeListener, 500);
+        const retryDelay = shouldTakeover ? HANDOFF_DRAIN_POLL_MS : Math.max(500, listenerYieldUntil - Date.now());
+        peerReconnectTimer = setTimeout(startBridgeListener, retryDelay);
     };
     socket.addEventListener('close', disconnected, { once: true });
     socket.addEventListener('error', () => socket.close(), { once: true });
@@ -394,7 +627,7 @@ const handleMcpMessage = async (message) => {
         mcpResult(id, {
             protocolVersion: params?.protocolVersion || '2025-06-18',
             capabilities: { tools: { listChanged: false } },
-            serverInfo: { name: 'e-comet-local-bridge', version: '0.1.0' },
+            serverInfo: { name: 'e-comet-local-bridge', version: BRIDGE_VERSION },
         });
         return;
     }
@@ -418,6 +651,12 @@ const handleMcpMessage = async (message) => {
                 ok: true,
                 extensionConnected: effectiveExtensionReady(),
                 bridgeRole: server.listening ? 'primary' : peerReady ? 'secondary' : 'disconnected',
+                bridgeTransitioning,
+                bridgeVersion: BRIDGE_VERSION,
+                bridgeGeneration: BRIDGE_GENERATION,
+                controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+                extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+                instanceId: INSTANCE_ID,
                 websocket: `ws://${HOST}:${PORT}${PATH}`,
                 resultDirectory: RESULT_DIR,
             })
@@ -958,7 +1197,10 @@ const startBridgeListener = () => {
             peerSocket = null;
             peerReady = false;
             peerExtensionReady = false;
-            log(`listening on ws://${HOST}:${PORT}${PATH}`);
+            takeoverGranted = false;
+            listenerYieldUntil = 0;
+            handoffTarget = null;
+            log(`listening on ws://${HOST}:${PORT}${PATH} as generation ${BRIDGE_GENERATION} version ${BRIDGE_VERSION}`);
         });
     } catch (error) {
         log('failed to start local bridge listener:', error.message);

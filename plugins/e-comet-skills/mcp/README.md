@@ -1,8 +1,8 @@
 # e-Comet local MCP
 
-Codex and Claude launch `src/server.mjs` directly over STDIO with the user's `node` command. The server has no npm
-runtime dependencies; all required source modules are included in this directory. Node.js 22 or newer must be available
-in `PATH`.
+Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` command. The server has no npm runtime
+dependencies; all required source modules are included in this directory. Codex requires Node.js 22+ in the system
+`PATH`; Claude Desktop provides the runtime to plugin MCP processes.
 
 The canonical source and tests live in the separate `ecomet-local-mcp` repository. This plugin contains a release
 snapshot of its `src/` directory.
@@ -25,3 +25,8 @@ Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode.
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
 their bounded WB fetches through that primary process. If the primary task closes, a remaining process retries the port
 and takes ownership.
+
+Processes also exchange a control-protocol version, bridge generation, build version, and instance ID. A newer
+generation waits for active WB requests to finish, receives an explicit takeover grant, claims the same port, and becomes
+the primary. The old primary and all other conversations reconnect as peers, while the extension reconnects
+automatically. Releases must increment `BRIDGE_GENERATION` whenever the active primary needs replacement.
