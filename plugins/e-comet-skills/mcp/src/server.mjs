@@ -39,6 +39,7 @@ import {
     SESSION_NONCE,
 } from './config.mjs';
 import { createJobWriter, saveResult, summarizeBody } from './result-store.mjs';
+import { executeAuthorizedBrowserJob, extractBrowserJobToken } from './browser-job.mjs';
 import { mcpError, mcpResult, textResult } from './mcp-protocol.mjs';
 import { tools } from './tool-catalog.mjs';
 import { encodeFrame, parseFrames, sendWs } from './websocket.mjs';
@@ -74,9 +75,11 @@ if (!Number.isInteger(BRIDGE_GENERATION) || BRIDGE_GENERATION < 1) {
 const INSTANCE_ID = randomUUID();
 let extensionSocket = null;
 let extensionReady = false;
+let extensionBrowserJobReady = false;
 let peerSocket = null;
 let peerReady = false;
 let peerExtensionReady = false;
+let peerExtensionBrowserJobReady = false;
 let peerReconnectTimer = null;
 let takeoverGranted = false;
 let listenerYieldUntil = 0;
@@ -84,6 +87,7 @@ let handoffTarget = null;
 let bridgeTransitioning = false;
 const peerStates = new Set();
 const pendingRequests = new Map();
+const pendingAuthorizations = new Map();
 const inFlightFetches = new Map();
 
 const log = (...args) => console.error('[e-comet-local-bridge]', ...args);
@@ -109,7 +113,16 @@ const rejectPendingRequests = (message) => {
     }
 };
 
+const rejectPendingAuthorizations = (message) => {
+    for (const [requestId, pending] of pendingAuthorizations) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(message));
+        pendingAuthorizations.delete(requestId);
+    }
+};
+
 const effectiveExtensionReady = () => extensionReady || (peerReady && peerExtensionReady);
+const effectiveBrowserJobReady = () => extensionBrowserJobReady || (peerReady && peerExtensionBrowserJobReady);
 
 const finishBridgeTransitionIfRoutable = () => {
     if (effectiveExtensionReady()) {
@@ -120,6 +133,7 @@ const finishBridgeTransitionIfRoutable = () => {
 const peerStatusMessage = () => ({
     type: 'peer_status',
     extensionConnected: extensionReady,
+    browserJobSupported: extensionBrowserJobReady,
     bridgeTransitioning,
     controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
     extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
@@ -189,6 +203,7 @@ const handleExtensionMessage = async (state, rawMessage) => {
         }
         extensionSocket = socket;
         extensionReady = true;
+        extensionBrowserJobReady = Array.isArray(payload.capabilities) && payload.capabilities.includes('browser_job');
         finishBridgeTransitionIfRoutable();
         log(`extension connected, version ${payload.extensionVersion || 'unknown'}`);
         broadcastPeerStatus();
@@ -197,6 +212,21 @@ const handleExtensionMessage = async (state, rawMessage) => {
 
     if (type === 'ping') {
         sendWs(socket, localMessage(message.id, 'pong', { at: Date.now() }));
+        return;
+    }
+
+    if (type === 'browser_job_authorize_result') {
+        const pending = pendingAuthorizations.get(message.id);
+        if (!pending) {
+            return;
+        }
+        pendingAuthorizations.delete(message.id);
+        clearTimeout(pending.timer);
+        if (payload.error) {
+            pending.reject(new Error(payload.error.message || 'Browser job authorization failed'));
+        } else {
+            pending.resolve(payload.authorization);
+        }
         return;
     }
 
@@ -239,6 +269,7 @@ const relinquishBridge = () => {
     const currentExtensionSocket = extensionSocket;
     extensionSocket = null;
     extensionReady = false;
+    extensionBrowserJobReady = false;
 
     server.close(() => {
         clearTimeout(peerReconnectTimer);
@@ -287,7 +318,10 @@ const beginHandoff = async (targetState) => {
         handoffTarget = null;
         bridgeTransitioning = false;
         for (const state of peerStates) {
-            sendPeerControl(state, { type: 'peer_handoff_cancelled', controlProtocolVersion: CONTROL_PROTOCOL_VERSION });
+            sendPeerControl(state, {
+                type: 'peer_handoff_cancelled',
+                controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+            });
         }
         return;
     }
@@ -336,6 +370,7 @@ const handlePeerMessage = async (state, rawMessage) => {
         sendPeerControl(state, {
             type: 'peer_welcome',
             extensionConnected: extensionReady,
+            browserJobSupported: extensionBrowserJobReady,
             controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
             extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
             bridgeGeneration: BRIDGE_GENERATION,
@@ -353,20 +388,56 @@ const handlePeerMessage = async (state, rawMessage) => {
         return;
     }
     if (
+        message?.type === 'peer_browser_job_authorize' &&
+        typeof message.requestId === 'string' &&
+        typeof message.token === 'string' &&
+        message.token.length > 0 &&
+        message.token.length <= 128 * 1024
+    ) {
+        try {
+            const authorization = await requestBrowserJobAuthorization(message.token);
+            sendWs(state.socket, {
+                type: 'peer_browser_job_authorize_result',
+                requestId: message.requestId,
+                authorization,
+            });
+        } catch (error) {
+            sendWs(state.socket, {
+                type: 'peer_browser_job_authorize_result',
+                requestId: message.requestId,
+                error: error.message,
+            });
+        }
+        return;
+    }
+    if (
         message?.type !== 'peer_wb_fetch' ||
         typeof message.requestId !== 'string' ||
         typeof message.url !== 'string' ||
-        !isAllowedWbUrl(message.url) ||
+        (message.authorizationId === undefined && !isAllowedWbUrl(message.url)) ||
+        (message.authorizationId !== undefined && typeof message.authorizationId !== 'string') ||
         !validTimeout(message.timeout)
     ) {
-        sendWs(state.socket, { type: 'peer_wb_fetch_result', requestId: message?.requestId, error: 'Invalid peer request' });
+        sendWs(state.socket, {
+            type: 'peer_wb_fetch_result',
+            requestId: message?.requestId,
+            error: 'Invalid peer request',
+        });
         return;
     }
     try {
-        const response = await requestWbFetch(message.url, message.timeout);
-        sendWs(state.socket, { type: 'peer_wb_fetch_result', requestId: message.requestId, response });
+        const response = await requestWbFetch(message.url, message.timeout, message.authorizationId);
+        sendWs(state.socket, {
+            type: 'peer_wb_fetch_result',
+            requestId: message.requestId,
+            response,
+        });
     } catch (error) {
-        sendWs(state.socket, { type: 'peer_wb_fetch_result', requestId: message.requestId, error: error.message });
+        sendWs(state.socket, {
+            type: 'peer_wb_fetch_result',
+            requestId: message.requestId,
+            error: error.message,
+        });
     }
 };
 
@@ -392,14 +463,9 @@ server.on('upgrade', (request, socket) => {
         .digest('base64');
 
     socket.write(
-        [
-            'HTTP/1.1 101 Switching Protocols',
-            'Upgrade: websocket',
-            'Connection: Upgrade',
-            `Sec-WebSocket-Accept: ${accept}`,
-            '',
-            '',
-        ].join('\r\n')
+        ['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${accept}`, '', ''].join(
+            '\r\n'
+        )
     );
     const state = {
         buffer: Buffer.alloc(0),
@@ -418,7 +484,9 @@ server.on('upgrade', (request, socket) => {
         if (extensionSocket === socket) {
             extensionSocket = null;
             extensionReady = false;
+            extensionBrowserJobReady = false;
             rejectPendingRequests('Extension disconnected before returning the WB response');
+            rejectPendingAuthorizations('Extension disconnected before authorizing the browser job');
             log('extension disconnected');
             broadcastPeerStatus();
         }
@@ -471,8 +539,8 @@ const waitForBridgeTransition = async (timeout) => {
     }
 };
 
-const requestWbFetch = (url, timeout = REQUEST_TIMEOUT_MS) => {
-    const dedupeKey = `${url}\n${timeout}`;
+const requestWbFetch = (url, timeout = REQUEST_TIMEOUT_MS, authorizationId) => {
+    const dedupeKey = `${authorizationId || ''}\n${url}\n${timeout}`;
     const existing = inFlightFetches.get(dedupeKey);
     if (existing) {
         return existing;
@@ -490,9 +558,24 @@ const requestWbFetch = (url, timeout = REQUEST_TIMEOUT_MS) => {
             pendingRequests.set(requestId, { resolve, reject, timer });
             try {
                 if (extensionReady) {
-                    sendWs(extensionSocket, localMessage(requestId, 'wb_fetch', { url, timeout }));
+                    sendWs(
+                        extensionSocket,
+                        localMessage(requestId, 'wb_fetch', {
+                            url,
+                            timeout,
+                            ...(authorizationId ? { authorizationId } : {}),
+                        })
+                    );
                 } else if (peerReady && peerSocket?.readyState === WebSocket.OPEN) {
-                    peerSocket.send(JSON.stringify({ type: 'peer_wb_fetch', requestId, url, timeout }));
+                    peerSocket.send(
+                        JSON.stringify({
+                            type: 'peer_wb_fetch',
+                            requestId,
+                            url,
+                            timeout,
+                            authorizationId,
+                        })
+                    );
                 } else {
                     throw new Error('The e-Comet Chrome extension is not connected');
                 }
@@ -510,6 +593,40 @@ const requestWbFetch = (url, timeout = REQUEST_TIMEOUT_MS) => {
     );
     return request;
 };
+
+const requestBrowserJobAuthorization = (token, timeout = REQUEST_TIMEOUT_MS) =>
+    new Promise((resolve, reject) => {
+        const requestId = randomUUID();
+        const timer = setTimeout(() => {
+            pendingAuthorizations.delete(requestId);
+            reject(new Error(`Browser job authorization timed out after ${timeout} ms`));
+        }, timeout);
+        pendingAuthorizations.set(requestId, { resolve, reject, timer });
+        try {
+            if (extensionReady && !extensionBrowserJobReady) {
+                throw new Error('The e-Comet Chrome extension must be updated to support signed browser jobs');
+            }
+            if (extensionBrowserJobReady) {
+                sendWs(extensionSocket, localMessage(requestId, 'browser_job_authorize', { token }));
+            } else if (peerReady && !peerExtensionBrowserJobReady) {
+                throw new Error('The e-Comet Chrome extension must be updated to support signed browser jobs');
+            } else if (peerExtensionBrowserJobReady && peerSocket?.readyState === WebSocket.OPEN) {
+                peerSocket.send(
+                    JSON.stringify({
+                        type: 'peer_browser_job_authorize',
+                        requestId,
+                        token,
+                    })
+                );
+            } else {
+                throw new Error('The e-Comet Chrome extension is not connected');
+            }
+        } catch (error) {
+            clearTimeout(timer);
+            pendingAuthorizations.delete(requestId);
+            reject(error);
+        }
+    });
 
 const connectToPrimaryBridge = () => {
     if (peerSocket && (peerSocket.readyState === WebSocket.OPEN || peerSocket.readyState === WebSocket.CONNECTING)) {
@@ -567,11 +684,13 @@ const connectToPrimaryBridge = () => {
             const wasReady = peerReady;
             peerReady = true;
             peerExtensionReady = message.extensionConnected === true;
+            peerExtensionBrowserJobReady = message.browserJobSupported === true;
             finishBridgeTransitionIfRoutable();
             if (!wasReady) {
                 log(
-                    `connected to primary local bridge generation ${message.bridgeGeneration} version ${message.bridgeVersion || 'unknown'} ` +
-                        `at ${HOST}:${PORT}`
+                    `connected to primary local bridge generation ${message.bridgeGeneration} version ${
+                        message.bridgeVersion || 'unknown'
+                    } ` + `at ${HOST}:${PORT}`
                 );
             }
             return;
@@ -580,11 +699,21 @@ const connectToPrimaryBridge = () => {
             const wasReady = peerReady;
             peerReady = true;
             peerExtensionReady = message.extensionConnected === true;
+            peerExtensionBrowserJobReady = message.browserJobSupported === true;
             finishBridgeTransitionIfRoutable();
             if (!wasReady) {
                 const versionLabel = message.controlProtocolVersion ? `generation ${message.bridgeGeneration}` : 'legacy generation';
                 log(`connected to primary local bridge ${versionLabel} at ${HOST}:${PORT}`);
             }
+            return;
+        }
+        if (message?.type === 'peer_browser_job_authorize_result' && typeof message.requestId === 'string') {
+            const pending = pendingAuthorizations.get(message.requestId);
+            if (!pending) return;
+            pendingAuthorizations.delete(message.requestId);
+            clearTimeout(pending.timer);
+            if (message.error) pending.reject(new Error(message.error));
+            else pending.resolve(message.authorization);
             return;
         }
         if (message?.type !== 'peer_wb_fetch_result' || typeof message.requestId !== 'string') return;
@@ -602,8 +731,10 @@ const connectToPrimaryBridge = () => {
         peerSocket = null;
         peerReady = false;
         peerExtensionReady = false;
+        peerExtensionBrowserJobReady = false;
         bridgeTransitioning = true;
         rejectPendingRequests('Primary local bridge disconnected before returning the WB response');
+        rejectPendingAuthorizations('Primary local bridge disconnected before authorizing the browser job');
         clearTimeout(peerReconnectTimer);
         const retryDelay = shouldTakeover ? HANDOFF_DRAIN_POLL_MS : Math.max(500, listenerYieldUntil - Date.now());
         peerReconnectTimer = setTimeout(startBridgeListener, retryDelay);
@@ -650,6 +781,7 @@ const handleMcpMessage = async (message) => {
             textResult({
                 ok: true,
                 extensionConnected: effectiveExtensionReady(),
+                browserJobSupported: effectiveBrowserJobReady(),
                 bridgeRole: server.listening ? 'primary' : peerReady ? 'secondary' : 'disconnected',
                 bridgeTransitioning,
                 bridgeVersion: BRIDGE_VERSION,
@@ -661,6 +793,56 @@ const handleMcpMessage = async (message) => {
                 resultDirectory: RESULT_DIR,
             })
         );
+        return;
+    }
+
+    if (params?.name === 'execute_browser_job') {
+        const triggerUrl = params.arguments?.triggerUrl;
+        const productLimitTotal = params.arguments?.productLimitTotal ?? DEFAULT_RETURNED_PRODUCTS;
+        const productNmIds = params.arguments?.productNmIds;
+        if (
+            typeof triggerUrl !== 'string' ||
+            triggerUrl.length === 0 ||
+            triggerUrl.length > 128 * 1024 ||
+            !validProductProjection(productLimitTotal, productNmIds)
+        ) {
+            mcpResult(id, textResult({ ok: false, error: 'Invalid execute_browser_job arguments' }, true));
+            return;
+        }
+        if (!effectiveExtensionReady()) {
+            mcpResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
+            return;
+        }
+
+        let writer;
+        try {
+            const token = extractBrowserJobToken(triggerUrl);
+            const authorization = await requestBrowserJobAuthorization(token);
+            if (
+                !authorization ||
+                typeof authorization.authorizationId !== 'string' ||
+                typeof authorization.jobType !== 'string' ||
+                !authorization.job ||
+                typeof authorization.job !== 'object'
+            ) {
+                throw new Error('Extension returned an invalid browser job authorization');
+            }
+            writer = await createJobWriter(authorization.job.jobId);
+            const result = await executeAuthorizedBrowserJob({
+                authorization,
+                requestWbFetch,
+                writer,
+                productLimitTotal,
+                productNmIds,
+            });
+            await writer.close();
+            mcpResult(id, textResult({ ...result, resultPath: writer.resultPath }, !result.ok));
+        } catch (error) {
+            if (writer) {
+                await writer.close().catch(() => undefined);
+            }
+            mcpResult(id, textResult({ ok: false, error: error.message }, true));
+        }
         return;
     }
 
@@ -718,7 +900,11 @@ const handleMcpMessage = async (message) => {
             );
             const fetched = await runWithConcurrency(units, SEARCH_CONCURRENCY, async (unit) => {
                 try {
-                    const { url, response } = await requestWbFetchWithFallback(requestWbFetch, buildSearchUrls(unit.query, unit.page), timeout);
+                    const { url, response } = await requestWbFetchWithFallback(
+                        requestWbFetch,
+                        buildSearchUrls(unit.query, unit.page),
+                        timeout
+                    );
                     await writer.append({ jobId, ...unit, url, response });
                     return {
                         ...unit,
@@ -755,7 +941,8 @@ const handleMcpMessage = async (message) => {
                             products: selected,
                         };
                         if (!unit.ok) {
-                            page.error = unit.error || unit.response?.error || unit.response?.data?.statusText || 'WB search request failed';
+                            page.error =
+                                unit.error || unit.response?.error || unit.response?.data?.statusText || 'WB search request failed';
                         }
                         globalOffset += products.length;
                         return page;
@@ -829,11 +1016,17 @@ const handleMcpMessage = async (message) => {
         for (const article of rawArticles) {
             const current = articleMap.get(article.nmId);
             if (!current) {
-                articleMap.set(article.nmId, { nmId: article.nmId, pages: article.pages });
+                articleMap.set(article.nmId, {
+                    nmId: article.nmId,
+                    pages: article.pages,
+                });
             } else if (current.pages === undefined || article.pages === undefined) {
                 articleMap.set(article.nmId, { nmId: article.nmId, pages: undefined });
             } else {
-                articleMap.set(article.nmId, { nmId: article.nmId, pages: Math.max(current.pages, article.pages) });
+                articleMap.set(article.nmId, {
+                    nmId: article.nmId,
+                    pages: Math.max(current.pages, article.pages),
+                });
             }
         }
         const articles = [...articleMap.values()];
@@ -876,7 +1069,11 @@ const handleMcpMessage = async (message) => {
                         ? Math.min(discoveredPages || 1, MAX_RECOMMENDATION_PAGES)
                         : Math.min(article.pages, discoveredPages || article.pages);
                 for (let page = 2; page <= requestedPages; page += 1) {
-                    remainingUnits.push({ nmId: firstPage.nmId, pages: article.pages, page });
+                    remainingUnits.push({
+                        nmId: firstPage.nmId,
+                        pages: article.pages,
+                        page,
+                    });
                 }
             }
             const remainingPages = await runWithConcurrency(remainingUnits, RECOMMENDATION_CONCURRENCY, fetchPage);
@@ -886,9 +1083,7 @@ const handleMcpMessage = async (message) => {
             let returnedProducts = 0;
             const summaries = articles.map((article) => {
                 let globalOffset = 0;
-                const articleUnits = fetched
-                    .filter((unit) => unit.nmId === article.nmId)
-                    .sort((left, right) => left.page - right.page);
+                const articleUnits = fetched.filter((unit) => unit.nmId === article.nmId).sort((left, right) => left.page - right.page);
                 const first = articleUnits[0];
                 const firstProducts = responseProducts(first?.response);
                 const overallTotal = numberOrUndefined(first?.response?.data?.body?.total);
@@ -1098,19 +1293,26 @@ const handleMcpMessage = async (message) => {
     const url = params.arguments?.url;
     const timeout = params.arguments?.timeout ?? REQUEST_TIMEOUT_MS;
     if (typeof url !== 'string' || !isAllowedWbUrl(url)) {
-        mcpResult(id, textResult({ ok: false, error: 'Only approved Wildberries endpoint families are allowed' }, true));
-        return;
-    }
-    if (
-        typeof timeout !== 'number' ||
-        !Number.isFinite(timeout) ||
-        timeout < MIN_REQUEST_TIMEOUT_MS ||
-        timeout > MAX_REQUEST_TIMEOUT_MS
-    ) {
         mcpResult(
             id,
             textResult(
-                { ok: false, error: `timeout must be a number between ${MIN_REQUEST_TIMEOUT_MS} and ${MAX_REQUEST_TIMEOUT_MS} ms` },
+                {
+                    ok: false,
+                    error: 'Only approved Wildberries endpoint families are allowed',
+                },
+                true
+            )
+        );
+        return;
+    }
+    if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout < MIN_REQUEST_TIMEOUT_MS || timeout > MAX_REQUEST_TIMEOUT_MS) {
+        mcpResult(
+            id,
+            textResult(
+                {
+                    ok: false,
+                    error: `timeout must be a number between ${MIN_REQUEST_TIMEOUT_MS} and ${MAX_REQUEST_TIMEOUT_MS} ms`,
+                },
                 true
             )
         );
@@ -1197,6 +1399,7 @@ const startBridgeListener = () => {
             peerSocket = null;
             peerReady = false;
             peerExtensionReady = false;
+            peerExtensionBrowserJobReady = false;
             takeoverGranted = false;
             listenerYieldUntil = 0;
             handoffTarget = null;

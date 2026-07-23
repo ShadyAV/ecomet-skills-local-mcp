@@ -1,6 +1,6 @@
 {
   "name": "e-comet-skills",
-  "version": "2026.7.6+codex.20260722144655",
+  "version": "2026.7.7",
   "description": "Public WB and e-Comet agent skills with helper scripts.",
   "author": {
     "name": "e-Comet",
@@ -12,6 +12,10 @@
   "keywords": ["agent-skills", "wildberries", "wb", "e-comet"],
   "skills": "./skills/",
   "mcpServers": {
+    "e-comet": {
+      "type": "http",
+      "url": "https://mcp.e-comet.io/mcp"
+    },
     "e-comet-local": {
       "type": "stdio",
       "command": "node",

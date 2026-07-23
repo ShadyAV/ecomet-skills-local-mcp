@@ -1,15 +1,23 @@
 # Changelog
 
+## [2026.7.7] - 2026-07-23
+
+### Changed
+- Card, search, and recommendation skills now obtain a short-lived signed `browser_job` JWT and pass it unchanged to
+  the bundled local MCP. The extension verifies the signature, expiry, account UUID, job type, and exact WB URLs.
+- WB response bodies remain local. Direct unsigned WB fetch tools are no longer advertised, and the extension rejects
+  local `wb_fetch` requests without a signed browser-job authorization.
+
 ## [2026.7.6] - 2026-07-13
 
 ### Added
 - Added the `wb-recommendations-by-product` skill for live Wildberries recommendation shelves by source article.
 
 ### Changed
-- Replaced the remote authenticated MCP with a bundled local STDIO server that communicates with the e-Comet Chrome
-  extension over loopback and keeps full WB responses on the user's computer. The plugin ships its dependency-free
-  JavaScript source instead of distributing a SEA executable. Plugin manifests launch the same source directly with
-  the `node` command; Node.js 22+ is required.
+- Added a bundled local STDIO server alongside the existing remote authenticated MCP. The local server communicates
+  with the e-Comet Chrome extension over loopback and keeps full WB responses on the user's computer. The plugin ships
+  its dependency-free JavaScript source instead of distributing a SEA executable. Plugin manifests launch the same
+  source directly with the `node` command; Node.js 22+ is required.
 - Added generation-aware primary handoff so a newer MCP release drains active requests, takes over the fixed loopback
   port, and reconnects existing conversations and the extension without requiring a desktop-agent restart.
 

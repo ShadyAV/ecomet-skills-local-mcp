@@ -3,22 +3,27 @@
 Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` command. The server has no npm runtime
 dependencies; all required source modules are included in this directory. Node.js 22+ is required.
 
-The canonical source and tests live in the separate `ecomet-local-mcp` repository. This plugin contains a release
-snapshot of its `src/` directory.
+The canonical source and tests live under `e-comet-local-mcp/` in the private skills repository. This plugin contains a
+release snapshot of its `src/` directory.
 
 The MCP listens only on `127.0.0.1:17361`, and the extension connects automatically while local access is enabled.
-There is no pairing flow in the MVP. Full WB responses are stored in `%LOCALAPPDATA%\e-comet\local-agent`; MCP tool
-results contain only compact summaries and local paths.
+There is no pairing flow in the MVP. Full WB responses are stored in the platform-standard user data directory; MCP
+tool results contain only compact summaries and local paths.
 
-Typed local tools:
+Full responses use the platform-standard user data directory: `%LOCALAPPDATA%\e-comet\local-agent` on Windows,
+`~/Library/Application Support/e-comet/local-agent` on macOS, and
+`${XDG_DATA_HOME:-~/.local/share}/e-comet/local-agent` on Linux. `ECOMET_LOCAL_AGENT_RESULT_DIR` overrides this path.
 
-- `wb_product_card` — card price, rating, and stock for 1–20 articles;
-- `wb_search_by_query` — up to 50 search pages with compact top or article-position filtering;
-- `wb_recommendations_by_product` — bounded or fully discovered recommendation shelves;
+Local tools:
+
+- `execute_browser_job` — executes the short-lived signed `trigger_url` returned by the remote e-Comet `browser_job`;
+- `local_bridge_status` — reports whether the extension is connected;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
 
-The first three tools send WB requests only through the user's local extension session. WB response bodies do not pass
-through e-Comet backend services.
+For card, search, and recommendation skills the agent first sends only the small task descriptor to remote `browser_job`,
+then passes its opaque JWT to `execute_browser_job`. The extension verifies the RS256 signature, expiry, account UUID,
+job type, and exact derived WB URLs. It rejects direct `wb_fetch` calls without that authorization. WB response bodies
+remain on the user's computer and do not pass through e-Comet backend services.
 
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
