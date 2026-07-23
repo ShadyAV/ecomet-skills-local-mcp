@@ -5,7 +5,7 @@ title: Фото товаров WB
 description: "Находит доступные URL фото товаров Wildberries по артикулам WB. Используйте, когда пользователь просит картинки WB, фото артикула, URL фото по nm_id или пакетную выгрузку ссылок."
 skill_schema_version: 1
 introduced_in: "2026.6.0"
-updated_in: "2026.7.7"
+updated_in: "2026.7.8"
 status: stable
 ---
 

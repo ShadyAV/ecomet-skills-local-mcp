@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026.7.8] - 2026-07-23
+
+### Changed
+- The local bridge now reports MCP `instructions` explaining that the remote e-Comet server connects asynchronously,
+  so agents retry tool discovery instead of falsely reporting missing authorization at session start.
+- Local tools wait up to 15 seconds (`ECOMET_EXTENSION_CONNECT_GRACE_MS`) for the extension to connect before
+  returning "extension is not connected".
+- Card, search, and recommendation skills instruct agents to retry tool discovery before reporting authorization
+  problems.
+
 ## [2026.7.7] - 2026-07-23
 
 ### Changed

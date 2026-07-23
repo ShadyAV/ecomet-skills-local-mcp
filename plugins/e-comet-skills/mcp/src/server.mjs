@@ -10,6 +10,7 @@ import {
     CONTROL_PROTOCOL_VERSION,
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
+    EXTENSION_CONNECT_GRACE_MS,
     EXTENSION_PATH as PATH,
     EXTENSION_PROTOCOL_VERSION,
     HANDOFF_DRAIN_POLL_MS,
@@ -539,7 +540,18 @@ const waitForBridgeTransition = async (timeout) => {
     }
 };
 
-const requestWbFetch = (url, timeout = REQUEST_TIMEOUT_MS, authorizationId) => {
+const waitForExtensionReady = async (graceMs = EXTENSION_CONNECT_GRACE_MS) => {
+    const deadline = Date.now() + graceMs;
+    while (!effectiveExtensionReady()) {
+        if (Date.now() >= deadline) {
+            return false;
+        }
+        await delay(HANDOFF_DRAIN_POLL_MS);
+    }
+    return true;
+};
+
+const requestWbFetch =(url, timeout = REQUEST_TIMEOUT_MS, authorizationId) => {
     const dedupeKey = `${authorizationId || ''}\n${url}\n${timeout}`;
     const existing = inFlightFetches.get(dedupeKey);
     if (existing) {
@@ -759,6 +771,12 @@ const handleMcpMessage = async (message) => {
             protocolVersion: params?.protocolVersion || '2025-06-18',
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: 'e-comet-local-bridge', version: BRIDGE_VERSION },
+            instructions: [
+                'e-Comet local bridge for signed Wildberries browser jobs.',
+                'The remote e-comet MCP server (tool browser_job) connects asynchronously via OAuth: during roughly the first 30 seconds of a session it may look "still connecting" or "requires authentication" even though the user is already authorized.',
+                'Never tell the user authorization is missing based on that initial state. Instead re-run tool discovery after a few seconds, up to 3 attempts, and only report an authorization problem if browser_job is still unavailable after the retries.',
+                'The e-Comet Chrome extension reconnects to this bridge with backoff; local tools already wait up to 15 seconds for it. If a tool still returns "extension is not connected" right after session start, retry the call once before asking the user to open Chrome.',
+            ].join('\n'),
         });
         return;
     }
@@ -809,7 +827,7 @@ const handleMcpMessage = async (message) => {
             mcpResult(id, textResult({ ok: false, error: 'Invalid execute_browser_job arguments' }, true));
             return;
         }
-        if (!effectiveExtensionReady()) {
+        if (!(await waitForExtensionReady())) {
             mcpResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
             return;
         }
@@ -883,7 +901,7 @@ const handleMcpMessage = async (message) => {
             );
             return;
         }
-        if (!effectiveExtensionReady()) {
+        if (!(await waitForExtensionReady())) {
             mcpResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
             return;
         }
@@ -1007,7 +1025,7 @@ const handleMcpMessage = async (message) => {
             );
             return;
         }
-        if (!effectiveExtensionReady()) {
+        if (!(await waitForExtensionReady())) {
             mcpResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
             return;
         }
@@ -1245,7 +1263,7 @@ const handleMcpMessage = async (message) => {
             );
             return;
         }
-        if (!effectiveExtensionReady()) {
+        if (!(await waitForExtensionReady())) {
             mcpResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
             return;
         }
@@ -1318,7 +1336,7 @@ const handleMcpMessage = async (message) => {
         );
         return;
     }
-    if (!effectiveExtensionReady()) {
+    if (!(await waitForExtensionReady())) {
         mcpResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
         return;
     }
