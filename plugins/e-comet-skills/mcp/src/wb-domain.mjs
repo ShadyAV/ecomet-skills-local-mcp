@@ -1,5 +1,6 @@
 import {
     IMAGE_BASKET_BOUNDS,
+    RECOMMENDATION_PAGE_SIZE,
     IMAGE_CONCURRENCY,
     MAX_PRODUCT_ARTICLES,
     MAX_REQUEST_TIMEOUT_MS,
@@ -146,11 +147,11 @@ export const validProductProjection = (productLimitTotal, productNmIds) =>
             productNmIds.every((nmId) => Number.isSafeInteger(nmId) && nmId > 0) &&
             new Set(productNmIds).size === productNmIds.length));
 
-export const recommendationTotalPages = (total, firstPageCount) => {
-    if (!Number.isInteger(total) || total < 0 || !Number.isInteger(firstPageCount) || firstPageCount <= 0) {
+export const recommendationTotalPages = (total) => {
+    if (!Number.isInteger(total) || total < 0) {
         return null;
     }
-    return Math.max(1, Math.ceil(total / firstPageCount));
+    return Math.max(1, Math.ceil(total / RECOMMENDATION_PAGE_SIZE));
 };
 
 const basketNumberForVol = (vol) => {
@@ -181,7 +182,7 @@ export const imageExists = async (url, timeout) => {
     }
 };
 
-export const discoverImageBasket = async (nmId, maxBasket, size, timeout) => {
+export const discoverImageBasket = async (nmId, maxBasket, size, timeout, probe = imageExists) => {
     const vol = Math.floor(nmId / 100000);
     const predicted = basketNumberForVol(vol);
     const candidates = predicted
@@ -192,7 +193,7 @@ export const discoverImageBasket = async (nmId, maxBasket, size, timeout) => {
         const matches = await Promise.all(
             batch.map(async (basket) => {
                 const baseUrl = imageBaseUrl(nmId, basket);
-                return (await imageExists(`${baseUrl}/${size}/1.webp`, timeout)) ? { basket, baseUrl } : null;
+                return (await probe(`${baseUrl}/${size}/1.webp`, timeout)) ? { basket, baseUrl } : null;
             })
         );
         const match = matches.find(Boolean);
@@ -215,6 +216,10 @@ export const summarizeProduct = (nmId, response) => {
     }
 
     const sizes = Array.isArray(product.sizes) ? product.sizes : [];
+    const warehouseNames =
+        response?.warehouseNames && typeof response.warehouseNames === 'object' && !Array.isArray(response.warehouseNames)
+            ? response.warehouseNames
+            : {};
     const byWarehouseMap = new Map();
     const bySize = [];
     let quantityTotal = 0;
@@ -230,6 +235,10 @@ export const summarizeProduct = (nmId, response) => {
             sizeQuantity += qty;
             warehouses.add(wh);
             const current = byWarehouseMap.get(wh) || { wh, qty: 0, rows: 0 };
+            const warehouseName = typeof warehouseNames[String(wh)] === 'string' ? warehouseNames[String(wh)].trim() : '';
+            if (warehouseName && !current.warehouse) {
+                current.warehouse = warehouseName;
+            }
             current.qty += qty;
             current.rows += 1;
             byWarehouseMap.set(wh, current);
@@ -240,7 +249,7 @@ export const summarizeProduct = (nmId, response) => {
             warehouses: warehouses.size,
         });
     }
-    const price = product.sizes?.[0]?.price || product.price;
+    const price = sizes.find((size) => size?.price)?.price || product.price;
 
     return {
         nmId: numberOrUndefined(product.id) || nmId,

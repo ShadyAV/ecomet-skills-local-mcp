@@ -90,19 +90,37 @@ export const createMcpMessageHandler = ({
         const jobId = randomUUID();
         try {
             const writer = await createJobWriter(jobId);
+            let activeImageProbes = 0;
+            const queuedImageProbes = [];
+            const limitedImageExists = async (url, probeTimeout) => {
+                if (activeImageProbes >= IMAGE_CONCURRENCY) {
+                    await new Promise((resolve) => queuedImageProbes.push(resolve));
+                }
+                activeImageProbes += 1;
+                try {
+                    return await imageExists(url, probeTimeout);
+                } finally {
+                    activeImageProbes -= 1;
+                    queuedImageProbes.shift()?.();
+                }
+            };
             const products = await runWithConcurrency(nmIds, IMAGE_CONCURRENCY, async (nmId) => {
-                const discovered = await discoverImageBasket(nmId, maxBasket, size, timeout);
+                const discovered = await discoverImageBasket(nmId, maxBasket, size, timeout, limitedImageExists);
                 if (!discovered) {
                     const result = { nmId, status: 'not_found', imageUrls: [] };
                     await writer.append(result);
                     return result;
                 }
-                const imageUrls = [];
-                for (let photo = 1; photo <= maxPhotos; photo += 1) {
-                    const url = `${discovered.baseUrl}/${size}/${photo}.webp`;
-                    if (!(await imageExists(url, timeout))) break;
-                    imageUrls.push(url);
-                }
+                const imageUrls = (
+                    await runWithConcurrency(
+                        Array.from({ length: maxPhotos }, (_, index) => index + 1),
+                        IMAGE_CONCURRENCY,
+                        async (photo) => {
+                            const url = `${discovered.baseUrl}/${size}/${photo}.webp`;
+                            return (await limitedImageExists(url, timeout)) ? url : null;
+                        }
+                    )
+                ).filter(Boolean);
                 const result = {
                     nmId,
                     status: imageUrls.length > 0 ? 'ok' : 'not_found',

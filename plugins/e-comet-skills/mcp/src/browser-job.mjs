@@ -192,9 +192,9 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
         }
     });
 
-    let returnedProducts = 0;
     const queries = job.queries.map(([query, pagesRequested], queryIndex) => {
         let globalOffset = 0;
+        let returnedProducts = 0;
         const pages = fetched
             .filter((unit) => unit.queryIndex === queryIndex)
             .sort((left, right) => left.page - right.page)
@@ -344,10 +344,13 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
         fetchPage
     );
     const remainingUnits = [];
+    const autoDepthCapped = new Set();
     for (const firstPage of firstPages) {
-        const products = responseProducts(firstPage.response);
-        const discoveredPages = recommendationTotalPages(numberOrUndefined(firstPage.response?.data?.body?.total), products.length);
+        const discoveredPages = recommendationTotalPages(numberOrUndefined(firstPage.response?.data?.body?.total));
         const article = articles.find((item) => item.nmId === firstPage.nmId);
+        if (article.pages === undefined && discoveredPages !== null && discoveredPages > MAX_RECOMMENDATION_PAGES) {
+            autoDepthCapped.add(article.nmId);
+        }
         const requestedPages =
             article.pages === undefined
                 ? Math.min(discoveredPages || 1, MAX_RECOMMENDATION_PAGES)
@@ -359,13 +362,12 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
     const remainingPages = await runWithConcurrency(remainingUnits, RECOMMENDATION_CONCURRENCY, fetchPage);
     const fetched = [...firstPages, ...remainingPages];
 
-    let returnedProducts = 0;
     const summaries = articles.map((article) => {
         let globalOffset = 0;
+        let returnedProducts = 0;
         const articleUnits = fetched.filter((unit) => unit.nmId === article.nmId).sort((left, right) => left.page - right.page);
-        const firstProducts = responseProducts(articleUnits[0]?.response);
         const overallTotal = numberOrUndefined(articleUnits[0]?.response?.data?.body?.total);
-        const discoveredPages = recommendationTotalPages(overallTotal, firstProducts.length);
+        const discoveredPages = recommendationTotalPages(overallTotal);
         const pages = articleUnits.map((unit) => {
             const products = responseProducts(unit.response);
             const remaining = Math.max(0, projection.productLimitTotal - returnedProducts);
@@ -399,13 +401,17 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
             totalPages: discoveredPages,
             productsSeen: pages.reduce((total, page) => total + page.total, 0),
             productsReturned: pages.reduce((total, page) => total + page.products.length, 0),
+            truncatedByLocalLimit: autoDepthCapped.has(article.nmId),
             pages,
         };
     });
     const succeeded = fetched.filter((unit) => unit.ok).length;
+    const truncatedByLocalLimit = autoDepthCapped.size > 0;
     return {
         ok: succeeded > 0,
-        status: normalizeStatus(succeeded, fetched.length),
+        status: truncatedByLocalLimit && succeeded === fetched.length ? 'partial' : normalizeStatus(succeeded, fetched.length),
+        complete: !truncatedByLocalLimit && succeeded === fetched.length,
+        truncatedByLocalLimit,
         pagesRequested: fetched.length,
         pagesSucceeded: succeeded,
         pagesFailed: fetched.length - succeeded,

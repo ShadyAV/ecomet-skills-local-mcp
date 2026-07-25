@@ -49,9 +49,12 @@ status: experimental
 - контент: `vendorCode`, `subject`, `rootSubject`, `colors`, `options`, `description`;
 - состояние: `status`, `ok`, `error`, `units`.
 
-`quantity.byWarehouse` содержит идентификатор `wh`, количество `qty` и число строк `rows`. Имя склада новый локальный flow пока не возвращает — показывайте `wh <id>`, не придумывайте название.
+`quantity.byWarehouse` содержит идентификатор `wh`, имя склада `warehouse`, количество `qty` и число строк `rows`.
+Имя добавляется best-effort из локального справочника расширения; если его нет, показывайте `wh <id>`, не придумывайте название.
 
 `resultPath` не является кэшем. Читайте только путь, возвращённый текущим `execute_browser_job`, и только если компактного `products` не хватило для ответа. Чтение `resultPath` не требует повторного `browser_job` или `execute_browser_job`. Не ищите и не переиспользуйте файлы прошлых пользовательских заданий.
+
+Каждая строка NDJSON в `resultPath` имеет вид `{ jobId, nmId, key, url, response }`. Исходное тело WB находится в `response.data.body`; локальные имена складов, если доступны, — в `response.warehouseNames`.
 
 ## Ответ пользователю
 

@@ -10,6 +10,15 @@ The MCP listens only on `127.0.0.1:17361`, and the extension connects automatica
 There is no pairing flow in the MVP. Full WB responses are stored in the platform-standard user data directory; MCP
 tool results contain only compact summaries and local paths.
 
+Each result file is UTF-8 NDJSON with one fetched unit per line:
+
+- product card: `{ jobId, nmId, key, url, response }`;
+- search: `{ jobId, queryIndex, query, page, url, response }`;
+- recommendations: `{ jobId, nmId, page, url, response }`.
+
+The original WB payload is at `response.data.body`. Product-card responses may additionally contain
+`response.warehouseNames`, a best-effort map of warehouse ID to the locally known display name.
+
 Full responses use the platform-standard user data directory: `%LOCALAPPDATA%\e-comet\local-agent` on Windows,
 `~/Library/Application Support/e-comet/local-agent` on macOS, and
 `${XDG_DATA_HOME:-~/.local/share}/e-comet/local-agent` on Linux. `ECOMET_LOCAL_AGENT_RESULT_DIR` overrides this path.

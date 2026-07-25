@@ -40,6 +40,8 @@ status: experimental
 
 `resultPath` не является кэшем. Читайте только путь, возвращённый текущим `execute_browser_job`, и только если компактного `queries` не хватило для ответа. Чтение `resultPath` не требует повторного `browser_job` или `execute_browser_job`. Не ищите и не переиспользуйте файлы прошлых пользовательских заданий.
 
+Каждая строка NDJSON в `resultPath` имеет вид `{ jobId, queryIndex, query, page, url, response }`. Исходное тело WB находится в `response.data.body`.
+
 ## Глубина
 
 - Одна страница обычно содержит около 100 позиций; для обычного топа достаточно 1 страницы.

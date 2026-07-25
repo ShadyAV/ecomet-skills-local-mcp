@@ -1,7 +1,7 @@
 {
   "name": "e-comet-skills",
   "version": "2026.7.6",
-  "description": "Public WB and e-Comet agent skills with helper scripts.",
+  "description": "WB analytics and live browser data through e-Comet MCP servers.",
   "author": {
     "name": "e-Comet",
     "url": "https://e-comet.io/"
@@ -26,7 +26,7 @@
   "interface": {
     "displayName": "e-Comet Skills",
     "shortDescription": "WB and e-Comet agent skills",
-    "longDescription": "Public WB and e-Comet agent skills with helper scripts.",
+    "longDescription": "Analyze e-Comet account data and get authorized live WB data through the user's browser.",
     "developerName": "e-Comet",
     "category": "Developer Tools",
     "capabilities": ["Interactive"],
