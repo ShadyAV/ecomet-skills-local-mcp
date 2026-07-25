@@ -1,7 +1,13 @@
 import {
     DEFAULT_RETURNED_PRODUCTS,
+    MAX_BROWSER_JOB_TOKEN_BYTES,
+    MAX_PRODUCT_CARD_ARTICLES,
+    MAX_PRODUCT_CARD_REQUEST_UNITS,
+    MAX_RECOMMENDATION_ARTICLES,
     MAX_RECOMMENDATION_PAGES,
     MAX_RETURNED_PRODUCTS,
+    MAX_SEARCH_PAGES,
+    MAX_SEARCH_QUERIES,
     PRODUCT_CARD_CONCURRENCY,
     RECOMMENDATION_CONCURRENCY,
     REQUEST_TIMEOUT_MS,
@@ -16,16 +22,102 @@ import {
     responseProducts,
     runWithConcurrency,
     summarizeProduct,
+    validTimeout,
 } from './wb-domain.mjs';
 
-const MAX_TRIGGER_URL_LENGTH = 128 * 1024;
+const validJobTimeout = (job) => job.timeout === undefined || validTimeout(job.timeout);
+
+export const validateAuthorizedJobLimits = (authorization) => {
+    const job = authorization?.job;
+    if (!job || typeof job !== 'object' || Array.isArray(job) || !validJobTimeout(job)) {
+        throw new Error('Browser job descriptor or timeout is invalid');
+    }
+
+    if (authorization.jobType === 'search_by_query') {
+        const queries = job.queries;
+        const validQueries =
+            job.type === 'wb-search-by-query' &&
+            Array.isArray(queries) &&
+            queries.length >= 1 &&
+            queries.length <= MAX_SEARCH_QUERIES &&
+            queries.every(
+                (item) =>
+                    Array.isArray(item) &&
+                    item.length === 2 &&
+                    typeof item[0] === 'string' &&
+                    item[0].trim().length > 0 &&
+                    Number.isInteger(item[1]) &&
+                    item[1] >= 1 &&
+                    item[1] <= MAX_SEARCH_PAGES
+            ) &&
+            queries.reduce((total, [, pages]) => total + pages, 0) <= MAX_SEARCH_PAGES;
+        if (!validQueries) {
+            throw new Error(
+                `Browser search job exceeds the local limit of ${MAX_SEARCH_QUERIES} queries or ${MAX_SEARCH_PAGES} total pages`
+            );
+        }
+        return;
+    }
+
+    if (authorization.jobType === 'product_card') {
+        const articles = job.articles;
+        const endpoints = job.endpoints;
+        const validProductCard =
+            job.type === 'wb-product-card' &&
+            Array.isArray(articles) &&
+            articles.length >= 1 &&
+            articles.length <= MAX_PRODUCT_CARD_ARTICLES &&
+            articles.every((article) => Number.isSafeInteger(article?.nm) && article.nm > 0) &&
+            Array.isArray(endpoints) &&
+            endpoints.length >= 1 &&
+            endpoints.every(
+                (endpoint) =>
+                    typeof endpoint?.key === 'string' &&
+                    endpoint.key.length > 0 &&
+                    typeof endpoint?.url === 'string' &&
+                    endpoint.url.length > 0
+            ) &&
+            articles.length * endpoints.length <= MAX_PRODUCT_CARD_REQUEST_UNITS;
+        if (!validProductCard) {
+            throw new Error(
+                `Browser product-card job exceeds the local limit of ${MAX_PRODUCT_CARD_ARTICLES} articles or ${MAX_PRODUCT_CARD_REQUEST_UNITS} requests`
+            );
+        }
+        return;
+    }
+
+    if (authorization.jobType === 'recommendations_by_product') {
+        const articles = job.articles;
+        const validRecommendations =
+            job.type === 'wb-recommendations-by-product' &&
+            Array.isArray(articles) &&
+            articles.length >= 1 &&
+            articles.length <= MAX_RECOMMENDATION_ARTICLES &&
+            articles.every(
+                (item) =>
+                    Array.isArray(item) &&
+                    (item.length === 1 || item.length === 2) &&
+                    Number.isSafeInteger(item[0]) &&
+                    item[0] > 0 &&
+                    (item.length === 1 || (Number.isInteger(item[1]) && item[1] >= 1 && item[1] <= MAX_RECOMMENDATION_PAGES))
+            );
+        if (!validRecommendations) {
+            throw new Error(
+                `Browser recommendations job exceeds the local limit of ${MAX_RECOMMENDATION_ARTICLES} articles or ${MAX_RECOMMENDATION_PAGES} pages per article`
+            );
+        }
+        return;
+    }
+
+    throw new Error(`Unsupported browser_job type: ${authorization.jobType}`);
+};
 
 export const extractBrowserJobToken = (value) => {
     if (typeof value !== 'string') {
         throw new Error('triggerUrl must be a browser_job trigger URL or JWT string');
     }
     const input = value.trim();
-    if (!input || input.length > MAX_TRIGGER_URL_LENGTH) {
+    if (!input || Buffer.byteLength(input, 'utf8') > MAX_BROWSER_JOB_TOKEN_BYTES) {
         throw new Error('triggerUrl must be a browser_job trigger URL or JWT string');
     }
     if (!input.includes('__agent_job')) {
@@ -59,10 +151,16 @@ const compactCardBody = (body) => {
         nmId: numberOrUndefined(body.nm_id),
         vendorCode: typeof body.vendor_code === 'string' ? body.vendor_code : undefined,
         description: typeof body.description === 'string' ? body.description : undefined,
-        subjectId: numberOrUndefined(body.subject_id),
-        subjectName: typeof body.subject_name === 'string' ? body.subject_name : undefined,
+        subjectId: numberOrUndefined(body.subj_id) ?? numberOrUndefined(body.subject_id),
+        subject: typeof body.subj_name === 'string' ? body.subj_name : typeof body.subject_name === 'string' ? body.subject_name : undefined,
+        rootSubject:
+            typeof body.subj_root_name === 'string'
+                ? body.subj_root_name
+                : typeof body.root_subject_name === 'string'
+                  ? body.root_subject_name
+                  : undefined,
         options: Array.isArray(body.options) ? body.options : undefined,
-        colors: Array.isArray(body.colors) ? body.colors : undefined,
+        colors: Array.isArray(body.colors) ? body.colors.filter((value) => Number.isSafeInteger(value) && value > 0) : undefined,
     };
 };
 
@@ -177,9 +275,11 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
             articleUnits.find((unit) => unit.key === 'detail') || articleUnits.find((unit) => responseProducts(unit.response).length);
         const cardUnit = articleUnits.find((unit) => unit.key === 'card');
         const detail = detailUnit ? summarizeProduct(article.nm, detailUnit.response) : { nmId: article.nm, ok: false };
+        const content = compactCardBody(cardUnit?.response?.data?.body);
         return {
             ...detail,
-            content: compactCardBody(cardUnit?.response?.data?.body),
+            ...content,
+            content,
             units: articleUnits.map((unit) => ({
                 key: unit.key,
                 ok: unit.ok,
@@ -322,6 +422,7 @@ export const executeAuthorizedBrowserJob = async ({
     productLimitTotal = DEFAULT_RETURNED_PRODUCTS,
     productNmIds,
 }) => {
+    validateAuthorizedJobLimits(authorization);
     const projection = { productLimitTotal, productNmIds };
     let result;
     if (authorization.jobType === 'search_by_query') {

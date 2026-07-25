@@ -110,6 +110,11 @@ export const parseFrames = (state, chunk, onMessage, onClose) => {
                 throw new Error('Fragmented WebSocket control frame');
             }
             state.socket.write(encodeFrame(payload, 0x0a));
+        } else if (opcode === 0x0a) {
+            if (!fin) {
+                throw new Error('Fragmented WebSocket control frame');
+            }
+            state.awaitingPong = false;
         }
     }
 };

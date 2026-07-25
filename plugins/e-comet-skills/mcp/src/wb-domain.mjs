@@ -7,6 +7,19 @@ import {
     MIN_REQUEST_TIMEOUT_MS,
 } from './config.mjs';
 
+const ALLOWED_WB_HOSTS = new Set(['wildberries.ru', 'www.wildberries.ru']);
+const ALLOWED_WB_PATH = /^\/__internal\/(card|u-card|search|u-search|recom|u-recom|recommendations)\//;
+
+export const isAllowedWbUrl = (value) => {
+    try {
+        const url = new URL(value);
+        const hostname = url.hostname.toLowerCase();
+        return url.protocol === 'https:' && ALLOWED_WB_HOSTS.has(hostname) && ALLOWED_WB_PATH.test(url.pathname);
+    } catch {
+        return false;
+    }
+};
+
 export const productDetailUrl = (nmId) =>
     `https://www.wildberries.ru/__internal/card/cards/v4/detail?appType=32&curr=rub&dest=-1257786&spp=30&hide_dtype=11&ab_testing=false&lang=ru&nm=${encodeURIComponent(
         nmId
@@ -242,6 +255,9 @@ export const summarizeProduct = (nmId, response) => {
         priceRub: {
             basic: numberOrUndefined(price?.basic) === undefined ? undefined : price.basic / 100,
             product: numberOrUndefined(price?.product) === undefined ? undefined : price.product / 100,
+            logistics: numberOrUndefined(price?.logistics) === undefined ? undefined : price.logistics / 100,
+            return: numberOrUndefined(price?.return) === undefined ? undefined : price.return / 100,
+            cashback: numberOrUndefined(price?.cashback) === undefined ? undefined : price.cashback / 100,
         },
         quantity: {
             total: quantityTotal,

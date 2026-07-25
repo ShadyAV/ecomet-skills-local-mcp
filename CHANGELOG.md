@@ -1,33 +1,16 @@
 # Changelog
 
-## [2026.7.8] - 2026-07-23
-
-### Changed
-- The local bridge now reports MCP `instructions` explaining that the remote e-Comet server connects asynchronously,
-  so agents retry tool discovery instead of falsely reporting missing authorization at session start.
-- Local tools wait up to 15 seconds (`ECOMET_EXTENSION_CONNECT_GRACE_MS`) for the extension to connect before
-  returning "extension is not connected".
-- Card, search, and recommendation skills instruct agents to retry tool discovery before reporting authorization
-  problems.
-
-## [2026.7.7] - 2026-07-23
-
-### Changed
-- Card, search, and recommendation skills now obtain a short-lived signed `browser_job` JWT and pass it unchanged to
-  the bundled local MCP. The extension verifies the signature, expiry, account UUID, job type, and exact WB URLs.
-- WB response bodies remain local. Direct unsigned WB fetch tools are no longer advertised, and the extension rejects
-  local `wb_fetch` requests without a signed browser-job authorization.
-
-## [2026.7.6] - 2026-07-13
+## [2026.7.6] - 2026-07-24
 
 ### Added
 - Added the `wb-recommendations-by-product` skill for live Wildberries recommendation shelves by source article.
 
 ### Changed
-- Added a bundled local STDIO server alongside the existing remote authenticated MCP. The local server communicates
-  with the e-Comet Chrome extension over loopback and keeps full WB responses on the user's computer. The plugin ships
-  its dependency-free JavaScript source instead of distributing a SEA executable. Plugin manifests launch the same
-  source directly with the `node` command; Node.js 22+ is required.
+- WB skills now run through a new bundled local STDIO MCP server that communicates with the e-Comet Chrome extension
+  over loopback and keeps full WB responses on the user's computer. The plugin ships the server as dependency-free
+  JavaScript source, launched by the plugin manifests with the `node` command; Node.js 22+ is required.
+- The plugin connects both the remote e-Comet MCP for seller analytics and signed browser-job authorization and the
+  bundled local MCP for browser execution.
 - Added generation-aware primary handoff so a newer MCP release drains active requests, takes over the fixed loopback
   port, and reconnects existing conversations and the extension without requiring a desktop-agent restart.
 

@@ -1,6 +1,7 @@
 import {
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
+    MAX_BROWSER_JOB_TOKEN_BYTES,
     MAX_IMAGE_ARTICLES,
     MAX_IMAGE_BASKET,
     MAX_IMAGE_PHOTOS,
@@ -34,7 +35,7 @@ export const tools = [
                 triggerUrl: {
                     type: 'string',
                     minLength: 1,
-                    maxLength: 131072,
+                    maxLength: MAX_BROWSER_JOB_TOKEN_BYTES,
                     description: 'The exact trigger_url or raw JWT returned by the remote e-Comet browser_job tool.',
                 },
                 productLimitTotal: {
@@ -106,3 +107,49 @@ export const tools = [
         },
     },
 ];
+
+const valueMatchesSchema = (value, schema) => {
+    if (schema.type === 'object') {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        if ((schema.required || []).some((name) => !(name in value))) return false;
+        if (schema.additionalProperties === false && Object.keys(value).some((name) => !(name in (schema.properties || {})))) return false;
+        return Object.entries(value).every(([name, propertyValue]) => {
+            const propertySchema = schema.properties?.[name];
+            return !propertySchema || valueMatchesSchema(propertyValue, propertySchema);
+        });
+    }
+    if (schema.type === 'array') {
+        if (!Array.isArray(value) || value.length < (schema.minItems ?? 0) || value.length > (schema.maxItems ?? Infinity)) return false;
+        if (schema.uniqueItems && new Set(value).size !== value.length) return false;
+        return value.every((item) => valueMatchesSchema(item, schema.items));
+    }
+    if (schema.type === 'string') {
+        return (
+            typeof value === 'string' &&
+            value.length >= (schema.minLength ?? 0) &&
+            value.length <= (schema.maxLength ?? Infinity) &&
+            (!schema.enum || schema.enum.includes(value))
+        );
+    }
+    if (schema.type === 'integer') {
+        return (
+            Number.isSafeInteger(value) &&
+            value >= (schema.minimum ?? -Infinity) &&
+            value <= (schema.maximum ?? Infinity)
+        );
+    }
+    if (schema.type === 'number') {
+        return (
+            typeof value === 'number' &&
+            Number.isFinite(value) &&
+            value >= (schema.minimum ?? -Infinity) &&
+            value <= (schema.maximum ?? Infinity)
+        );
+    }
+    return true;
+};
+
+export const validateToolArguments = (name, args) => {
+    const tool = tools.find((candidate) => candidate.name === name);
+    return Boolean(tool && valueMatchesSchema(args, tool.inputSchema));
+};

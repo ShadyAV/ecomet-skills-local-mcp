@@ -16,7 +16,7 @@ Full responses use the platform-standard user data directory: `%LOCALAPPDATA%\e-
 
 Local tools:
 
-- `execute_browser_job` — executes the short-lived signed `trigger_url` returned by the remote e-Comet `browser_job`;
+- `execute_browser_job` — executes the signed, expiring `trigger_url` returned by the remote e-Comet `browser_job`;
 - `local_bridge_status` — reports whether the extension is connected;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
 
