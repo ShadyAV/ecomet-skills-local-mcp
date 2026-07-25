@@ -72,7 +72,29 @@ export const createMcpMessageHandler = ({
             if (writer) {
                 await writer.close().catch(() => undefined);
             }
-            sendResult(id, textResult({ ok: false, error: error.message }, true));
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            const signatureInvalid = errorMessage === 'Invalid browser job token signature';
+            sendResult(
+                id,
+                textResult(
+                    {
+                        ok: false,
+                        error: errorMessage,
+                        ...(signatureInvalid
+                            ? {
+                                  code: 'BROWSER_JOB_SIGNATURE_INVALID',
+                                  retryable: true,
+                                  recovery: {
+                                      action: 'retry_execute_browser_job_once',
+                                      triggerUrlSource: 'original_browser_job_result',
+                                      requestNewBrowserJob: false,
+                                  },
+                              }
+                            : {}),
+                    },
+                    true
+                )
+            );
         }
     };
 
