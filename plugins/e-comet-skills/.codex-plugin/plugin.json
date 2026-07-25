@@ -1,6 +1,6 @@
 {
   "name": "e-comet-skills",
-  "version": "2026.7.6",
+  "version": "2026.7.7-stage.1",
   "description": "WB analytics and live browser data through e-Comet MCP servers.",
   "author": {
     "name": "e-Comet",
@@ -14,7 +14,7 @@
   "mcpServers": {
     "e-comet": {
       "type": "http",
-      "url": "https://mcp.e-comet.io/mcp"
+      "url": "https://mcp.stage.int.e-comet.io/mcp"
     },
     "e-comet-local": {
       "type": "stdio",
