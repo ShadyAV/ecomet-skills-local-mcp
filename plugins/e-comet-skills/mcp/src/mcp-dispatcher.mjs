@@ -29,6 +29,20 @@ export const createMcpMessageHandler = ({
             sendResult(id, textResult({ ok: false, error: 'Invalid execute_browser_job arguments' }, true));
             return;
         }
+        if (typeof triggerUrl !== 'string' || !triggerUrl) {
+            sendResult(
+                id,
+                textResult(
+                    {
+                        ok: false,
+                        code: 'BROWSER_JOB_HANDOFF_REQUIRED',
+                        error: 'The desktop browser authorization handoff did not run',
+                    },
+                    true
+                )
+            );
+            return;
+        }
         if (!isExtensionReady()) {
             sendResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
             return;
@@ -73,24 +87,12 @@ export const createMcpMessageHandler = ({
                 await writer.close().catch(() => undefined);
             }
             const errorMessage = error instanceof Error ? error.message : String(error);
-            const signatureInvalid = errorMessage === 'Invalid browser job token signature';
             sendResult(
                 id,
                 textResult(
                     {
                         ok: false,
                         error: errorMessage,
-                        ...(signatureInvalid
-                            ? {
-                                  code: 'BROWSER_JOB_SIGNATURE_INVALID',
-                                  retryable: true,
-                                  recovery: {
-                                      action: 'retry_execute_browser_job_once',
-                                      triggerUrlSource: 'original_browser_job_result',
-                                      requestNewBrowserJob: false,
-                                  },
-                              }
-                            : {}),
                     },
                     true
                 )

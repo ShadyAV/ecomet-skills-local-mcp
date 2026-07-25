@@ -28,7 +28,7 @@ export const tools = [
     {
         name: 'execute_browser_job',
         description:
-            'Execute one signed browser_job JWT through the local e-Comet extension over WebSocket. Call the remote e-Comet browser_job tool first, then pass its exact trigger_url here. WB responses stay local.',
+            'Execute the browser job prepared by the immediately preceding remote e-Comet browser_job call. In Codex, pass the authorization inside the same atomic exec; in Claude, the plugin hook injects it. WB responses stay local.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -36,7 +36,8 @@ export const tools = [
                     type: 'string',
                     minLength: 1,
                     maxLength: MAX_BROWSER_JOB_TOKEN_BYTES,
-                    description: 'The exact trigger_url or raw JWT returned by the remote e-Comet browser_job tool.',
+                    description:
+                        'Passed programmatically by the Codex atomic exec or injected by the trusted Claude hook. Never reproduce it as model-authored text.',
                 },
                 productLimitTotal: {
                     type: 'integer',
@@ -52,7 +53,7 @@ export const tools = [
                     items: { type: 'integer', minimum: 1 },
                 },
             },
-            required: ['triggerUrl'],
+            required: [],
             additionalProperties: false,
         },
         annotations: {

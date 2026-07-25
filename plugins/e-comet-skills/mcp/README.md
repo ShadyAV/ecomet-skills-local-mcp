@@ -25,14 +25,16 @@ Full responses use the platform-standard user data directory: `%LOCALAPPDATA%\e-
 
 Local tools:
 
-- `execute_browser_job` — executes the signed, expiring `trigger_url` returned by the remote e-Comet `browser_job`;
+- `execute_browser_job` — executes the signed, expiring browser authorization handed off by the host-specific trusted path;
 - `local_bridge_status` — reports whether the extension is connected;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
 
-For card, search, and recommendation skills the agent first sends only the small task descriptor to remote `browser_job`,
-then passes its opaque JWT to `execute_browser_job`. The extension verifies the RS256 signature, expiry, account UUID,
-job type, and exact derived WB URLs. It rejects direct `wb_fetch` calls without that authorization. WB response bodies
-remain on the user's computer and do not pass through e-Comet backend services.
+For card, search, and recommendation skills the agent first sends only the small task descriptor to remote `browser_job`.
+Claude uses the plugin's `PostToolUse` and `PreToolUse` hooks to hand off the exact opaque JWT. Codex/ChatGPT Desktop
+executes both MCP calls inside one `exec` and passes the value only through a local JavaScript variable. The model does
+not reproduce the token as text. The extension verifies the RS256 signature, expiry, account UUID, job type, and exact
+derived WB URLs. It rejects direct `wb_fetch` calls without that authorization. WB response bodies remain on the user's
+computer and do not pass through e-Comet backend services.
 
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
