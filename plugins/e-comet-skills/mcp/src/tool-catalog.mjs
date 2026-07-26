@@ -1,80 +1,35 @@
-import {
-    DEFAULT_IMAGE_PHOTOS,
-    DEFAULT_RETURNED_PRODUCTS,
-    MAX_BROWSER_JOB_TOKEN_BYTES,
-    MAX_IMAGE_ARTICLES,
-    MAX_IMAGE_BASKET,
-    MAX_IMAGE_PHOTOS,
-    MAX_PRODUCT_ARTICLES,
-    MAX_RETURNED_PRODUCTS,
-} from './config.mjs';
-
-const triggerUrlProperty = {
-    type: 'string',
-    minLength: 1,
-    maxLength: MAX_BROWSER_JOB_TOKEN_BYTES,
-    description:
-        'Passed programmatically by the Codex atomic exec or injected by the trusted Claude hook. Never reproduce it as model-authored text.',
-};
-
-const projectionProperties = {
-    productLimitTotal: {
-        type: 'integer',
-        minimum: 1,
-        maximum: MAX_RETURNED_PRODUCTS,
-        default: DEFAULT_RETURNED_PRODUCTS,
-        description: 'Maximum number of compact products returned for each query or source article.',
-    },
-    productNmIds: {
-        type: 'array',
-        minItems: 1,
-        maxItems: MAX_PRODUCT_ARTICLES,
-        uniqueItems: true,
-        items: { type: 'integer', minimum: 1 },
-        description: 'Return only these WB article IDs instead of the default top-product projection.',
-    },
-};
+import { toolInputSchemas, toolOutputSchemas, validateSchemaValue } from './tool-schemas.mjs';
 
 const liveToolAnnotations = {
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: false,
-    openWorldHint: false,
+    openWorldHint: true,
 };
 
-const liveInputSchema = (includeProjection = false) => ({
-    type: 'object',
-    properties: {
-        triggerUrl: triggerUrlProperty,
-        ...(includeProjection ? projectionProperties : {}),
-    },
-    required: [],
-    additionalProperties: false,
-});
+const authorizationWorkflow =
+    'This typed local tool owns the workflow: select it based on user intent, then call the remote e-Comet browser_job exactly once with the matching typed job and immediately invoke this tool. ' +
+    'In Codex, keep both calls in one atomic exec and pass structuredContent.trigger_url only through a local variable. In Claude, invoke this tool without triggerUrl so the trusted hook injects it. ' +
+    'Never decode, print, edit, or manually copy the JWT. Do not infer an authorization failure from client status: attempt the actual remote call, retry tool discovery up to three times if necessary, and report only the confirmed error in user-friendly language. ';
 
-const liveOutputSchema = (collectionName) => ({
-    type: 'object',
-    properties: {
-        ok: { type: 'boolean' },
-        status: { type: 'string', enum: ['ok', 'partial', 'failed'] },
-        jobType: { type: 'string' },
-        jobId: { type: 'string' },
-        resultPath: { type: 'string' },
-        [collectionName]: { type: 'array' },
-    },
-    required: ['ok'],
-    additionalProperties: true,
-});
+const resultPathGuidance =
+    'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request.';
+
+export const serverInstructions =
+    'Для живых данных Wildberries сначала выберите локальный типизированный инструмент по намерению пользователя: ' +
+    'остаток, остатки, сток, наличие, склады, размеры, цена, описание, характеристики или карточка товара — wb_product_card; ' +
+    'поиск, поисковая выдача, позиция, место или топ товаров по запросу — wb_search_by_query; ' +
+    'рекомендации, похожие товары или рекомендательная полка — wb_recommendations_by_product; ' +
+    'фото, фотографии, картинки, изображения или галерея — wb_product_images. ' +
+    'Не начинайте с browser_job. После выбора одной из первых трёх локальных tools следуйте её описанию: ' +
+    'browser_job используется только следующим шагом для получения подписанной авторизации выбранного задания.';
 
 export const tools = [
     {
         name: 'local_bridge_status',
         description: 'Check whether the local e-Comet Chrome extension is connected to this MCP server.',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-        },
+        inputSchema: toolInputSchemas.local_bridge_status,
+        outputSchema: toolOutputSchemas.local_bridge_status,
         annotations: {
             readOnlyHint: true,
             destructiveHint: false,
@@ -85,64 +40,55 @@ export const tools = [
     {
         name: 'wb_product_card',
         description:
-            'Get live Wildberries product-card data by article ID: price, rating, stock by named warehouse and size, description, characteristics, and merged articles. This typed local tool owns the workflow: select it based on user intent, then obtain its authorization prerequisite by calling the remote e-Comet browser_job exactly once with job {type:"product_card",articles:[integer,...]}, and immediately invoke this tool. In Codex, keep both calls in one atomic exec and pass structuredContent.trigger_url only through a local variable. In Claude, invoke this tool without triggerUrl so the trusted hook injects it. Never decode, print, edit, or manually copy the JWT. Do not infer authorization failure from client status: attempt the actual remote call, retry tool discovery up to three times if necessary, and report only its confirmed error in user-friendly language. The result is a current WB-session snapshot; use products and report partial item errors without claiming a missing product after a network failure. resultPath is only a fallback for the current call when the compact result is insufficient, not a cache.',
-        inputSchema: liveInputSchema(false),
-        outputSchema: liveOutputSchema('products'),
+            'Get live Wildberries product-card data by article ID. Use for Russian requests about остаток, остатки, сток, наличие, склады, размеры, цена, карточка товара, описание, характеристики, or склейка. ' +
+            authorizationWorkflow +
+            'Authorize with job {type:"product_card",articles:[integer,...]}; use 1-50 unique positive article IDs. Read products[]. For price use priceRub.product; priceRub.basic is the crossed-out/basic price. ' +
+            'For stock use quantity.total, quantity.byWarehouse, and quantity.bySize. Warehouse names are already in warehouse; if absent, display wh <id>. Use colors for merged articles, options for characteristics, and description for description. ' +
+            'Translate raw field names for the user and render booleans as yes/no. A product-level ok:false is a failed WB request, not proof that the product does not exist. Report partial item errors. ' +
+            'Values are a current WB-session snapshot. ' +
+            resultPathGuidance,
+        inputSchema: toolInputSchemas.wb_product_card,
+        outputSchema: toolOutputSchemas.wb_product_card,
         annotations: liveToolAnnotations,
     },
     {
         name: 'wb_search_by_query',
         description:
-            'Get live Wildberries search results, top products, and global positions for one or more phrases. This typed local tool owns the workflow: select it based on user intent, then obtain its authorization prerequisite by calling the remote e-Comet browser_job exactly once with job {type:"search_by_query",queries:[{query:string,pages:integer},...]}, and immediately invoke this tool. Use at most 10 queries and 50 pages total; start with 1 page for a top list or 2-3 pages when depth is unspecified. In Codex, keep both calls in one atomic exec and pass structuredContent.trigger_url only through a local variable. In Claude, invoke this tool without triggerUrl so the trusted hook injects it. Never decode, print, edit, or manually copy the JWT. Do not infer authorization failure from client status: attempt the actual remote call, retry tool discovery up to three times if necessary, and report only its confirmed error in user-friendly language. Read queries[].pages[].products and use globalPosition rather than page-local position. The result is a current WB-session snapshot; expose partial-page failures. resultPath is only a fallback for the current call when the compact result is insufficient, not a cache.',
-        inputSchema: liveInputSchema(true),
-        outputSchema: liveOutputSchema('queries'),
+            'Get live Wildberries search results, top products, and positions for one or more phrases. Use for Russian requests about поиск, поисковая выдача, позиция товара, место по запросу, or топ товаров. ' +
+            authorizationWorkflow +
+            'Authorize with job {type:"search_by_query",queries:[{query:string,pages:integer},...]}; use at most 10 queries and 50 pages total. Start with 1 page for a top list or 2-3 pages when depth is unspecified. ' +
+            'For a targeted rank check, put phrases in remote job.queries and target article IDs in local productNmIds. For a top N list, use productLimitTotal:N. ' +
+            'Read queries[].pages[].products. Use globalPosition only when globalPositionsComplete is true; position is page-local. Mark promoted:true as реклама because it is paid placement. ' +
+            'If a target is absent, claim only that it was not found within the requested pages/positions, never that it is absent from all WB search results. Group multiple phrases separately and disclose failed pages. ' +
+            'Results are a current WB-session snapshot. ' +
+            resultPathGuidance,
+        inputSchema: toolInputSchemas.wb_search_by_query,
+        outputSchema: toolOutputSchemas.wb_search_by_query,
         annotations: liveToolAnnotations,
     },
     {
         name: 'wb_recommendations_by_product',
         description:
-            'Get live Wildberries recommendation shelves for source article IDs and check whether specific products occur in them. This typed local tool owns the workflow: select it based on user intent, then obtain its authorization prerequisite by calling the remote e-Comet browser_job exactly once with job {type:"recommendations_by_product",articles:[{nm:integer,pages?:integer},...]}, and immediately invoke this tool. Use at most 20 articles and 60 pages per article; omit pages to request the discovered shelf up to the local cap. In Codex, keep both calls in one atomic exec and pass structuredContent.trigger_url only through a local variable. In Claude, invoke this tool without triggerUrl so the trusted hook injects it. Never decode, print, edit, or manually copy the JWT. Do not infer authorization failure from client status: attempt the actual remote call, retry tool discovery up to three times if necessary, and report only its confirmed error in user-friendly language. Read articles[].pages[].products, group by sourceNmId, use globalPosition, and disclose partial or truncatedByLocalLimit results. resultPath is only a fallback for the current call when the compact result is insufficient, not a cache.',
-        inputSchema: liveInputSchema(true),
-        outputSchema: liveOutputSchema('articles'),
+            'Get live Wildberries recommendation shelves for source article IDs and check whether specific products occur in them. Use for Russian requests about рекомендации, похожие товары, рекомендательная полка, соседние товары, or whether a product встречается в рекомендациях. ' +
+            authorizationWorkflow +
+            'Authorize with job {type:"recommendations_by_product",articles:[{nm:integer,pages?:integer},...]}; use at most 20 source articles, 60 pages per article, and 60 страниц суммарно. ' +
+            'For первые N recommendations, explicitly request pages: 1 and pass local productLimitTotal: N. Omit pages only when the user explicitly needs the whole discovered shelf within local limits. ' +
+            'For a membership check, put исходные товары in remote job.articles and целевые товары in local productNmIds. Read articles[].pages[].products and group results by sourceNmId. ' +
+            'Use globalPosition only when globalPositionsComplete is true. If a target is absent, claim only that it was not found in the successfully requested part of that source shelf. ' +
+            'Disclose status partial/failed, failed pages, complete:false, and truncatedByLocalLimit:true. Recommendations are a current WB-session snapshot. ' +
+            resultPathGuidance,
+        inputSchema: toolInputSchemas.wb_recommendations_by_product,
+        outputSchema: toolOutputSchemas.wb_recommendations_by_product,
         annotations: liveToolAnnotations,
     },
     {
         name: 'wb_product_images',
         description:
-            'Find public Wildberries product image URLs by article ID. Select this tool when the user asks for WB photos, image URLs, a gallery, or batch image export. Call it directly; it needs neither remote browser_job nor the Chrome extension. Send at most 20 IDs per call and preserve input order across multiple batches. Use products[].imageUrls rather than guessing CDN URLs. status "not_found" means only that the current image-CDN probe found no photos, not that the product does not exist.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nmIds: {
-                    type: 'array',
-                    minItems: 1,
-                    maxItems: MAX_IMAGE_ARTICLES,
-                    uniqueItems: true,
-                    items: { type: 'integer', minimum: 10000, maximum: 9999999999 },
-                },
-                maxPhotos: {
-                    type: 'integer',
-                    minimum: 1,
-                    maximum: MAX_IMAGE_PHOTOS,
-                    default: DEFAULT_IMAGE_PHOTOS,
-                },
-                maxBasket: {
-                    type: 'integer',
-                    minimum: 1,
-                    maximum: MAX_IMAGE_BASKET,
-                    default: MAX_IMAGE_BASKET,
-                },
-                size: { type: 'string', enum: ['big', 'tm'], default: 'big' },
-                timeout: {
-                    type: 'number',
-                    minimum: 1000,
-                    maximum: 30000,
-                    default: 5000,
-                },
-            },
-            required: ['nmIds'],
-            additionalProperties: false,
-        },
+            'Find public Wildberries product image URLs by article ID. Use for Russian requests about фото, фотографии, картинки, изображения, ссылки на фото, or галерея товара. ' +
+            'Call it directly; it needs neither remote browser_job nor the Chrome extension. Send at most 20 IDs per call and preserve input order across batches. ' +
+            'Use products[].imageUrls rather than guessing CDN URLs. Report succeeded and failed counts. status "not_found" means the current image-CDN probe found no photos; it does not mean that the product does not exist.',
+        inputSchema: toolInputSchemas.wb_product_images,
+        outputSchema: toolOutputSchemas.wb_product_images,
         annotations: {
             readOnlyHint: true,
             destructiveHint: false,
@@ -152,48 +98,7 @@ export const tools = [
     },
 ];
 
-const valueMatchesSchema = (value, schema) => {
-    if (schema.type === 'object') {
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-        if ((schema.required || []).some((name) => !(name in value))) return false;
-        if (schema.additionalProperties === false && Object.keys(value).some((name) => !(name in (schema.properties || {})))) return false;
-        return Object.entries(value).every(([name, propertyValue]) => {
-            const propertySchema = schema.properties?.[name];
-            return !propertySchema || valueMatchesSchema(propertyValue, propertySchema);
-        });
-    }
-    if (schema.type === 'array') {
-        if (!Array.isArray(value) || value.length < (schema.minItems ?? 0) || value.length > (schema.maxItems ?? Infinity)) return false;
-        if (schema.uniqueItems && new Set(value).size !== value.length) return false;
-        return value.every((item) => valueMatchesSchema(item, schema.items));
-    }
-    if (schema.type === 'string') {
-        return (
-            typeof value === 'string' &&
-            value.length >= (schema.minLength ?? 0) &&
-            value.length <= (schema.maxLength ?? Infinity) &&
-            (!schema.enum || schema.enum.includes(value))
-        );
-    }
-    if (schema.type === 'integer') {
-        return (
-            Number.isSafeInteger(value) &&
-            value >= (schema.minimum ?? -Infinity) &&
-            value <= (schema.maximum ?? Infinity)
-        );
-    }
-    if (schema.type === 'number') {
-        return (
-            typeof value === 'number' &&
-            Number.isFinite(value) &&
-            value >= (schema.minimum ?? -Infinity) &&
-            value <= (schema.maximum ?? Infinity)
-        );
-    }
-    return true;
-};
-
 export const validateToolArguments = (name, args) => {
     const tool = tools.find((candidate) => candidate.name === name);
-    return Boolean(tool && valueMatchesSchema(args, tool.inputSchema));
+    return Boolean(tool && validateSchemaValue(args, tool.inputSchema));
 };

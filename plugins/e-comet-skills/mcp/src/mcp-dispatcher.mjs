@@ -5,12 +5,15 @@ import {
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
     IMAGE_CONCURRENCY,
+    LATEST_MCP_PROTOCOL_VERSION,
     MAX_IMAGE_BASKET,
+    SUPPORTED_MCP_PROTOCOL_VERSIONS,
 } from './config.mjs';
 import { executeAuthorizedBrowserJob, extractBrowserJobToken, validateAuthorizedJobLimits } from './browser-job.mjs';
 import { mcpError, mcpResult, textResult } from './mcp-protocol.mjs';
 import { createJobWriter } from './result-store.mjs';
-import { tools, validateToolArguments } from './tool-catalog.mjs';
+import { serverInstructions, tools, validateToolArguments } from './tool-catalog.mjs';
+import { ToolExecutionError, toolFailure } from './tool-errors.mjs';
 import { discoverImageBasket, imageExists, normalizeStatus, runWithConcurrency } from './wb-domain.mjs';
 
 export const createMcpMessageHandler = ({
@@ -26,18 +29,34 @@ export const createMcpMessageHandler = ({
         const productLimitTotal = args.productLimitTotal ?? DEFAULT_RETURNED_PRODUCTS;
         const productNmIds = args.productNmIds;
         if (!validateToolArguments(toolName, args)) {
-            sendResult(id, textResult({ ok: false, error: `Invalid ${toolName} arguments` }, true));
+            sendResult(
+                id,
+                textResult(
+                    toolFailure(
+                        new ToolExecutionError(
+                            'INVALID_TOOL_ARGUMENTS',
+                            `Invalid ${toolName} arguments.`,
+                            'arguments',
+                            false
+                        )
+                    ),
+                    true
+                )
+            );
             return;
         }
         if (typeof triggerUrl !== 'string' || !triggerUrl) {
             sendResult(
                 id,
                 textResult(
-                    {
-                        ok: false,
-                        code: 'BROWSER_JOB_HANDOFF_REQUIRED',
-                        error: 'The desktop browser authorization handoff did not run',
-                    },
+                    toolFailure(
+                        new ToolExecutionError(
+                            'BROWSER_JOB_HANDOFF_REQUIRED',
+                            'Browser authorization handoff is required.',
+                            'handoff',
+                            true
+                        )
+                    ),
                     true
                 )
             );
@@ -60,10 +79,25 @@ export const createMcpMessageHandler = ({
                 throw new Error('Extension returned an invalid browser job authorization');
             }
             if (authorization.jobType !== expectedJobType) {
-                throw new Error(`Signed ${authorization.jobType} job cannot be executed as ${toolName}`);
+                throw new ToolExecutionError(
+                    'BROWSER_JOB_TYPE_MISMATCH',
+                    `Signed ${authorization.jobType} job cannot be executed as ${toolName}.`,
+                    'authorization',
+                    false
+                );
             }
             validateAuthorizedJobLimits(authorization);
-            writer = await createJobWriter(authorization.job.jobId);
+            try {
+                writer = await createJobWriter(authorization.job.jobId);
+            } catch (error) {
+                throw new ToolExecutionError(
+                    'LOCAL_STORAGE_FAILED',
+                    'The local result file could not be created.',
+                    'storage',
+                    true,
+                    { cause: error }
+                );
+            }
             const result = await executeAuthorizedBrowserJob({
                 authorization,
                 requestWbFetch,
@@ -87,17 +121,12 @@ export const createMcpMessageHandler = ({
             if (writer) {
                 await writer.close().catch(() => undefined);
             }
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            sendResult(
-                id,
-                textResult(
-                    {
-                        ok: false,
-                        error: errorMessage,
-                    },
-                    true
-                )
-            );
+            sendResult(id, textResult(toolFailure(error, {
+                code: 'BROWSER_JOB_EXECUTION_FAILED',
+                message: 'The authorized Wildberries job could not be completed.',
+                stage: 'execution',
+                retryable: false,
+            }), true));
         }
     };
 
@@ -108,7 +137,20 @@ export const createMcpMessageHandler = ({
         const size = args.size ?? 'big';
         const timeout = args.timeout ?? 5000;
         if (!validateToolArguments('wb_product_images', args)) {
-            sendResult(id, textResult({ ok: false, error: 'Invalid image lookup arguments' }, true));
+            sendResult(
+                id,
+                textResult(
+                    toolFailure(
+                        new ToolExecutionError(
+                            'INVALID_TOOL_ARGUMENTS',
+                            'Invalid wb_product_images arguments.',
+                            'arguments',
+                            false
+                        )
+                    ),
+                    true
+                )
+            );
             return;
         }
 
@@ -174,7 +216,18 @@ export const createMcpMessageHandler = ({
                 })
             );
         } catch (error) {
-            sendResult(id, textResult({ ok: false, error: error.message }, true));
+            sendResult(
+                id,
+                textResult(
+                    toolFailure(error, {
+                        code: 'IMAGE_LOOKUP_FAILED',
+                        message: 'The Wildberries image lookup could not be completed.',
+                        stage: 'images',
+                        retryable: true,
+                    }),
+                    true
+                )
+            );
         }
     };
 
@@ -198,10 +251,14 @@ export const createMcpMessageHandler = ({
         const { id, method, params } = message;
         if (method === 'notifications/initialized' || id === undefined) return;
         if (method === 'initialize') {
+            const requestedProtocolVersion = params?.protocolVersion;
             sendResult(id, {
-                protocolVersion: params?.protocolVersion || '2025-06-18',
+                protocolVersion: SUPPORTED_MCP_PROTOCOL_VERSIONS.includes(requestedProtocolVersion)
+                    ? requestedProtocolVersion
+                    : LATEST_MCP_PROTOCOL_VERSION,
                 capabilities: { tools: { listChanged: false } },
                 serverInfo: { name: 'e-comet-local-bridge', version: BRIDGE_VERSION },
+                instructions: serverInstructions,
             });
             return;
         }

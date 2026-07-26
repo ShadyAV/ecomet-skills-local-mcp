@@ -5,6 +5,7 @@ import {
     MAX_PRODUCT_CARD_REQUEST_UNITS,
     MAX_RECOMMENDATION_ARTICLES,
     MAX_RECOMMENDATION_PAGES,
+    MAX_RECOMMENDATION_REQUEST_UNITS,
     MAX_RETURNED_PRODUCTS,
     MAX_SEARCH_PAGES,
     MAX_SEARCH_QUERIES,
@@ -100,10 +101,12 @@ export const validateAuthorizedJobLimits = (authorization) => {
                     Number.isSafeInteger(item[0]) &&
                     item[0] > 0 &&
                     (item.length === 1 || (Number.isInteger(item[1]) && item[1] >= 1 && item[1] <= MAX_RECOMMENDATION_PAGES))
-            );
+            ) &&
+            articles.reduce((total, item) => total + (item[1] ?? 1), 0) <= MAX_RECOMMENDATION_REQUEST_UNITS;
         if (!validRecommendations) {
             throw new Error(
-                `Browser recommendations job exceeds the local limit of ${MAX_RECOMMENDATION_ARTICLES} articles or ${MAX_RECOMMENDATION_PAGES} pages per article`
+                `Browser recommendations job exceeds the local limit of ${MAX_RECOMMENDATION_ARTICLES} articles, ` +
+                    `${MAX_RECOMMENDATION_PAGES} pages per article, or ${MAX_RECOMMENDATION_REQUEST_UNITS} total pages`
             );
         }
         return;
@@ -195,18 +198,21 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
     const queries = job.queries.map(([query, pagesRequested], queryIndex) => {
         let globalOffset = 0;
         let returnedProducts = 0;
+        let globalPositionsReliable = true;
         const pages = fetched
             .filter((unit) => unit.queryIndex === queryIndex)
             .sort((left, right) => left.page - right.page)
             .map((unit) => {
                 const products = responseProducts(unit.response);
                 const remaining = Math.max(0, projection.productLimitTotal - returnedProducts);
+                const pageGlobalPositionsReliable = globalPositionsReliable && unit.ok;
                 const selected = unit.ok
                     ? projectPageProducts(
                           products,
                           globalOffset,
                           projection.productNmIds,
-                          projection.productNmIds ? MAX_RETURNED_PRODUCTS : remaining
+                          projection.productNmIds ? MAX_RETURNED_PRODUCTS : remaining,
+                          pageGlobalPositionsReliable
                       )
                     : [];
                 returnedProducts += selected.length;
@@ -216,11 +222,13 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
                     httpStatus: unit.response?.data?.status,
                     total: products.length,
                     overallTotal: numberOrUndefined(unit.response?.data?.body?.total),
+                    globalPositionsReliable: pageGlobalPositionsReliable,
                     products: selected,
                 };
                 if (!unit.ok) {
                     page.error = unit.error || unit.response?.error || unit.response?.data?.statusText || 'WB search request failed';
                 }
+                if (!unit.ok) globalPositionsReliable = false;
                 globalOffset += products.length;
                 return page;
             });
@@ -230,6 +238,7 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
             pagesSucceeded: pages.filter((page) => page.ok).length,
             productsSeen: pages.reduce((total, page) => total + page.total, 0),
             productsReturned: pages.reduce((total, page) => total + page.products.length, 0),
+            globalPositionsComplete: pages.every((page) => page.globalPositionsReliable),
             pages,
         };
     });
@@ -345,6 +354,7 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
     );
     const remainingUnits = [];
     const autoDepthCapped = new Set();
+    let remainingPageBudget = Math.max(0, MAX_RECOMMENDATION_REQUEST_UNITS - firstPages.length);
     for (const firstPage of firstPages) {
         const discoveredPages = recommendationTotalPages(numberOrUndefined(firstPage.response?.data?.body?.total));
         const article = articles.find((item) => item.nmId === firstPage.nmId);
@@ -355,7 +365,12 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
             article.pages === undefined
                 ? Math.min(discoveredPages || 1, MAX_RECOMMENDATION_PAGES)
                 : Math.min(article.pages, discoveredPages || article.pages);
-        for (let page = 2; page <= requestedPages; page += 1) {
+        const additionalPages = Math.min(Math.max(0, requestedPages - 1), remainingPageBudget);
+        if (additionalPages < requestedPages - 1) {
+            autoDepthCapped.add(article.nmId);
+        }
+        remainingPageBudget -= additionalPages;
+        for (let page = 2; page <= additionalPages + 1; page += 1) {
             remainingUnits.push({ ...article, page });
         }
     }
@@ -365,18 +380,21 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
     const summaries = articles.map((article) => {
         let globalOffset = 0;
         let returnedProducts = 0;
+        let globalPositionsReliable = true;
         const articleUnits = fetched.filter((unit) => unit.nmId === article.nmId).sort((left, right) => left.page - right.page);
         const overallTotal = numberOrUndefined(articleUnits[0]?.response?.data?.body?.total);
         const discoveredPages = recommendationTotalPages(overallTotal);
         const pages = articleUnits.map((unit) => {
             const products = responseProducts(unit.response);
             const remaining = Math.max(0, projection.productLimitTotal - returnedProducts);
+            const pageGlobalPositionsReliable = globalPositionsReliable && unit.ok;
             const selected = unit.ok
                 ? projectPageProducts(
                       products,
                       globalOffset,
                       projection.productNmIds,
-                      projection.productNmIds ? MAX_RETURNED_PRODUCTS : remaining
+                      projection.productNmIds ? MAX_RETURNED_PRODUCTS : remaining,
+                      pageGlobalPositionsReliable
                   )
                 : [];
             returnedProducts += selected.length;
@@ -385,11 +403,13 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
                 ok: unit.ok,
                 httpStatus: unit.response?.data?.status,
                 total: products.length,
+                globalPositionsReliable: pageGlobalPositionsReliable,
                 products: selected,
             };
             if (!unit.ok) {
                 page.error = unit.error || unit.response?.error || unit.response?.data?.statusText || 'WB recommendation request failed';
             }
+            if (!unit.ok) globalPositionsReliable = false;
             globalOffset += products.length;
             return page;
         });
@@ -402,6 +422,7 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
             productsSeen: pages.reduce((total, page) => total + page.total, 0),
             productsReturned: pages.reduce((total, page) => total + page.products.length, 0),
             truncatedByLocalLimit: autoDepthCapped.has(article.nmId),
+            globalPositionsComplete: pages.every((page) => page.globalPositionsReliable),
             pages,
         };
     });
@@ -461,7 +482,6 @@ export const executeAuthorizedBrowserJob = async ({
         ...result,
         jobType: authorization.jobType,
         jobId: authorization.job.jobId,
-        authorizationId: authorization.authorizationId,
         expiresAt: authorization.expiresAt,
     };
 };

@@ -30,6 +30,7 @@ import { mcpError } from './mcp-protocol.mjs';
 import { loadOrCreatePeerToken, peerTokensEqual } from './peer-auth.mjs';
 import { RequestBroker } from './request-broker.mjs';
 import { attachStdioTransport } from './stdio-transport.mjs';
+import { safeExternalToolError, toolFailure } from './tool-errors.mjs';
 import { encodeFrame, parseFrames, sendWs } from './websocket.mjs';
 import { validTimeout } from './wb-domain.mjs';
 
@@ -156,7 +157,7 @@ const handleExtensionMessage = async (state, rawMessage) => {
 
     if (type === 'browser_job_authorize_result') {
         if (payload.error) {
-            requestBroker.rejectAuthorization(message.id, payload.error.message || 'Browser job authorization failed');
+            requestBroker.rejectAuthorization(message.id, safeExternalToolError(payload.error));
         } else {
             requestBroker.resolveAuthorization(message.id, payload.authorization);
         }
@@ -336,7 +337,12 @@ const handlePeerMessage = async (state, rawMessage) => {
             sendWs(state.socket, {
                 type: 'peer_browser_job_authorize_result',
                 requestId: message.requestId,
-                error: error.message,
+                error: toolFailure(error, {
+                    code: 'BROWSER_JOB_AUTHORIZATION_FAILED',
+                    message: 'Browser job authorization failed.',
+                    stage: 'authorization',
+                    retryable: false,
+                }),
             });
         }
         return;
@@ -581,7 +587,7 @@ const connectToPrimaryBridge = () => {
             return;
         }
         if (message?.type === 'peer_browser_job_authorize_result' && typeof message.requestId === 'string') {
-            if (message.error) requestBroker.rejectAuthorization(message.requestId, message.error);
+            if (message.error) requestBroker.rejectAuthorization(message.requestId, safeExternalToolError(message.error));
             else requestBroker.resolveAuthorization(message.requestId, message.authorization);
             return;
         }

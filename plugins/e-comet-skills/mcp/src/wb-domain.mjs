@@ -129,17 +129,21 @@ const summarizeListingProduct = (product, position, globalPosition) => {
         feedbacks: numberOrUndefined(product?.feedbacks),
         pics: numberOrUndefined(product?.pics),
         position,
-        globalPosition,
     };
+    if (Number.isSafeInteger(globalPosition) && globalPosition > 0) {
+        row.globalPosition = globalPosition;
+    }
     if (numberOrUndefined(product?.log?.cpm) !== undefined) {
         row.promoted = true;
     }
     return row;
 };
 
-export const projectPageProducts = (products, globalOffset, productNmIds, remainingLimit) => {
+export const projectPageProducts = (products, globalOffset, productNmIds, remainingLimit, includeGlobalPosition = true) => {
     const filter = productNmIds ? new Set(productNmIds) : null;
-    const rows = products.map((product, index) => summarizeListingProduct(product, index + 1, globalOffset + index + 1));
+    const rows = products.map((product, index) =>
+        summarizeListingProduct(product, index + 1, includeGlobalPosition ? globalOffset + index + 1 : undefined)
+    );
     const selected = filter ? rows.filter((row) => filter.has(row.nmId)) : rows.slice(0, remainingLimit);
     return selected;
 };
