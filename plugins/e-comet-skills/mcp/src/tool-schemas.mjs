@@ -25,6 +25,7 @@ const object = (properties, required = [], additionalProperties = false) => ({
 });
 
 const array = (items, extra = {}) => ({ type: 'array', items, ...extra });
+const objectUnion = (...schemas) => ({ type: 'object', oneOf: schemas });
 
 const priceSchema = object({
     basic: number,
@@ -301,10 +302,10 @@ export const toolInputSchemas = {
 
 export const toolOutputSchemas = {
     local_bridge_status: bridgeStatusSchema,
-    wb_product_card: { oneOf: [productCardSuccessSchema, toolErrorSchema] },
-    wb_search_by_query: { oneOf: [searchSuccessSchema, toolErrorSchema] },
-    wb_recommendations_by_product: { oneOf: [recommendationsSuccessSchema, toolErrorSchema] },
-    wb_product_images: { oneOf: [imagesSuccessSchema, toolErrorSchema] },
+    wb_product_card: objectUnion(productCardSuccessSchema, toolErrorSchema),
+    wb_search_by_query: objectUnion(searchSuccessSchema, toolErrorSchema),
+    wb_recommendations_by_product: objectUnion(recommendationsSuccessSchema, toolErrorSchema),
+    wb_product_images: objectUnion(imagesSuccessSchema, toolErrorSchema),
 };
 
 export const validateSchemaValue = (value, schema) => {
