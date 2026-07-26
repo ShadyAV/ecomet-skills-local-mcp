@@ -1,4 +1,0 @@
-interface:
-  display_name: "WB Product Images"
-  short_description: "Find WB image URLs by SKU"
-  default_prompt: "Find images for WB products 123456 and 12345678"

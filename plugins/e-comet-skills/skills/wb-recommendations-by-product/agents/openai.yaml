@@ -1,4 +1,0 @@
-interface:
-  display_name: "WB Product Recommendations"
-  short_description: "Live WB recommendations for product articles"
-  default_prompt: "Use $wb-recommendations-by-product to show recommendations for WB article 791050753."

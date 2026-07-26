@@ -14,8 +14,8 @@ const PENDING_FILE_PATTERN = /^[a-f0-9]{64}\.json$/;
 const CLAIM_FILE_PREFIX = '.claim-';
 const REMOTE_BROWSER_JOB_TOOL =
     /^mcp__(?:plugin_e-comet-skills_)?e[-_]comet(?:[-_]stage)?__browser_job$/;
-const LOCAL_EXECUTE_TOOL =
-    /^mcp__(?:plugin_e-comet-skills_)?e[-_]comet[-_]local__execute_browser_job$/;
+const LOCAL_BROWSER_TOOL =
+    /^mcp__(?:plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:wb_product_card|wb_search_by_query|wb_recommendations_by_product)$/;
 
 class HandoffError extends Error {
     constructor(code, message) {
@@ -283,7 +283,7 @@ export const processHookEvent = async (event, { env = process.env, nowMs = Date.
         }
     }
 
-    if (eventName === 'PreToolUse' && LOCAL_EXECUTE_TOOL.test(event.tool_name)) {
+    if (eventName === 'PreToolUse' && LOCAL_BROWSER_TOOL.test(event.tool_name)) {
         try {
             if (!event.tool_input || typeof event.tool_input !== 'object' || Array.isArray(event.tool_input)) {
                 throw new HandoffError('HANDOFF_INVALID_INPUT', 'The local browser-job arguments are invalid.');

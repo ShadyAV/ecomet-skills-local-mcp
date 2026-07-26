@@ -1,13 +1,13 @@
 {
   "name": "e-comet-skills",
-  "displayName": "e-Comet Skills",
-  "description": "WB analytics and live browser data through e-Comet MCP servers.",
+  "displayName": "e-Comet",
+  "description": "Self-describing MCP tools for e-Comet analytics and live Wildberries data.",
   "repository": "https://github.com/e-comet/skills",
   "license": "Apache-2.0",
   "mcpServers": {
     "e-comet": {
       "type": "http",
-      "url": "https://mcp.stage.int.e-comet.io/mcp"
+      "url": "https://mcp.e-comet.io/mcp"
     },
     "e-comet-local": {
       "type": "stdio",

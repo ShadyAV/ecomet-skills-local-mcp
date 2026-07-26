@@ -25,11 +25,14 @@ Full responses use the platform-standard user data directory: `%LOCALAPPDATA%\e-
 
 Local tools:
 
-- `execute_browser_job` — executes the signed, expiring browser authorization handed off by the host-specific trusted path;
+- `wb_product_card` — discovers and executes signed live product-card requests;
+- `wb_search_by_query` — discovers and executes signed live WB search requests;
+- `wb_recommendations_by_product` — discovers and executes signed recommendation-shelf requests;
 - `local_bridge_status` — reports whether the extension is connected;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
 
-For card, search, and recommendation skills the agent first sends only the small task descriptor to remote `browser_job`.
+The agent discovers the matching typed local tool first. Its description then requires sending only the small task
+descriptor to remote `browser_job` before invoking the selected local tool.
 Claude uses the plugin's `PostToolUse` and `PreToolUse` hooks to hand off the exact opaque JWT. Codex/ChatGPT Desktop
 executes both MCP calls inside one `exec` and passes the value only through a local JavaScript variable. The model does
 not reproduce the token as text. The extension verifies the RS256 signature, expiry, account UUID, job type, and exact

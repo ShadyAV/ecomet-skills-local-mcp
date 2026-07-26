@@ -1,7 +1,7 @@
 {
   "name": "e-comet-skills",
-  "version": "2026.7.7-stage.2",
-  "description": "WB analytics and live browser data through e-Comet MCP servers.",
+  "version": "2026.7.6",
+  "description": "Self-describing MCP tools for e-Comet analytics and live Wildberries data.",
   "author": {
     "name": "e-Comet",
     "url": "https://e-comet.io/"
@@ -9,12 +9,11 @@
   "homepage": "https://github.com/e-comet/skills",
   "repository": "https://github.com/e-comet/skills",
   "license": "Apache-2.0",
-  "keywords": ["agent-skills", "wildberries", "wb", "e-comet"],
-  "skills": "./skills/",
+  "keywords": ["mcp", "wildberries", "wb", "e-comet"],
   "mcpServers": {
     "e-comet": {
       "type": "http",
-      "url": "https://mcp.stage.int.e-comet.io/mcp"
+      "url": "https://mcp.e-comet.io/mcp"
     },
     "e-comet-local": {
       "type": "stdio",
@@ -24,8 +23,8 @@
     }
   },
   "interface": {
-    "displayName": "e-Comet Skills",
-    "shortDescription": "WB and e-Comet agent skills",
+    "displayName": "e-Comet",
+    "shortDescription": "WB analytics and live-data MCP tools",
     "longDescription": "Analyze e-Comet account data and get authorized live WB data through the user's browser.",
     "developerName": "e-Comet",
     "category": "Developer Tools",

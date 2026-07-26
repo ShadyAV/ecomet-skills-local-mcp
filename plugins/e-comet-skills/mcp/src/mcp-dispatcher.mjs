@@ -21,12 +21,12 @@ export const createMcpMessageHandler = ({
     sendError = mcpError,
     sendResult = mcpResult,
 }) => {
-    const handleExecuteBrowserJob = async (id, args = {}) => {
+    const handleBrowserJob = async (id, toolName, expectedJobType, args = {}) => {
         const triggerUrl = args.triggerUrl;
         const productLimitTotal = args.productLimitTotal ?? DEFAULT_RETURNED_PRODUCTS;
         const productNmIds = args.productNmIds;
-        if (!validateToolArguments('execute_browser_job', args)) {
-            sendResult(id, textResult({ ok: false, error: 'Invalid execute_browser_job arguments' }, true));
+        if (!validateToolArguments(toolName, args)) {
+            sendResult(id, textResult({ ok: false, error: `Invalid ${toolName} arguments` }, true));
             return;
         }
         if (typeof triggerUrl !== 'string' || !triggerUrl) {
@@ -43,13 +43,11 @@ export const createMcpMessageHandler = ({
             );
             return;
         }
-        if (!isExtensionReady()) {
-            sendResult(id, textResult({ ok: false, error: 'The e-Comet Chrome extension is not connected' }, true));
-            return;
-        }
-
         let writer;
         try {
+            if (!isExtensionReady()) {
+                throw new Error('The e-Comet Chrome extension is not connected');
+            }
             const token = extractBrowserJobToken(triggerUrl);
             const authorization = await requestBrowserJobAuthorization(token);
             if (
@@ -60,6 +58,9 @@ export const createMcpMessageHandler = ({
                 typeof authorization.job !== 'object'
             ) {
                 throw new Error('Extension returned an invalid browser job authorization');
+            }
+            if (authorization.jobType !== expectedJobType) {
+                throw new Error(`Signed ${authorization.jobType} job cannot be executed as ${toolName}`);
             }
             validateAuthorizedJobLimits(authorization);
             writer = await createJobWriter(authorization.job.jobId);
@@ -179,7 +180,12 @@ export const createMcpMessageHandler = ({
 
     const toolHandlers = new Map([
         ['local_bridge_status', async (id) => sendResult(id, textResult({ ok: true, ...getBridgeStatus() }))],
-        ['execute_browser_job', (id, args) => handleExecuteBrowserJob(id, args)],
+        ['wb_product_card', (id, args) => handleBrowserJob(id, 'wb_product_card', 'product_card', args)],
+        ['wb_search_by_query', (id, args) => handleBrowserJob(id, 'wb_search_by_query', 'search_by_query', args)],
+        [
+            'wb_recommendations_by_product',
+            (id, args) => handleBrowserJob(id, 'wb_recommendations_by_product', 'recommendations_by_product', args),
+        ],
         ['wb_product_images', (id, args) => handleProductImages(id, args)],
     ]);
 
