@@ -37,7 +37,7 @@ export const toolFailure = (error, fallback = {}) => {
         return {
             ok: false,
             code: 'EXTENSION_DISCONNECTED',
-            message: 'The e-Comet Chrome extension is not connected.',
+            message: 'Open an authenticated Wildberries tab, then retry the e-Comet request.',
             stage: 'extension',
             retryable: true,
         };
