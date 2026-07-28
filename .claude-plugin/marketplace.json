@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "e-comet-skills",
-  "description": "Public WB and e-Comet agent skills with helper scripts.",
+  "description": "Self-describing e-Comet MCP tools for analytics and live Wildberries data.",
   "owner": {
     "name": "e-Comet"
   },
   "plugins": [
     {
       "name": "e-comet-skills",
-      "description": "Public WB and e-Comet agent skills with helper scripts.",
+      "description": "Self-describing e-Comet MCP tools for analytics and live Wildberries data.",
       "source": "./plugins/e-comet-skills",
       "category": "developer-tools"
     }

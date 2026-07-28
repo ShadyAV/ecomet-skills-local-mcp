@@ -9,6 +9,7 @@ release snapshot of its `src/` directory.
 The MCP listens only on `127.0.0.1:17361`, and the extension connects automatically while local access is enabled.
 There is no pairing flow in the MVP. Full WB responses are stored in the platform-standard user data directory; MCP
 tool results contain only compact summaries and local paths.
+The extension WebSocket accepts only the official e-Comet Chrome Web Store origin by default.
 
 Each result file is UTF-8 NDJSON with one fetched unit per line:
 
@@ -22,6 +23,8 @@ The original WB payload is at `response.data.body`. Product-card responses may a
 Full responses use the platform-standard user data directory: `%LOCALAPPDATA%\e-comet\local-agent` on Windows,
 `~/Library/Application Support/e-comet/local-agent` on macOS, and
 `${XDG_DATA_HOME:-~/.local/share}/e-comet/local-agent` on Linux. `ECOMET_LOCAL_AGENT_RESULT_DIR` overrides this path.
+POSIX result directories are created or repaired to mode `0700` and result files to `0600`. On Windows, privacy relies
+on ACL inheritance from the current user's local application-data directory rather than POSIX mode bits.
 
 Local tools:
 

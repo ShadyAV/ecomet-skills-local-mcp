@@ -1,7 +1,7 @@
 {
   "name": "e-comet-skills",
   "interface": {
-    "displayName": "e-Comet Skills"
+    "displayName": "e-Comet MCP Tools"
   },
   "plugins": [
     {

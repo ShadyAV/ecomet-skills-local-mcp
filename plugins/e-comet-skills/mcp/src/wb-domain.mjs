@@ -2,14 +2,12 @@ import {
     IMAGE_BASKET_BOUNDS,
     RECOMMENDATION_PAGE_SIZE,
     IMAGE_CONCURRENCY,
-    MAX_PRODUCT_ARTICLES,
     MAX_REQUEST_TIMEOUT_MS,
-    MAX_RETURNED_PRODUCTS,
     MIN_REQUEST_TIMEOUT_MS,
 } from './config.mjs';
 
 const ALLOWED_WB_HOSTS = new Set(['wildberries.ru', 'www.wildberries.ru']);
-const ALLOWED_WB_PATH = /^\/__internal\/(card|u-card|search|u-search|recom|u-recom|recommendations)\//;
+const ALLOWED_WB_PATH = /^\/__internal\/(card|search|recom|recommendations)\//;
 const WB_CARD_HOST = /^basket-\d+\.wbbasket\.ru$/;
 const WB_CARD_PATH = /^\/vol(?<vol>\d+)\/part(?<part>\d+)\/(?<nm>\d+)\/info\/[a-z]{2}\/card\.json$/;
 
@@ -37,61 +35,6 @@ export const isAllowedWbUrl = (value) => {
     }
 };
 
-export const productDetailUrl = (nmId) =>
-    `https://www.wildberries.ru/__internal/card/cards/v4/detail?appType=32&curr=rub&dest=-1257786&spp=30&hide_dtype=11&ab_testing=false&lang=ru&nm=${encodeURIComponent(
-        nmId
-    )}`;
-
-export const buildSearchUrls = (query, page) => {
-    const params = new URLSearchParams({
-        ab_testing: 'false',
-        appType: '1',
-        curr: 'rub',
-        dest: '-1257786',
-        hide_dtype: '15',
-        hide_vflags: '4294967296',
-        inheritFilters: 'true',
-        lang: 'ru',
-        locale: 'ru',
-        query,
-        resultset: 'catalog',
-        sort: 'popular',
-        spp: '30',
-        suppressSpellcheck: 'false',
-    });
-    if (page > 1) {
-        params.set('page', String(page));
-    }
-    const suffix = `exactmatch/ru/common/v18/search?${params}`;
-    return [
-        `https://www.wildberries.ru/__internal/u-search/${suffix}`,
-        `https://www.wildberries.ru/__internal/search/${suffix}`,
-    ];
-};
-export const buildRecommendationUrls = (nmId, page) => {
-    const params = new URLSearchParams({
-        ab_testing: 'false',
-        appType: '1',
-        curr: 'rub',
-        dest: '-1257786',
-        hide_dtype: '15',
-        hide_vflags: '4294967296',
-        lang: 'ru',
-        locale: 'ru',
-        query: String(nmId),
-        resultset: 'catalog',
-        sort: 'popular',
-        spp: '30',
-        uclusters: '3',
-        page: String(page),
-    });
-    const suffix = `recom/ru/male/v8/search?${params}`;
-    return [
-        `https://www.wildberries.ru/__internal/u-recom/${suffix}`,
-        `https://www.wildberries.ru/__internal/recom/${suffix}`,
-    ];
-};
-
 export const responseProducts = (response) => (Array.isArray(response?.data?.body?.products) ? response.data.body.products : []);
 
 export const isSuccessfulWbResponse = (response) =>
@@ -100,17 +43,6 @@ export const isSuccessfulWbResponse = (response) =>
     typeof response?.data?.status === 'number' &&
     response.data.status >= 200 &&
     response.data.status < 300;
-
-export const requestWbFetchWithFallback = async (requestWbFetch, urls, timeout) => {
-    let lastResponse;
-    for (const url of urls) {
-        lastResponse = await requestWbFetch(url, timeout);
-        if (isSuccessfulWbResponse(lastResponse)) {
-            return { url, response: lastResponse };
-        }
-    }
-    return { url: urls.at(-1), response: lastResponse };
-};
 
 export const numberOrUndefined = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
 
@@ -155,17 +87,6 @@ export const validTimeout = (timeout) =>
     Number.isFinite(timeout) &&
     timeout >= MIN_REQUEST_TIMEOUT_MS &&
     timeout <= MAX_REQUEST_TIMEOUT_MS;
-
-export const validProductProjection = (productLimitTotal, productNmIds) =>
-    Number.isInteger(productLimitTotal) &&
-    productLimitTotal >= 1 &&
-    productLimitTotal <= MAX_RETURNED_PRODUCTS &&
-    (productNmIds === undefined ||
-        (Array.isArray(productNmIds) &&
-            productNmIds.length >= 1 &&
-            productNmIds.length <= MAX_PRODUCT_ARTICLES &&
-            productNmIds.every((nmId) => Number.isSafeInteger(nmId) && nmId > 0) &&
-            new Set(productNmIds).size === productNmIds.length));
 
 export const recommendationTotalPages = (total) => {
     if (!Number.isInteger(total) || total < 0) {

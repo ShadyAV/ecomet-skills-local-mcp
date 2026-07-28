@@ -71,7 +71,7 @@ export const tools = [
         description:
             'Get live Wildberries recommendation shelves for source article IDs and check whether specific products occur in them. Use for Russian requests about рекомендации, похожие товары, рекомендательная полка, соседние товары, or whether a product встречается в рекомендациях. ' +
             authorizationWorkflow +
-            'Authorize with job {type:"recommendations_by_product",articles:[{nm:integer,pages?:integer},...]}; use at most 20 source articles, 60 pages per article, and 60 страниц суммарно. ' +
+            'Authorize with job {type:"recommendations_by_product",articles:[{nm:integer,pages?:integer},...]}; use at most 20 unique source articles, 50 pages per article, and 50 страниц суммарно. ' +
             'For первые N recommendations, explicitly request pages: 1 and pass local productLimitTotal: N. Omit pages only when the user explicitly needs the whole discovered shelf within local limits. ' +
             'For a membership check, put исходные товары in remote job.articles and целевые товары in local productNmIds. Read articles[].pages[].products and group results by sourceNmId. ' +
             'Use globalPosition only when globalPositionsComplete is true. If a target is absent, claim only that it was not found in the successfully requested part of that source shelf. ' +

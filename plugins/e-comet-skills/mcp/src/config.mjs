@@ -16,17 +16,35 @@ const readBuildVersion = () => {
 };
 
 export const HOST = '127.0.0.1';
-export const PORT = Number(process.env.ECOMET_LOCAL_BRIDGE_PORT || 17361);
+const validPort = (value, fallback) => {
+    if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)$/.test(value)) return fallback;
+    const port = Number(value);
+    return port <= 65535 ? port : fallback;
+};
+export const resolveBridgePort = ({ env = process.env } = {}) => {
+    const mode = env.NODE_ENV;
+    const allowOverride = mode === 'test' || mode === 'development';
+    return allowOverride ? validPort(env.ECOMET_LOCAL_BRIDGE_PORT, 17361) : 17361;
+};
+export const PORT = resolveBridgePort();
 export const EXTENSION_PATH = '/extension';
 export const PEER_PATH = '/mcp-peer';
 export const CONTROL_PROTOCOL_VERSION = 1;
 export const EXTENSION_PROTOCOL_VERSION = 1;
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-06-18'];
 export const LATEST_MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0];
-export const BRIDGE_GENERATION = Number(process.env.ECOMET_LOCAL_BRIDGE_GENERATION || 1);
+const DEFAULT_BRIDGE_GENERATION = 2;
+export const resolveBridgeGeneration = ({ env = process.env } = {}) => {
+    const mode = env.NODE_ENV;
+    if (mode !== 'test' && mode !== 'development') return DEFAULT_BRIDGE_GENERATION;
+    const generation = Number(env.ECOMET_LOCAL_BRIDGE_GENERATION);
+    return Number.isSafeInteger(generation) && generation > 0 ? generation : DEFAULT_BRIDGE_GENERATION;
+};
+export const BRIDGE_GENERATION = resolveBridgeGeneration();
 export const BRIDGE_VERSION = readBuildVersion();
 export const HANDOFF_RECONNECT_GRACE_MS = 2000;
 export const HANDOFF_DRAIN_POLL_MS = 25;
+export const EXTENSION_READINESS_WAIT_MS = 2000;
 export const PEER_RECONNECT_BASE_MS = 500;
 export const PEER_RECONNECT_MAX_MS = 30_000;
 export const PEER_RECONNECT_MAX_ATTEMPTS = 8;
@@ -45,8 +63,8 @@ export const MAX_SEARCH_PAGES = 50;
 export const MAX_SEARCH_QUERIES = 10;
 export const SEARCH_CONCURRENCY = 4;
 export const MAX_RECOMMENDATION_ARTICLES = 20;
-export const MAX_RECOMMENDATION_PAGES = 60;
-export const MAX_RECOMMENDATION_REQUEST_UNITS = 60;
+export const MAX_RECOMMENDATION_PAGES = 50;
+export const MAX_RECOMMENDATION_REQUEST_UNITS = 50;
 export const RECOMMENDATION_PAGE_SIZE = 100;
 export const RECOMMENDATION_CONCURRENCY = 4;
 export const MAX_RETURNED_PRODUCTS = 200;
@@ -60,6 +78,9 @@ const positiveIntegerEnv = (name, fallback) => {
     const value = Number(process.env[name]);
     return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 };
+export const AUTHORIZATION_SCOPE_MAX_MS = positiveIntegerEnv('ECOMET_AUTHORIZATION_SCOPE_MAX_MS', 10 * 60 * 1000);
+export const HANDOFF_MAX_DRAIN_MS = positiveIntegerEnv('ECOMET_HANDOFF_MAX_DRAIN_MS', 10_000);
+export const MAX_ACTIVE_AUTHORIZATION_SCOPES = positiveIntegerEnv('ECOMET_MAX_ACTIVE_AUTHORIZATION_SCOPES', 32);
 export const RESULT_RETENTION_MS = positiveIntegerEnv('ECOMET_RESULT_RETENTION_MS', 24 * 60 * 60 * 1000);
 export const RESULT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_RESULT_MAX_TOTAL_BYTES', 512 * 1024 * 1024);
 export const RESULT_MAX_FILE_BYTES = positiveIntegerEnv('ECOMET_RESULT_MAX_FILE_BYTES', 64 * 1024 * 1024);
@@ -85,9 +106,13 @@ export const resolveResultDir = (options = {}) =>
 export const LOCAL_STATE_DIR = resolveLocalStateDir();
 export const RESULT_DIR = resolveResultDir();
 export const SESSION_NONCE = randomUUID();
-export const ALLOWED_EXTENSION_IDS = new Set(
+export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
+export const EXTENSION_ID_OVERRIDE_ENABLED =
+    process.env.ECOMET_ENABLE_EXTENSION_ID_OVERRIDE === '1' && ['test', 'development'].includes(process.env.NODE_ENV);
+const extensionIdOverride = new Set(
     (process.env.ECOMET_ALLOWED_EXTENSION_IDS || '')
         .split(',')
         .map((value) => value.trim())
         .filter(Boolean)
 );
+export const ALLOWED_EXTENSION_IDS = EXTENSION_ID_OVERRIDE_ENABLED ? extensionIdOverride : new Set([OFFICIAL_EXTENSION_ID]);

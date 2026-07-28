@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -12,6 +12,13 @@ const CLOCK_SKEW_MS = 5_000;
 const STORE_DIRECTORY = 'browser-job-handoff-v1';
 const PENDING_FILE_PATTERN = /^[a-f0-9]{64}\.json$/;
 const CLAIM_FILE_PREFIX = '.claim-';
+const STAGE_FILE_PREFIX = '.stage-';
+const COLLISION_FILE_PREFIX = '.collision-';
+const LOCK_FILE_SUFFIX = '.lock';
+const LOCK_RETRY_DELAY_MS = 5;
+const LOCK_RETRY_LIMIT = 200;
+const LOCK_RELEASE_RETRY_LIMIT = 20;
+const TRANSIENT_WINDOWS_LOCK_ERRORS = new Set(['EPERM', 'EBUSY']);
 const REMOTE_BROWSER_JOB_TOOL =
     /^mcp__(?:plugin_e-comet-skills_)?e[-_]comet(?:[-_]stage)?__browser_job$/;
 const LOCAL_BROWSER_TOOL =
@@ -63,6 +70,10 @@ const resolveStoreDirectory = (env) => {
 };
 
 const pendingPathForSession = (storeDirectory, sessionId) => join(storeDirectory, `${hashSessionId(sessionId)}.json`);
+const lockPathForSession = (storeDirectory, sessionId) => join(storeDirectory, `${hashSessionId(sessionId)}${LOCK_FILE_SUFFIX}`);
+const stageFilePrefixForSession = (sessionId) => `${STAGE_FILE_PREFIX}${hashSessionId(sessionId)}-`;
+const collisionPathForSession = (storeDirectory, sessionId) =>
+    join(storeDirectory, `${COLLISION_FILE_PREFIX}${hashSessionId(sessionId)}`);
 
 const parseStoredEntry = (text) => {
     let entry;
@@ -92,6 +103,158 @@ const removeFile = async (path) => {
     } catch (error) {
         if (error?.code !== 'ENOENT') throw error;
     }
+};
+
+const wait = (delayMs) => new Promise((resolveWait) => setTimeout(resolveWait, delayMs));
+
+export const releaseOwnedSessionLock = async ({
+    lockPath,
+    ownerPath,
+    retryLimit = LOCK_RELEASE_RETRY_LIMIT,
+    waitForRetry = wait,
+    operations = {},
+}) => {
+    const unlinkOwner = operations.unlink ?? unlink;
+    const removeLockDirectory = operations.rmdir ?? rmdir;
+    const readLockDirectory = operations.readdir ?? readdir;
+    for (let attempt = 0; attempt < retryLimit; attempt += 1) {
+        try {
+            await unlinkOwner(ownerPath);
+            break;
+        } catch (error) {
+            if (error?.code === 'ENOENT') break;
+            if (!TRANSIENT_WINDOWS_LOCK_ERRORS.has(error?.code) || attempt === retryLimit - 1) throw error;
+            await waitForRetry(LOCK_RETRY_DELAY_MS);
+        }
+    }
+    for (let attempt = 0; attempt < retryLimit; attempt += 1) {
+        try {
+            await removeLockDirectory(lockPath);
+            return;
+        } catch (error) {
+            if (['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) return;
+            if (!TRANSIENT_WINDOWS_LOCK_ERRORS.has(error?.code)) throw error;
+            try {
+                if ((await readLockDirectory(lockPath)).length > 0) return;
+            } catch (readError) {
+                if (readError?.code === 'ENOENT') return;
+                if (!TRANSIENT_WINDOWS_LOCK_ERRORS.has(readError?.code)) throw readError;
+            }
+            if (attempt === retryLimit - 1) throw error;
+            await waitForRetry(LOCK_RETRY_DELAY_MS);
+        }
+    }
+};
+
+const acquireSessionLock = async (storeDirectory, sessionId) => {
+    const lockPath = lockPathForSession(storeDirectory, sessionId);
+    for (let attempt = 0; attempt < LOCK_RETRY_LIMIT; attempt += 1) {
+        const ownerId = `${process.pid}-${randomUUID()}`;
+        const candidatePath = join(storeDirectory, `${CLAIM_FILE_PREFIX}lock-${ownerId}`);
+        const candidateOwnerPath = join(candidatePath, ownerId);
+        await mkdir(candidatePath, { mode: 0o700 });
+        try {
+            await writeFile(candidateOwnerPath, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+            await rename(candidatePath, lockPath);
+            const ownerPath = join(lockPath, ownerId);
+            return () => releaseOwnedSessionLock({ lockPath, ownerPath });
+        } catch (error) {
+            await rm(candidatePath, { recursive: true, force: true });
+            if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
+        }
+
+        try {
+            const lockStat = await stat(lockPath);
+            if (Date.now() - lockStat.mtimeMs > HANDOFF_TTL_MS) {
+                const stalePath = join(storeDirectory, `${CLAIM_FILE_PREFIX}stale-lock-${process.pid}-${randomUUID()}`);
+                try {
+                    const currentLockStat = await stat(lockPath);
+                    if (
+                        currentLockStat.dev !== lockStat.dev ||
+                        currentLockStat.ino !== lockStat.ino ||
+                        currentLockStat.mtimeMs !== lockStat.mtimeMs
+                    ) {
+                        continue;
+                    }
+                    await rename(lockPath, stalePath);
+                    await rm(stalePath, { recursive: true, force: true });
+                } catch (error) {
+                    if (error?.code !== 'ENOENT') throw error;
+                }
+                continue;
+            }
+        } catch (error) {
+            if (error?.code !== 'ENOENT') throw error;
+        }
+        await wait(LOCK_RETRY_DELAY_MS);
+    }
+    throw new HandoffError('HANDOFF_BUSY', 'Another browser authorization handoff is still in progress.');
+};
+
+const withSessionLock = async (storeDirectory, sessionId, operation) => {
+    const releaseLock = await acquireSessionLock(storeDirectory, sessionId);
+    try {
+        return await operation();
+    } finally {
+        await releaseLock();
+    }
+};
+
+const hasActiveStage = async (storeDirectory, sessionId) => {
+    const stageFilePrefix = stageFilePrefixForSession(sessionId);
+    const entries = await readdir(storeDirectory, { withFileTypes: true });
+    return entries.some((entry) => entry.isFile() && entry.name.startsWith(stageFilePrefix));
+};
+
+const readCollision = async (storeDirectory, sessionId) => {
+    try {
+        const entry = JSON.parse(await readFile(collisionPathForSession(storeDirectory, sessionId), 'utf8'));
+        if (
+            entry?.version === 1 &&
+            typeof entry.generationId === 'string' &&
+            entry.generationId &&
+            ['open', 'closed'].includes(entry.status)
+        ) {
+            return entry;
+        }
+        return { version: 1, generationId: null, status: 'open' };
+    } catch (error) {
+        if (error?.code === 'ENOENT') return null;
+        if (error instanceof SyntaxError) return { version: 1, generationId: null, status: 'open' };
+        throw error;
+    }
+};
+
+const hasCollision = async (storeDirectory, sessionId) => (await readCollision(storeDirectory, sessionId)) !== null;
+
+const recordCollision = async (storeDirectory, sessionId) => {
+    try {
+        await writeFile(
+            collisionPathForSession(storeDirectory, sessionId),
+            JSON.stringify({ version: 1, generationId: randomUUID(), status: 'open' }),
+            {
+                encoding: 'utf8',
+                flag: 'wx',
+                mode: 0o600,
+            }
+        );
+    } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+    }
+};
+
+const closeCollision = async (storeDirectory, sessionId) => {
+    const collision = await readCollision(storeDirectory, sessionId);
+    if (!collision) return;
+    await writeFile(
+        collisionPathForSession(storeDirectory, sessionId),
+        JSON.stringify({
+            version: 1,
+            generationId: collision.generationId || randomUUID(),
+            status: 'closed',
+        }),
+        { encoding: 'utf8', mode: 0o600 }
+    );
 };
 
 const cleanupStore = async (storeDirectory, nowMs) => {
@@ -126,6 +289,24 @@ const cleanupStore = async (storeDirectory, nowMs) => {
             } catch (error) {
                 if (error?.code !== 'ENOENT') throw error;
             }
+            continue;
+        }
+        if (directoryEntry.name.startsWith(STAGE_FILE_PREFIX)) {
+            try {
+                const fileStat = await stat(path);
+                if (Date.now() - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
+            } catch (error) {
+                if (error?.code !== 'ENOENT') throw error;
+            }
+            continue;
+        }
+        if (directoryEntry.name.startsWith(COLLISION_FILE_PREFIX)) {
+            try {
+                const fileStat = await stat(path);
+                if (Date.now() - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
+            } catch (error) {
+                if (error?.code !== 'ENOENT') throw error;
+            }
         }
     }
     return pendingCount;
@@ -135,53 +316,103 @@ export const stageTriggerUrl = async ({ dataDirectory, sessionId, triggerUrl, no
     validateSessionId(sessionId);
     validateTriggerUrl(triggerUrl);
     await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
-    const pendingCount = await cleanupStore(dataDirectory, nowMs);
-    if (pendingCount >= MAX_PENDING_ENTRIES) {
-        throw new HandoffError('HANDOFF_CAPACITY', 'Too many browser authorizations are waiting locally.');
-    }
-
-    const pendingPath = pendingPathForSession(dataDirectory, sessionId);
-    const payload = JSON.stringify({ version: 1, createdAtMs: nowMs, triggerUrl });
+    const stagePath = join(dataDirectory, `${stageFilePrefixForSession(sessionId)}${process.pid}-${randomUUID()}`);
+    const observedCollision = await readCollision(dataDirectory, sessionId);
+    await writeFile(
+        stagePath,
+        JSON.stringify({
+            version: 1,
+            collisionGenerationId: observedCollision?.generationId ?? null,
+            collisionStatus: observedCollision?.status ?? null,
+        }),
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 }
+    );
     try {
-        await writeFile(pendingPath, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    } catch (error) {
-        if (error?.code !== 'EEXIST') throw error;
-        await removeFile(pendingPath);
-        throw new HandoffError(
-            'HANDOFF_CONFLICT',
-            'Another browser authorization was already waiting in this conversation.'
-        );
+        await withSessionLock(dataDirectory, sessionId, async () => {
+            const pendingCount = await cleanupStore(dataDirectory, nowMs);
+            if (pendingCount >= MAX_PENDING_ENTRIES) {
+                throw new HandoffError('HANDOFF_CAPACITY', 'Too many browser authorizations are waiting locally.');
+            }
+
+            const pendingPath = pendingPathForSession(dataDirectory, sessionId);
+            const collision = await readCollision(dataDirectory, sessionId);
+            if (collision) {
+                const stageEntry = JSON.parse(await readFile(stagePath, 'utf8'));
+                const startsNewGeneration =
+                    collision.status === 'closed' &&
+                    collision.generationId !== null &&
+                    stageEntry.collisionGenerationId === collision.generationId &&
+                    stageEntry.collisionStatus === 'closed';
+                if (startsNewGeneration) {
+                    await removeFile(collisionPathForSession(dataDirectory, sessionId));
+                } else {
+                    await removeFile(pendingPath);
+                    throw new HandoffError(
+                        'HANDOFF_CONFLICT',
+                        'Another browser authorization was already waiting in this conversation.'
+                    );
+                }
+            }
+            const payload = JSON.stringify({ version: 1, createdAtMs: nowMs, triggerUrl });
+            try {
+                await writeFile(pendingPath, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+            } catch (error) {
+                if (error?.code !== 'EEXIST') throw error;
+                await removeFile(pendingPath);
+                await recordCollision(dataDirectory, sessionId);
+                throw new HandoffError(
+                    'HANDOFF_CONFLICT',
+                    'Another browser authorization was already waiting in this conversation.'
+                );
+            }
+        });
+    } finally {
+        await withSessionLock(dataDirectory, sessionId, async () => {
+            await removeFile(stagePath);
+            await cleanupStore(dataDirectory, nowMs);
+            if (!(await hasActiveStage(dataDirectory, sessionId))) {
+                await closeCollision(dataDirectory, sessionId);
+            }
+        });
     }
 };
 
 export const claimTriggerUrl = async ({ dataDirectory, sessionId, nowMs = Date.now() }) => {
     validateSessionId(sessionId);
     await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
-    await cleanupStore(dataDirectory, nowMs);
-
-    const pendingPath = pendingPathForSession(dataDirectory, sessionId);
-    const claimPath = join(dataDirectory, `${CLAIM_FILE_PREFIX}${process.pid}-${randomUUID()}`);
-    try {
-        await rename(pendingPath, claimPath);
-    } catch (error) {
-        if (error?.code === 'ENOENT') {
+    return withSessionLock(dataDirectory, sessionId, async () => {
+        await cleanupStore(dataDirectory, nowMs);
+        if ((await hasActiveStage(dataDirectory, sessionId)) || (await hasCollision(dataDirectory, sessionId))) {
             throw new HandoffError(
                 'HANDOFF_MISSING',
-                'No browser authorization is waiting for this conversation.'
+                'No unambiguous browser authorization is waiting for this conversation.'
             );
         }
-        throw error;
-    }
 
-    try {
-        const entry = parseStoredEntry(await readFile(claimPath, 'utf8'));
-        if (!isEntryFresh(entry, nowMs)) {
-            throw new HandoffError('HANDOFF_EXPIRED', 'The pending browser authorization expired.');
+        const pendingPath = pendingPathForSession(dataDirectory, sessionId);
+        const claimPath = join(dataDirectory, `${CLAIM_FILE_PREFIX}${process.pid}-${randomUUID()}`);
+        try {
+            await rename(pendingPath, claimPath);
+        } catch (error) {
+            if (error?.code === 'ENOENT') {
+                throw new HandoffError(
+                    'HANDOFF_MISSING',
+                    'No browser authorization is waiting for this conversation.'
+                );
+            }
+            throw error;
         }
-        return entry.triggerUrl;
-    } finally {
-        await removeFile(claimPath);
-    }
+
+        try {
+            const entry = parseStoredEntry(await readFile(claimPath, 'utf8'));
+            if (!isEntryFresh(entry, nowMs)) {
+                throw new HandoffError('HANDOFF_EXPIRED', 'The pending browser authorization expired.');
+            }
+            return entry.triggerUrl;
+        } finally {
+            await removeFile(claimPath);
+        }
+    });
 };
 
 const collectTriggerUrlCandidates = (toolResponse) => {

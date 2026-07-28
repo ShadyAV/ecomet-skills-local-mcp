@@ -32,6 +32,7 @@ export class HandoffState {
     abandon(target) {
         if (!this.isTarget(target)) return false;
         this.target = null;
+        this.transitioning = false;
         return true;
     }
 

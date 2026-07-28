@@ -14,6 +14,7 @@ import {
     REQUEST_TIMEOUT_MS,
     SEARCH_CONCURRENCY,
 } from './config.mjs';
+import { ToolExecutionError } from './tool-errors.mjs';
 import {
     isSuccessfulWbResponse,
     normalizeStatus,
@@ -27,6 +28,11 @@ import {
 } from './wb-domain.mjs';
 
 const validJobTimeout = (job) => job.timeout === undefined || validTimeout(job.timeout);
+const rethrowAuthorizationError = (error) => {
+    if (error instanceof ToolExecutionError && error.stage === 'authorization') {
+        throw error;
+    }
+};
 
 export const validateAuthorizedJobLimits = (authorization) => {
     const job = authorization?.job;
@@ -94,6 +100,7 @@ export const validateAuthorizedJobLimits = (authorization) => {
             Array.isArray(articles) &&
             articles.length >= 1 &&
             articles.length <= MAX_RECOMMENDATION_ARTICLES &&
+            new Set(articles.map(([nm]) => nm)).size === articles.length &&
             articles.every(
                 (item) =>
                     Array.isArray(item) &&
@@ -105,7 +112,7 @@ export const validateAuthorizedJobLimits = (authorization) => {
             articles.reduce((total, item) => total + (item[1] ?? 1), 0) <= MAX_RECOMMENDATION_REQUEST_UNITS;
         if (!validRecommendations) {
             throw new Error(
-                `Browser recommendations job exceeds the local limit of ${MAX_RECOMMENDATION_ARTICLES} articles, ` +
+                `Browser recommendations job requires at most ${MAX_RECOMMENDATION_ARTICLES} unique articles, ` +
                     `${MAX_RECOMMENDATION_PAGES} pages per article, or ${MAX_RECOMMENDATION_REQUEST_UNITS} total pages`
             );
         }
@@ -120,9 +127,10 @@ export const extractBrowserJobToken = (value) => {
         throw new Error('triggerUrl must be a browser_job trigger URL or JWT string');
     }
     const input = value.trim();
-    if (!input || Buffer.byteLength(input, 'utf8') > MAX_BROWSER_JOB_TOKEN_BYTES) {
+    if (!input) {
         throw new Error('triggerUrl must be a browser_job trigger URL or JWT string');
     }
+    if (Buffer.byteLength(input, 'utf8') > MAX_BROWSER_JOB_TOKEN_BYTES) throw new Error('triggerUrl is too large');
     if (!input.includes('__agent_job')) {
         if (input.split('.').length !== 3) throw new Error('Invalid browser_job JWT');
         return input;
@@ -186,6 +194,7 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
                 ok: isSuccessfulWbResponse(response) && Array.isArray(response?.data?.body?.products),
             };
         } catch (error) {
+            rethrowAuthorizationError(error);
             await writer.append({
                 jobId: job.jobId,
                 ...unit,
@@ -269,6 +278,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
             await writer.append({ jobId: job.jobId, ...unit, response });
             return { ...unit, response, ok: isSuccessfulWbResponse(response) };
         } catch (error) {
+            rethrowAuthorizationError(error);
             await writer.append({
                 jobId: job.jobId,
                 ...unit,
@@ -337,6 +347,7 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
                 ok: isSuccessfulWbResponse(response) && Array.isArray(response?.data?.body?.products),
             };
         } catch (error) {
+            rethrowAuthorizationError(error);
             await writer.append({
                 jobId: job.jobId,
                 ...unit,

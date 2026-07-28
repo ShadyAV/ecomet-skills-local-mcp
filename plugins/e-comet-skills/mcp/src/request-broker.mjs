@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { REQUEST_TIMEOUT_MS } from './config.mjs';
+import { AUTHORIZATION_SCOPE_MAX_MS, MAX_ACTIVE_AUTHORIZATION_SCOPES, REQUEST_TIMEOUT_MS } from './config.mjs';
+import { ToolExecutionError } from './tool-errors.mjs';
 import { isAllowedWbUrl } from './wb-domain.mjs';
 
 export class RequestBroker {
@@ -10,20 +11,25 @@ export class RequestBroker {
         waitForTransition,
         createRequestId = randomUUID,
         defaultTimeout = REQUEST_TIMEOUT_MS,
+        authorizationScopeMaxMs = AUTHORIZATION_SCOPE_MAX_MS,
+        maxActiveAuthorizationScopes = MAX_ACTIVE_AUTHORIZATION_SCOPES,
     }) {
         this.routeWbFetch = routeWbFetch;
         this.routeAuthorization = routeAuthorization;
         this.waitForTransition = waitForTransition;
         this.createRequestId = createRequestId;
         this.defaultTimeout = defaultTimeout;
+        this.authorizationScopeMaxMs = authorizationScopeMaxMs;
+        this.maxActiveAuthorizationScopes = maxActiveAuthorizationScopes;
     }
 
     pendingRequests = new Map();
     pendingAuthorizations = new Map();
+    activeAuthorizationScopes = new Map();
     inFlightFetches = new Map();
 
     get activeRequestCount() {
-        return this.pendingRequests.size;
+        return this.pendingRequests.size + this.pendingAuthorizations.size + this.activeAuthorizationScopes.size;
     }
 
     rejectPendingRequests(message) {
@@ -32,6 +38,18 @@ export class RequestBroker {
 
     rejectPendingAuthorizations(message) {
         this.#rejectAll(this.pendingAuthorizations, message);
+        for (const requestId of this.activeAuthorizationScopes.keys()) {
+            this.#releaseAuthorizationScope(requestId, false);
+        }
+    }
+
+    invalidateAuthorizationWork() {
+        const error = this.#reauthorizationRequired();
+        this.#rejectAll(this.pendingRequests, error);
+        this.#rejectAll(this.pendingAuthorizations, error);
+        for (const requestId of this.activeAuthorizationScopes.keys()) {
+            this.#releaseAuthorizationScope(requestId, false);
+        }
     }
 
     resolveFetch(requestId, response, { includeRequestId = false } = {}) {
@@ -62,21 +80,36 @@ export class RequestBroker {
         return true;
     }
 
-    requestWbFetch(url, timeout = this.defaultTimeout, authorizationId) {
+    requestWbFetch(url, timeout = this.defaultTimeout, authorizationId, authorizationScopeId) {
         if (typeof authorizationId !== 'string' || authorizationId.length === 0) {
             return Promise.reject(new Error('A signed browser-job authorization is required'));
         }
         if (!isAllowedWbUrl(url)) {
             return Promise.reject(new Error('Only approved Wildberries internal URLs are allowed'));
         }
-        const dedupeKey = `${authorizationId}\n${url}\n${timeout}`;
+        const authorizationScope =
+            typeof authorizationScopeId === 'string' ? this.activeAuthorizationScopes.get(authorizationScopeId) : undefined;
+        if (typeof authorizationScopeId === 'string' && !authorizationScope) {
+            return Promise.reject(this.#reauthorizationRequired());
+        }
+        if (authorizationScope && !this.#authorizationScopeIsActive(authorizationScopeId, authorizationScope)) {
+            return Promise.reject(this.#reauthorizationRequired());
+        }
+        if (authorizationScope && authorizationScope.authorizationId !== authorizationId) {
+            return Promise.reject(this.#reauthorizationRequired());
+        }
+        const dedupeKey = `${authorizationScopeId || ''}\n${authorizationId}\n${url}\n${timeout}`;
         const existing = this.inFlightFetches.get(dedupeKey);
         if (existing) return existing;
 
         const request = (async () => {
-            await this.waitForTransition(timeout);
+            if (!authorizationScope) {
+                await this.waitForTransition(timeout);
+            } else if (!this.#authorizationScopeIsActive(authorizationScopeId, authorizationScope)) {
+                throw this.#reauthorizationRequired();
+            }
             return this.#createPending(this.pendingRequests, timeout, `WB request timed out after ${timeout} ms`, (requestId) =>
-                this.routeWbFetch({ requestId, url, timeout, authorizationId })
+                this.routeWbFetch({ requestId, url, timeout, authorizationId, authorizationScopeId })
             );
         })();
         this.inFlightFetches.set(dedupeKey, request);
@@ -88,30 +121,109 @@ export class RequestBroker {
     }
 
     requestAuthorization(token, timeout = this.defaultTimeout) {
+        if (this.pendingAuthorizations.size + this.activeAuthorizationScopes.size >= this.maxActiveAuthorizationScopes) {
+            return Promise.reject(
+                new ToolExecutionError(
+                    'AUTHORIZATION_SCOPE_CAPACITY_EXCEEDED',
+                    'Too many browser job authorization scopes are active.',
+                    'local',
+                    true
+                )
+            );
+        }
         return this.#createPending(
             this.pendingAuthorizations,
             timeout,
             `Browser job authorization timed out after ${timeout} ms`,
-            (requestId) => this.routeAuthorization({ requestId, token })
+            (requestId) => this.routeAuthorization({ requestId, token }),
+            (authorization, requestId, routeResult) => {
+                const routeBinding =
+                    typeof routeResult === 'function'
+                        ? { release: routeResult }
+                        : routeResult && typeof routeResult === 'object'
+                          ? routeResult
+                          : {};
+                const authorizationScope = {
+                    authorizationId: authorization?.authorizationId,
+                    isRouteActive: routeBinding.isActive,
+                    releaseRoute: routeBinding.release,
+                    expiryTimer: setTimeout(() => this.#releaseAuthorizationScope(requestId, true), this.authorizationScopeMaxMs),
+                };
+                authorizationScope.expiryTimer.unref?.();
+                this.activeAuthorizationScopes.set(requestId, authorizationScope);
+                return {
+                    authorization,
+                    requestWbFetch: (url, fetchTimeout = this.defaultTimeout) =>
+                        this.requestWbFetch(url, fetchTimeout, authorization?.authorizationId, requestId),
+                    isActive: () => this.#authorizationScopeIsActive(requestId, authorizationScope),
+                    release: () => this.#releaseAuthorizationScope(requestId, true),
+                };
+            }
         );
     }
 
-    #createPending(collection, timeout, timeoutMessage, route) {
+    #authorizationScopeIsActive(requestId, authorizationScope) {
+        if (this.activeAuthorizationScopes.get(requestId) !== authorizationScope) return false;
+        if (typeof authorizationScope.isRouteActive !== 'function') return true;
+        let routeActive = false;
+        try {
+            routeActive = authorizationScope.isRouteActive() === true;
+        } catch {
+            routeActive = false;
+        }
+        if (routeActive) return true;
+        this.#releaseAuthorizationScope(requestId, true);
+        return false;
+    }
+
+    #createPending(collection, timeout, timeoutMessage, route, transform = (value) => value) {
         return new Promise((resolve, reject) => {
             const requestId = this.createRequestId();
             const timer = setTimeout(() => {
                 collection.delete(requestId);
                 reject(new Error(timeoutMessage));
             }, timeout);
-            collection.set(requestId, { resolve, reject, timer });
+            const pending = {
+                resolve: (value) => {
+                    try {
+                        resolve(transform(value, requestId, pending.routeResult));
+                    } catch (error) {
+                        reject(error);
+                    }
+                },
+                reject,
+                timer,
+                routeResult: undefined,
+            };
+            collection.set(requestId, pending);
             try {
-                route(requestId);
+                pending.routeResult = route(requestId);
             } catch (error) {
                 clearTimeout(timer);
                 collection.delete(requestId);
                 reject(error);
             }
         });
+    }
+
+    #releaseAuthorizationScope(requestId, notifyRoute) {
+        const authorizationScope = this.activeAuthorizationScopes.get(requestId);
+        if (!authorizationScope) return false;
+        this.activeAuthorizationScopes.delete(requestId);
+        clearTimeout(authorizationScope.expiryTimer);
+        if (notifyRoute && typeof authorizationScope.releaseRoute === 'function') {
+            authorizationScope.releaseRoute();
+        }
+        return true;
+    }
+
+    #reauthorizationRequired() {
+        return new ToolExecutionError(
+            'BROWSER_JOB_REAUTHORIZATION_REQUIRED',
+            'Browser job authorization must be acquired again after the bridge connection changed.',
+            'authorization',
+            true
+        );
     }
 
     #take(collection, requestId) {
@@ -122,10 +234,10 @@ export class RequestBroker {
         return pending;
     }
 
-    #rejectAll(collection, message) {
+    #rejectAll(collection, errorOrMessage) {
         for (const [requestId, pending] of collection) {
             clearTimeout(pending.timer);
-            pending.reject(new Error(message));
+            pending.reject(errorOrMessage instanceof Error ? errorOrMessage : new Error(errorOrMessage));
             collection.delete(requestId);
         }
     }

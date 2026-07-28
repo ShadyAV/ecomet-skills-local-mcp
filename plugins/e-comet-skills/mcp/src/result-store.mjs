@@ -1,4 +1,5 @@
-import { appendFile, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { appendFile, chmod, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -11,14 +12,19 @@ import {
 
 const safeFilePart = (value) => value.replace(/[^a-zA-Z0-9_-]/g, '_');
 
-export const summarizeBody = (body) => {
-    if (Array.isArray(body)) return { type: 'array', length: body.length };
-    if (body && typeof body === 'object') return { type: 'object', keys: Object.keys(body).slice(0, 30) };
-    const preview = typeof body === 'string' ? body.slice(0, 300) : body;
-    return { type: body === null ? 'null' : typeof body, preview };
-};
-
 const normalizeError = (error) => (error instanceof Error ? error : new Error(String(error)));
+const ACTIVE_RESULT_PREFIX = '.active-';
+const ensurePrivateResultDirectory = async (resultDir) => {
+    await mkdir(resultDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') {
+        await chmod(resultDir, 0o700);
+    }
+};
+const ensurePrivateResultFile = async (resultPath) => {
+    if (process.platform !== 'win32') {
+        await chmod(resultPath, 0o600);
+    }
+};
 
 export const pruneResults = async ({
     resultDir = RESULT_DIR,
@@ -30,7 +36,7 @@ export const pruneResults = async ({
 } = {}) => {
     const errors = [];
     const excluded = new Set(excludePaths);
-    await mkdir(resultDir, { recursive: true });
+    await ensurePrivateResultDirectory(resultDir);
     let entries;
     try {
         entries = await readdir(resultDir, { withFileTypes: true });
@@ -43,10 +49,12 @@ export const pruneResults = async ({
         if (!entry.isFile() || !entry.name.endsWith('.ndjson')) continue;
         const path = join(resultDir, entry.name);
         try {
+            await ensurePrivateResultFile(path);
             const metadata = await stat(path);
+            const active = entry.name.startsWith(ACTIVE_RESULT_PREFIX);
             if (!excluded.has(path) && now - metadata.mtimeMs > retentionMs) {
                 await rm(path, { force: true });
-            } else {
+            } else if (!active) {
                 files.push({ path, size: metadata.size, mtimeMs: metadata.mtimeMs });
             }
         } catch (error) {
@@ -71,18 +79,6 @@ export const pruneResults = async ({
     return errors;
 };
 
-export const saveResult = async (requestId, response) => {
-    const serialized = `${JSON.stringify(response)}\n`;
-    if (Buffer.byteLength(serialized) > RESULT_MAX_FILE_BYTES) {
-        throw new Error(`Result exceeds the ${RESULT_MAX_FILE_BYTES}-byte per-file limit`);
-    }
-    await pruneResults();
-    const resultPath = join(RESULT_DIR, `${safeFilePart(requestId)}.ndjson`);
-    await writeFile(resultPath, serialized, 'utf8');
-    await pruneResults({ excludePaths: [resultPath] });
-    return resultPath;
-};
-
 export const createJobWriter = async (
     jobId,
     {
@@ -94,11 +90,14 @@ export const createJobWriter = async (
         maxFiles = RESULT_MAX_FILES,
     } = {}
 ) => {
-    await mkdir(resultDir, { recursive: true });
+    await ensurePrivateResultDirectory(resultDir);
     const retentionOptions = { resultDir, retentionMs, maxTotalBytes, maxFiles };
     const writeErrors = await pruneResults(retentionOptions);
-    const resultPath = join(resultDir, `${safeFilePart(jobId)}.ndjson`);
-    await writeFile(resultPath, '', 'utf8');
+    const resultName = `${safeFilePart(jobId)}-${randomUUID()}.ndjson`;
+    const resultPath = join(resultDir, resultName);
+    const activeResultPath = join(resultDir, `${ACTIVE_RESULT_PREFIX}${resultName}`);
+    await writeFile(activeResultPath, '', { encoding: 'utf8', mode: 0o600 });
+    await ensurePrivateResultFile(activeResultPath);
     let writeChain = Promise.resolve();
     let persistedBytes = 0;
     let fileLimitReached = false;
@@ -116,7 +115,7 @@ export const createJobWriter = async (
                         }
                         return;
                     }
-                    await append(resultPath, serialized, 'utf8');
+                    await append(activeResultPath, serialized, 'utf8');
                     persistedBytes += nextBytes;
                 } catch (error) {
                     writeErrors.push(normalizeError(error));
@@ -126,6 +125,12 @@ export const createJobWriter = async (
         },
         async close() {
             await writeChain;
+            try {
+                await rename(activeResultPath, resultPath);
+                await ensurePrivateResultFile(resultPath);
+            } catch (error) {
+                writeErrors.push(normalizeError(error));
+            }
             writeErrors.push(...(await pruneResults({ ...retentionOptions, excludePaths: [resultPath] })));
             return [...writeErrors];
         },

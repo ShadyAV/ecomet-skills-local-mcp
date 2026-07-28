@@ -18,9 +18,8 @@ import { discoverImageBasket, imageExists, normalizeStatus, runWithConcurrency }
 
 export const createMcpMessageHandler = ({
     getBridgeStatus,
-    isExtensionReady,
+    waitForExtensionReady,
     requestBrowserJobAuthorization,
-    requestWbFetch,
     sendError = mcpError,
     sendResult = mcpResult,
 }) => {
@@ -63,12 +62,27 @@ export const createMcpMessageHandler = ({
             return;
         }
         let writer;
+        let authorizationLease;
+        const releaseAuthorization = () => {
+            if (!authorizationLease) return;
+            const currentLease = authorizationLease;
+            authorizationLease = undefined;
+            currentLease.release();
+        };
         try {
-            if (!isExtensionReady()) {
+            if (!(await waitForExtensionReady())) {
                 throw new Error('The e-Comet Chrome extension is not connected');
             }
             const token = extractBrowserJobToken(triggerUrl);
-            const authorization = await requestBrowserJobAuthorization(token);
+            authorizationLease = await requestBrowserJobAuthorization(token);
+            if (
+                !authorizationLease ||
+                typeof authorizationLease.requestWbFetch !== 'function' ||
+                typeof authorizationLease.release !== 'function'
+            ) {
+                throw new Error('Extension returned an invalid browser job authorization lease');
+            }
+            const authorization = authorizationLease.authorization;
             if (
                 !authorization ||
                 typeof authorization.authorizationId !== 'string' ||
@@ -100,11 +114,12 @@ export const createMcpMessageHandler = ({
             }
             const result = await executeAuthorizedBrowserJob({
                 authorization,
-                requestWbFetch,
+                requestWbFetch: authorizationLease.requestWbFetch,
                 writer,
                 productLimitTotal,
                 productNmIds,
             });
+            releaseAuthorization();
             const writeErrors = await writer.close();
             sendResult(
                 id,
@@ -118,6 +133,7 @@ export const createMcpMessageHandler = ({
                 )
             );
         } catch (error) {
+            releaseAuthorization();
             if (writer) {
                 await writer.close().catch(() => undefined);
             }

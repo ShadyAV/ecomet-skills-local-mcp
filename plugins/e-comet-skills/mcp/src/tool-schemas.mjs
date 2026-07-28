@@ -13,8 +13,10 @@ const string = { type: 'string' };
 const boolean = { type: 'boolean' };
 const number = { type: 'number' };
 const integer = { type: 'integer' };
+const positiveNumber = { type: 'number', exclusiveMinimum: 0 };
 const positiveInteger = { type: 'integer', minimum: 1 };
 const nonNegativeInteger = { type: 'integer', minimum: 0 };
+const nullableNonNegativeInteger = { oneOf: [nonNegativeInteger, { type: 'null' }] };
 const status = { type: 'string', enum: ['done', 'partial', 'failed'] };
 
 const object = (properties, required = [], additionalProperties = false) => ({
@@ -26,6 +28,24 @@ const object = (properties, required = [], additionalProperties = false) => ({
 
 const array = (items, extra = {}) => ({ type: 'array', items, ...extra });
 const objectUnion = (...schemas) => ({ type: 'object', oneOf: schemas });
+const liveAggregateSchemas = (schema) => [
+    {
+        ...schema,
+        properties: {
+            ...schema.properties,
+            ok: { const: true },
+            status: { type: 'string', enum: ['done', 'partial'] },
+        },
+    },
+    {
+        ...schema,
+        properties: {
+            ...schema.properties,
+            ok: { const: false },
+            status: { const: 'failed' },
+        },
+    },
+];
 
 const priceSchema = object({
     basic: number,
@@ -115,11 +135,11 @@ const productCardSchema = object({
 const storageWarnings = array(string);
 
 const liveBaseProperties = {
-    ok: { const: true },
+    ok: boolean,
     status,
     jobId: string,
     resultPath: string,
-    expiresAt: string,
+    expiresAt: positiveNumber,
     storageWarnings,
 };
 
@@ -169,7 +189,7 @@ const recommendationArticleSchema = object({
     pagesRequested: positiveInteger,
     pagesSucceeded: nonNegativeInteger,
     overallTotal: nonNegativeInteger,
-    totalPages: nonNegativeInteger,
+    totalPages: nullableNonNegativeInteger,
     productsSeen: nonNegativeInteger,
     productsReturned: nonNegativeInteger,
     truncatedByLocalLimit: boolean,
@@ -240,7 +260,8 @@ const triggerUrlProperty = {
     minLength: 1,
     maxLength: MAX_BROWSER_JOB_TOKEN_BYTES,
     description:
-        'Browser authorization returned by the immediately preceding remote browser_job call. Codex passes it programmatically in one atomic exec; omission is valid only when a trusted host hook injects it.',
+        'Browser authorization returned by the immediately preceding remote browser_job call. The conservative schema maxLength is a character count; ' +
+        'runtime authoritatively enforces the 128 KiB UTF-8 byte limit. Codex passes it programmatically in one atomic exec; omission is valid only when a trusted host hook injects it.',
 };
 
 const projectionProperties = {
@@ -302,10 +323,10 @@ export const toolInputSchemas = {
 
 export const toolOutputSchemas = {
     local_bridge_status: bridgeStatusSchema,
-    wb_product_card: objectUnion(productCardSuccessSchema, toolErrorSchema),
-    wb_search_by_query: objectUnion(searchSuccessSchema, toolErrorSchema),
-    wb_recommendations_by_product: objectUnion(recommendationsSuccessSchema, toolErrorSchema),
-    wb_product_images: objectUnion(imagesSuccessSchema, toolErrorSchema),
+    wb_product_card: objectUnion(...liveAggregateSchemas(productCardSuccessSchema), toolErrorSchema),
+    wb_search_by_query: objectUnion(...liveAggregateSchemas(searchSuccessSchema), toolErrorSchema),
+    wb_recommendations_by_product: objectUnion(...liveAggregateSchemas(recommendationsSuccessSchema), toolErrorSchema),
+    wb_product_images: objectUnion(...liveAggregateSchemas(imagesSuccessSchema), toolErrorSchema),
 };
 
 export const validateSchemaValue = (value, schema) => {
@@ -320,7 +341,8 @@ export const validateSchemaValue = (value, schema) => {
         if (schema.additionalProperties === false && Object.keys(value).some((name) => !(name in (schema.properties || {})))) return false;
         return Object.entries(value).every(([name, propertyValue]) => {
             const propertySchema = schema.properties?.[name];
-            return Boolean(propertySchema) && validateSchemaValue(propertyValue, propertySchema);
+            if (!propertySchema) return schema.additionalProperties === true;
+            return validateSchemaValue(propertyValue, propertySchema);
         });
     }
     if (schema.type === 'array') {
@@ -348,9 +370,12 @@ export const validateSchemaValue = (value, schema) => {
             typeof value === 'number' &&
             Number.isFinite(value) &&
             value >= (schema.minimum ?? -Infinity) &&
-            value <= (schema.maximum ?? Infinity)
+            value <= (schema.maximum ?? Infinity) &&
+            value > (schema.exclusiveMinimum ?? -Infinity) &&
+            value < (schema.exclusiveMaximum ?? Infinity)
         );
     }
     if (schema.type === 'boolean') return typeof value === 'boolean';
+    if (schema.type === 'null') return value === null;
     return false;
 };

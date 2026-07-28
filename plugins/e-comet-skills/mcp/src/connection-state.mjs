@@ -1,4 +1,6 @@
 export class ConnectionState {
+    #extensionReadyWaiters = new Set();
+
     extensionSocket = null;
     extensionReady = false;
     extensionBrowserJobReady = false;
@@ -23,6 +25,7 @@ export class ConnectionState {
         this.extensionSocket = socket;
         this.extensionReady = true;
         this.extensionBrowserJobReady = browserJobSupported;
+        this.#resolveExtensionReadyWaiters();
         return previousSocket && previousSocket !== socket ? previousSocket : null;
     }
 
@@ -40,7 +43,30 @@ export class ConnectionState {
         this.peerReady = true;
         this.peerExtensionReady = extensionConnected === true;
         this.peerExtensionBrowserJobReady = browserJobSupported === true;
+        this.#resolveExtensionReadyWaiters();
         return wasReady;
+    }
+
+    waitForExtensionReady(timeoutMs) {
+        if (this.effectiveExtensionReady) return Promise.resolve(true);
+        return new Promise((resolve) => {
+            const waiter = () => {
+                clearTimeout(timer);
+                this.#extensionReadyWaiters.delete(waiter);
+                resolve(true);
+            };
+            const timer = setTimeout(() => {
+                this.#extensionReadyWaiters.delete(waiter);
+                resolve(false);
+            }, timeoutMs);
+            this.#extensionReadyWaiters.add(waiter);
+            if (this.effectiveExtensionReady) waiter();
+        });
+    }
+
+    #resolveExtensionReadyWaiters() {
+        if (!this.effectiveExtensionReady) return;
+        for (const waiter of [...this.#extensionReadyWaiters]) waiter();
     }
 
     disconnectPeer(socket) {
