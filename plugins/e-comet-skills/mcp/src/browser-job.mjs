@@ -1,14 +1,15 @@
 import {
     DEFAULT_RETURNED_PRODUCTS,
     MAX_BROWSER_JOB_TOKEN_BYTES,
-    MAX_PRODUCT_CARD_ARTICLES,
+    MAX_BROWSER_JOB_TEXT_LENGTH,
+    MAX_BROWSER_JOB_URL_LENGTH,
+    MAX_PRODUCT_CARD_PRODUCTS,
     MAX_PRODUCT_CARD_REQUEST_UNITS,
-    MAX_RECOMMENDATION_ARTICLES,
-    MAX_RECOMMENDATION_PAGES,
+    MAX_RECOMMENDATION_PAGES_PER_PRODUCT,
     MAX_RECOMMENDATION_REQUEST_UNITS,
     MAX_RETURNED_PRODUCTS,
-    MAX_SEARCH_PAGES,
-    MAX_SEARCH_QUERIES,
+    MAX_SEARCH_PAGES_PER_QUERY,
+    MAX_SEARCH_REQUEST_UNITS,
     PRODUCT_CARD_CONCURRENCY,
     RECOMMENDATION_CONCURRENCY,
     REQUEST_TIMEOUT_MS,
@@ -17,6 +18,7 @@ import {
 import { ToolExecutionError } from './tool-errors.mjs';
 import {
     isSuccessfulWbResponse,
+    isAllowedWbUrl,
     normalizeStatus,
     numberOrUndefined,
     projectPageProducts,
@@ -28,98 +30,150 @@ import {
 } from './wb-domain.mjs';
 
 const validJobTimeout = (job) => job.timeout === undefined || validTimeout(job.timeout);
+const invalidDescriptor = (cause) =>
+    new ToolExecutionError(
+        'BROWSER_JOB_DESCRIPTOR_INVALID',
+        'The signed browser job descriptor is invalid.',
+        'authorization',
+        false,
+        { cause: cause instanceof Error ? cause : new Error(String(cause)) }
+    );
+const boundedText = (value) =>
+    typeof value === 'string' && value.length >= 1 && value.length <= MAX_BROWSER_JOB_TEXT_LENGTH;
+const validEndpoint = (value) => {
+    if (typeof value !== 'string' || value.length > MAX_BROWSER_JOB_URL_LENGTH) return false;
+    return isAllowedWbUrl(value);
+};
+const validParams = (value) =>
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.query === undefined &&
+    value.page === undefined &&
+    Object.entries(value).every(([key, item]) => boundedText(key) && boundedText(item));
+const validProductArticle = (article) =>
+    article !== null &&
+    typeof article === 'object' &&
+    !Array.isArray(article) &&
+    Number.isSafeInteger(article.nm) &&
+    article.nm > 0 &&
+    Object.values(article).every((value) => typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value)));
+// Пробрасываем и отказ авторизации, и потерю транспорта: мёртвый мост — не провал
+// отдельной единицы, остальные упадут так же. Раньше при числе единиц не больше
+// параллелизма задание резолвилось как обычный «провал» без признака retryable, и
+// агент не понимал, что достаточно повторить.
+const ABORTING_STAGES = new Set(['authorization', 'extension']);
 const rethrowAuthorizationError = (error) => {
-    if (error instanceof ToolExecutionError && error.stage === 'authorization') {
+    if (error instanceof ToolExecutionError && ABORTING_STAGES.has(error.stage)) {
         throw error;
     }
 };
 
 export const validateAuthorizedJobLimits = (authorization) => {
-    const job = authorization?.job;
-    if (!job || typeof job !== 'object' || Array.isArray(job) || !validJobTimeout(job)) {
-        throw new Error('Browser job descriptor or timeout is invalid');
-    }
+    try {
+        const job = authorization?.job;
+        if (!job || typeof job !== 'object' || Array.isArray(job) || !boundedText(job.jobId))
+            throw new Error('Browser job descriptor is invalid');
+        if (!validJobTimeout(job)) throw new Error('Browser job timeout is invalid');
 
-    if (authorization.jobType === 'search_by_query') {
-        const queries = job.queries;
-        const validQueries =
-            job.type === 'wb-search-by-query' &&
-            Array.isArray(queries) &&
-            queries.length >= 1 &&
-            queries.length <= MAX_SEARCH_QUERIES &&
-            queries.every(
-                (item) =>
-                    Array.isArray(item) &&
-                    item.length === 2 &&
-                    typeof item[0] === 'string' &&
-                    item[0].trim().length > 0 &&
-                    Number.isInteger(item[1]) &&
-                    item[1] >= 1 &&
-                    item[1] <= MAX_SEARCH_PAGES
-            ) &&
-            queries.reduce((total, [, pages]) => total + pages, 0) <= MAX_SEARCH_PAGES;
-        if (!validQueries) {
-            throw new Error(
-                `Browser search job exceeds the local limit of ${MAX_SEARCH_QUERIES} queries or ${MAX_SEARCH_PAGES} total pages`
-            );
+        if (authorization.jobType === 'search_by_query') {
+            const queries = job.queries;
+            if (job.type !== 'wb-search-by-query') throw new Error('Invalid search descriptor type');
+            if (!validEndpoint(job.endpoint)) throw new Error('Invalid browser job endpoint');
+            if (!validParams(job.params)) throw new Error('Invalid browser job params');
+            if (
+                !Array.isArray(queries) ||
+                queries.length < 1 ||
+                !queries.every(
+                    (item) =>
+                        Array.isArray(item) &&
+                        item.length === 2 &&
+                        boundedText(item[0]) &&
+                        item[0].trim().length > 0 &&
+                        Number.isInteger(item[1]) &&
+                        item[1] >= 1
+                )
+            )
+                throw new Error('Invalid browser job queries');
+            if (queries.some(([, pages]) => pages > MAX_SEARCH_PAGES_PER_QUERY))
+                throw new Error(`Browser search job requires at most ${MAX_SEARCH_PAGES_PER_QUERY} pages per query`);
+            if (queries.reduce((total, [, pages]) => total + pages, 0) > MAX_SEARCH_REQUEST_UNITS)
+                throw new Error(`Browser search job requires at most ${MAX_SEARCH_REQUEST_UNITS} total pages`);
+            if (!descriptorPagesAllowed(job.endpoint, job.params, queries))
+                throw new Error('Invalid browser job assembled endpoint URL');
+            return;
         }
-        return;
-    }
 
-    if (authorization.jobType === 'product_card') {
-        const articles = job.articles;
-        const endpoints = job.endpoints;
-        const validProductCard =
-            job.type === 'wb-product-card' &&
-            Array.isArray(articles) &&
-            articles.length >= 1 &&
-            articles.length <= MAX_PRODUCT_CARD_ARTICLES &&
-            articles.every((article) => Number.isSafeInteger(article?.nm) && article.nm > 0) &&
-            Array.isArray(endpoints) &&
-            endpoints.length >= 1 &&
-            endpoints.every(
-                (endpoint) =>
-                    typeof endpoint?.key === 'string' &&
-                    endpoint.key.length > 0 &&
-                    typeof endpoint?.url === 'string' &&
-                    endpoint.url.length > 0
-            ) &&
-            articles.length * endpoints.length <= MAX_PRODUCT_CARD_REQUEST_UNITS;
-        if (!validProductCard) {
-            throw new Error(
-                `Browser product-card job exceeds the local limit of ${MAX_PRODUCT_CARD_ARTICLES} articles or ${MAX_PRODUCT_CARD_REQUEST_UNITS} requests`
-            );
+        if (authorization.jobType === 'product_card') {
+            const articles = job.articles;
+            const endpoints = job.endpoints;
+            if (job.type !== 'wb-product-card') throw new Error('Invalid product-card descriptor type');
+            if (!Array.isArray(articles) || articles.length < 1 || !articles.every(validProductArticle))
+                throw new Error('Invalid browser job articles');
+            if (articles.length > MAX_PRODUCT_CARD_PRODUCTS)
+                throw new Error(`Browser product-card job requires at most ${MAX_PRODUCT_CARD_PRODUCTS} products`);
+            if (
+                !Array.isArray(endpoints) ||
+                endpoints.length < 1 ||
+                !endpoints.every(
+                    (endpoint) =>
+                        boundedText(endpoint?.key) &&
+                        typeof endpoint?.url === 'string' &&
+                        endpoint.url.length >= 1 &&
+                        endpoint.url.length <= MAX_BROWSER_JOB_URL_LENGTH
+                )
+            )
+                throw new Error('Invalid browser job endpoints');
+            if (articles.length * endpoints.length > MAX_PRODUCT_CARD_REQUEST_UNITS)
+                throw new Error(`Browser product-card job requires at most ${MAX_PRODUCT_CARD_REQUEST_UNITS} requests`);
+            if (!articles.every((article) => endpoints.every((endpoint) => isAllowedWbUrl(fillTemplate(endpoint.url, article)))))
+                throw new Error('Invalid browser job expanded endpoint URL');
+            return;
         }
-        return;
-    }
 
-    if (authorization.jobType === 'recommendations_by_product') {
-        const articles = job.articles;
-        const validRecommendations =
-            job.type === 'wb-recommendations-by-product' &&
-            Array.isArray(articles) &&
-            articles.length >= 1 &&
-            articles.length <= MAX_RECOMMENDATION_ARTICLES &&
-            new Set(articles.map(([nm]) => nm)).size === articles.length &&
-            articles.every(
-                (item) =>
-                    Array.isArray(item) &&
-                    (item.length === 1 || item.length === 2) &&
-                    Number.isSafeInteger(item[0]) &&
-                    item[0] > 0 &&
-                    (item.length === 1 || (Number.isInteger(item[1]) && item[1] >= 1 && item[1] <= MAX_RECOMMENDATION_PAGES))
-            ) &&
-            articles.reduce((total, item) => total + (item[1] ?? 1), 0) <= MAX_RECOMMENDATION_REQUEST_UNITS;
-        if (!validRecommendations) {
-            throw new Error(
-                `Browser recommendations job requires at most ${MAX_RECOMMENDATION_ARTICLES} unique articles, ` +
-                    `${MAX_RECOMMENDATION_PAGES} pages per article, or ${MAX_RECOMMENDATION_REQUEST_UNITS} total pages`
-            );
+        if (authorization.jobType === 'recommendations_by_product') {
+            const articles = job.articles;
+            if (job.type !== 'wb-recommendations-by-product') throw new Error('Invalid recommendations descriptor type');
+            if (!validEndpoint(job.endpoint)) throw new Error('Invalid browser job endpoint');
+            if (!validParams(job.params)) throw new Error('Invalid browser job params');
+            if (
+                !Array.isArray(articles) ||
+                articles.length < 1 ||
+                !articles.every(
+                    (item) =>
+                        Array.isArray(item) &&
+                        (item.length === 1 || item.length === 2) &&
+                        Number.isSafeInteger(item[0]) &&
+                        item[0] > 0 &&
+                        (item.length === 1 || (Number.isInteger(item[1]) && item[1] >= 1))
+                )
+            )
+                throw new Error('Invalid browser job recommendation articles');
+            if (new Set(articles.map(([nm]) => nm)).size !== articles.length)
+                throw new Error('Browser recommendations job requires unique products');
+            if (articles.some((item) => item[1] !== undefined && item[1] > MAX_RECOMMENDATION_PAGES_PER_PRODUCT))
+                throw new Error(`Browser recommendations job requires at most ${MAX_RECOMMENDATION_PAGES_PER_PRODUCT} pages per product`);
+            if (
+                articles.reduce((total, item) => total + (item[1] ?? MAX_RECOMMENDATION_PAGES_PER_PRODUCT), 0) >
+                MAX_RECOMMENDATION_REQUEST_UNITS
+            )
+                throw new Error(`Browser recommendations job requires at most ${MAX_RECOMMENDATION_REQUEST_UNITS} total pages`);
+            if (
+                !descriptorPagesAllowed(
+                    job.endpoint,
+                    job.params,
+                    articles.map(([nm, pages]) => [String(nm), pages ?? MAX_RECOMMENDATION_PAGES_PER_PRODUCT])
+                )
+            )
+                throw new Error('Invalid browser job assembled endpoint URL');
+            return;
         }
-        return;
-    }
 
-    throw new Error(`Unsupported browser_job type: ${authorization.jobType}`);
+        throw new Error(`Unsupported browser_job type: ${authorization.jobType}`);
+    } catch (error) {
+        if (error instanceof ToolExecutionError) throw error;
+        throw invalidDescriptor(error);
+    }
 };
 
 export const extractBrowserJobToken = (value) => {
@@ -152,8 +206,23 @@ const buildDescriptorUrl = (endpoint, params, query, page) => {
     return url.toString();
 };
 
+const descriptorPagesAllowed = (endpoint, params, scopes) =>
+    scopes.every(([query, pages]) => {
+        for (let page = 1; page <= pages; page += 1) {
+            if (!isAllowedWbUrl(buildDescriptorUrl(endpoint, params, query, page))) return false;
+        }
+        return true;
+    });
+
 const fillTemplate = (template, article) =>
-    template.replace(/\{(\w+)\}/g, (_match, key) => (article[key] === undefined ? '' : String(article[key])));
+    template.replace(/\{(\w+)\}/g, (_match, key) => {
+        const value = Object.prototype.hasOwnProperty.call(article, key) ? article[key] : undefined;
+        if (value === undefined || value === null || String(value).length === 0)
+            throw new Error('Browser job article does not provide a value for the endpoint template');
+        return encodeURIComponent(String(value));
+    });
+
+const normalizeProductArticles = (articles) => [...new Map(articles.map((article) => [article.nm, article])).values()];
 
 const compactCardBody = (body) => {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
@@ -213,14 +282,15 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
             .sort((left, right) => left.page - right.page)
             .map((unit) => {
                 const products = responseProducts(unit.response);
-                const remaining = Math.max(0, projection.productLimitTotal - returnedProducts);
+                const productLimit = projection.productNmIds ? MAX_RETURNED_PRODUCTS : projection.productLimitPerScope;
+                const remaining = Math.max(0, productLimit - returnedProducts);
                 const pageGlobalPositionsReliable = globalPositionsReliable && unit.ok;
                 const selected = unit.ok
                     ? projectPageProducts(
                           products,
                           globalOffset,
                           projection.productNmIds,
-                          projection.productNmIds ? MAX_RETURNED_PRODUCTS : remaining,
+                          remaining,
                           pageGlobalPositionsReliable
                       )
                     : [];
@@ -259,13 +329,14 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
         pagesSucceeded: succeeded,
         pagesFailed: fetched.length - succeeded,
         productFilterApplied: Boolean(projection.productNmIds),
-        productLimitTotal: projection.productNmIds ? undefined : projection.productLimitTotal,
+        productLimitPerQuery: projection.productNmIds ? undefined : projection.productLimitPerScope,
         queries,
     };
 };
 
 const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, writer }) => {
-    const units = job.articles.flatMap((article) =>
+    const articles = normalizeProductArticles(job.articles);
+    const units = articles.flatMap((article) =>
         job.endpoints.map((endpoint) => ({
             nmId: article.nm,
             key: endpoint.key,
@@ -288,7 +359,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
         }
     });
 
-    const products = job.articles.map((article) => {
+    const products = articles.map((article) => {
         const articleUnits = fetched.filter((unit) => unit.nmId === article.nm);
         const detailUnit =
             articleUnits.find((unit) => unit.key === 'detail') || articleUnits.find((unit) => responseProducts(unit.response).length);
@@ -298,6 +369,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
         return {
             ...detail,
             ...content,
+            nmId: article.nm,
             content,
             units: articleUnits.map((unit) => ({
                 key: unit.key,
@@ -318,20 +390,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
     };
 };
 
-const normalizeRecommendationArticles = (articles) => {
-    const byArticle = new Map();
-    for (const [nmId, pages] of articles) {
-        const current = byArticle.get(nmId);
-        if (!current) {
-            byArticle.set(nmId, { nmId, pages });
-        } else if (current.pages === undefined || pages === undefined) {
-            byArticle.set(nmId, { nmId, pages: undefined });
-        } else {
-            byArticle.set(nmId, { nmId, pages: Math.max(current.pages, pages) });
-        }
-    }
-    return [...byArticle.values()];
-};
+const normalizeRecommendationArticles = (articles) => articles.map(([nmId, pages]) => ({ nmId, pages }));
 
 const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch, writer, projection }) => {
     const articles = normalizeRecommendationArticles(job.articles);
@@ -365,22 +424,17 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
     );
     const remainingUnits = [];
     const autoDepthCapped = new Set();
-    let remainingPageBudget = Math.max(0, MAX_RECOMMENDATION_REQUEST_UNITS - firstPages.length);
     for (const firstPage of firstPages) {
         const discoveredPages = recommendationTotalPages(numberOrUndefined(firstPage.response?.data?.body?.total));
         const article = articles.find((item) => item.nmId === firstPage.nmId);
-        if (article.pages === undefined && discoveredPages !== null && discoveredPages > MAX_RECOMMENDATION_PAGES) {
+        if (article.pages === undefined && discoveredPages !== null && discoveredPages > MAX_RECOMMENDATION_PAGES_PER_PRODUCT) {
             autoDepthCapped.add(article.nmId);
         }
         const requestedPages =
             article.pages === undefined
-                ? Math.min(discoveredPages || 1, MAX_RECOMMENDATION_PAGES)
+                ? Math.min(discoveredPages || 1, MAX_RECOMMENDATION_PAGES_PER_PRODUCT)
                 : Math.min(article.pages, discoveredPages || article.pages);
-        const additionalPages = Math.min(Math.max(0, requestedPages - 1), remainingPageBudget);
-        if (additionalPages < requestedPages - 1) {
-            autoDepthCapped.add(article.nmId);
-        }
-        remainingPageBudget -= additionalPages;
+        const additionalPages = Math.max(0, requestedPages - 1);
         for (let page = 2; page <= additionalPages + 1; page += 1) {
             remainingUnits.push({ ...article, page });
         }
@@ -397,14 +451,15 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
         const discoveredPages = recommendationTotalPages(overallTotal);
         const pages = articleUnits.map((unit) => {
             const products = responseProducts(unit.response);
-            const remaining = Math.max(0, projection.productLimitTotal - returnedProducts);
+            const productLimit = projection.productNmIds ? MAX_RETURNED_PRODUCTS : projection.productLimitPerScope;
+            const remaining = Math.max(0, productLimit - returnedProducts);
             const pageGlobalPositionsReliable = globalPositionsReliable && unit.ok;
             const selected = unit.ok
                 ? projectPageProducts(
                       products,
                       globalOffset,
                       projection.productNmIds,
-                      projection.productNmIds ? MAX_RETURNED_PRODUCTS : remaining,
+                      remaining,
                       pageGlobalPositionsReliable
                   )
                 : [];
@@ -448,7 +503,7 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
         pagesSucceeded: succeeded,
         pagesFailed: fetched.length - succeeded,
         productFilterApplied: Boolean(projection.productNmIds),
-        productLimitTotal: projection.productNmIds ? undefined : projection.productLimitTotal,
+        productLimitPerSource: projection.productNmIds ? undefined : projection.productLimitPerScope,
         articles: summaries,
     };
 };
@@ -457,11 +512,11 @@ export const executeAuthorizedBrowserJob = async ({
     authorization,
     requestWbFetch,
     writer,
-    productLimitTotal = DEFAULT_RETURNED_PRODUCTS,
+    productLimitPerScope = DEFAULT_RETURNED_PRODUCTS,
     productNmIds,
 }) => {
     validateAuthorizedJobLimits(authorization);
-    const projection = { productLimitTotal, productNmIds };
+    const projection = { productLimitPerScope, productNmIds };
     let result;
     if (authorization.jobType === 'search_by_query') {
         result = await executeSearchJob({

@@ -32,25 +32,10 @@ export const toolFailure = (error, fallback = {}) => {
             retryable: error.retryable,
         };
     }
-    const message = error instanceof Error ? error.message : String(error);
-    if (/extension is not connected/i.test(message)) {
-        return {
-            ok: false,
-            code: 'EXTENSION_DISCONNECTED',
-            message: 'Open an authenticated Wildberries tab, then retry the e-Comet request.',
-            stage: 'extension',
-            retryable: true,
-        };
-    }
-    if (/extension must be updated/i.test(message)) {
-        return {
-            ok: false,
-            code: 'EXTENSION_UPDATE_REQUIRED',
-            message: 'The e-Comet Chrome extension must be updated to support signed browser jobs.',
-            stage: 'extension',
-            retryable: false,
-        };
-    }
+    // Классификация по подстроке в тексте ошибки удалена: строки менялись, регулярки
+    // тихо переставали матчиться (например, `Extension WebSocket is not connected`
+    // не подходил под /extension is not connected/). Источники теперь бросают
+    // ToolExecutionError с кодом, а сюда попадает только действительно неожиданное.
     const fallbackMessage =
         typeof fallback.message === 'string' ? fallback.message : 'The local e-Comet operation failed unexpectedly.';
     return {

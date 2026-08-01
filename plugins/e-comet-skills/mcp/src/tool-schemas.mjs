@@ -152,6 +152,8 @@ export const toolErrorSchema = object({
         enum: ['arguments', 'handoff', 'extension', 'authorization', 'execution', 'storage', 'images', 'local'],
     },
     retryable: boolean,
+    resultPath: string,
+    storageWarnings,
 }, ['ok', 'code', 'message', 'stage', 'retryable']);
 
 const productCardSuccessSchema = object({
@@ -180,7 +182,7 @@ const searchSuccessSchema = object({
     pagesSucceeded: nonNegativeInteger,
     pagesFailed: nonNegativeInteger,
     productFilterApplied: boolean,
-    productLimitTotal: positiveInteger,
+    productLimitPerQuery: positiveInteger,
     queries: array(searchQuerySchema),
 }, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'pagesRequested', 'pagesSucceeded', 'pagesFailed', 'productFilterApplied', 'queries']);
 
@@ -215,7 +217,7 @@ const recommendationsSuccessSchema = object({
     pagesSucceeded: nonNegativeInteger,
     pagesFailed: nonNegativeInteger,
     productFilterApplied: boolean,
-    productLimitTotal: positiveInteger,
+    productLimitPerSource: positiveInteger,
     articles: array(recommendationArticleSchema),
 }, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'complete', 'truncatedByLocalLimit', 'pagesRequested', 'pagesSucceeded', 'pagesFailed', 'productFilterApplied', 'articles']);
 
@@ -264,13 +266,13 @@ const triggerUrlProperty = {
         'runtime authoritatively enforces the 128 KiB UTF-8 byte limit. Codex passes it programmatically in one atomic exec; omission is valid only when a trusted host hook injects it.',
 };
 
-const projectionProperties = {
-    productLimitTotal: {
+const projectionProperties = (limitName, scope) => ({
+    [limitName]: {
         type: 'integer',
         minimum: 1,
         maximum: MAX_RETURNED_PRODUCTS,
         default: DEFAULT_RETURNED_PRODUCTS,
-        description: 'Maximum compact products returned for each query or source article.',
+        description: `Maximum compact products returned for each ${scope}.`,
     },
     productNmIds: {
         type: 'array',
@@ -280,19 +282,19 @@ const projectionProperties = {
         items: positiveInteger,
         description: 'Target WB article IDs for exact position or recommendation-membership checks.',
     },
-};
+});
 
-const liveInputSchema = (includeProjection = false) =>
+const liveInputSchema = (limitName, scope) =>
     object({
         triggerUrl: triggerUrlProperty,
-        ...(includeProjection ? projectionProperties : {}),
+        ...(limitName ? projectionProperties(limitName, scope) : {}),
     });
 
 export const toolInputSchemas = {
     local_bridge_status: object({}),
-    wb_product_card: liveInputSchema(false),
-    wb_search_by_query: liveInputSchema(true),
-    wb_recommendations_by_product: liveInputSchema(true),
+    wb_product_card: liveInputSchema(),
+    wb_search_by_query: liveInputSchema('productLimitPerQuery', 'query'),
+    wb_recommendations_by_product: liveInputSchema('productLimitPerSource', 'source product'),
     wb_product_images: object(
         {
             nmIds: {
@@ -337,11 +339,17 @@ export const validateSchemaValue = (value, schema) => {
     if (!schema.type) return true;
     if (schema.type === 'object') {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-        if ((schema.required || []).some((name) => !(name in value))) return false;
-        if (schema.additionalProperties === false && Object.keys(value).some((name) => !(name in (schema.properties || {})))) return false;
+        const properties = schema.properties || {};
+        if ((schema.required || []).some((name) => !Object.hasOwn(value, name))) return false;
         return Object.entries(value).every(([name, propertyValue]) => {
-            const propertySchema = schema.properties?.[name];
-            if (!propertySchema) return schema.additionalProperties === true;
+            if (!Object.hasOwn(properties, name)) {
+                if (schema.additionalProperties === false) return false;
+                if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+                    return validateSchemaValue(propertyValue, schema.additionalProperties);
+                }
+                return true;
+            }
+            const propertySchema = properties[name];
             return validateSchemaValue(propertyValue, propertySchema);
         });
     }

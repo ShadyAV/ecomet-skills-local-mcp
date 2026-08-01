@@ -14,7 +14,7 @@ import { mcpError, mcpResult, textResult } from './mcp-protocol.mjs';
 import { createJobWriter } from './result-store.mjs';
 import { serverInstructions, tools, validateToolArguments } from './tool-catalog.mjs';
 import { ToolExecutionError, toolFailure } from './tool-errors.mjs';
-import { discoverImageBasket, imageExists, normalizeStatus, runWithConcurrency } from './wb-domain.mjs';
+import { createConcurrencyLimiter, discoverImageBasket, imageExists, normalizeStatus, runWithConcurrency } from './wb-domain.mjs';
 
 export const createMcpMessageHandler = ({
     getBridgeStatus,
@@ -22,10 +22,18 @@ export const createMcpMessageHandler = ({
     requestBrowserJobAuthorization,
     sendError = mcpError,
     sendResult = mcpResult,
+    createJobWriter: createWriter = createJobWriter,
+    probeImageExists = imageExists,
+    shutdownSignal,
+    log = (..._args) => undefined,
 }) => {
     const handleBrowserJob = async (id, toolName, expectedJobType, args = {}) => {
         const triggerUrl = args.triggerUrl;
-        const productLimitTotal = args.productLimitTotal ?? DEFAULT_RETURNED_PRODUCTS;
+        let productLimitPerScope = DEFAULT_RETURNED_PRODUCTS;
+        if (expectedJobType === 'search_by_query') productLimitPerScope = args.productLimitPerQuery ?? DEFAULT_RETURNED_PRODUCTS;
+        else if (expectedJobType === 'recommendations_by_product') {
+            productLimitPerScope = args.productLimitPerSource ?? DEFAULT_RETURNED_PRODUCTS;
+        }
         const productNmIds = args.productNmIds;
         if (!validateToolArguments(toolName, args)) {
             sendResult(
@@ -71,7 +79,12 @@ export const createMcpMessageHandler = ({
         };
         try {
             if (!(await waitForExtensionReady())) {
-                throw new Error('The e-Comet Chrome extension is not connected');
+                throw new ToolExecutionError(
+                    'EXTENSION_DISCONNECTED',
+                    'Open an authenticated Wildberries tab, then retry the e-Comet request.',
+                    'extension',
+                    true
+                );
             }
             const token = extractBrowserJobToken(triggerUrl);
             authorizationLease = await requestBrowserJobAuthorization(token);
@@ -100,9 +113,10 @@ export const createMcpMessageHandler = ({
                     false
                 );
             }
+            // Fail descriptor validation before creating an empty result file; the executor repeats this for direct callers.
             validateAuthorizedJobLimits(authorization);
             try {
-                writer = await createJobWriter(authorization.job.jobId);
+                writer = await createWriter(authorization.job.jobId);
             } catch (error) {
                 throw new ToolExecutionError(
                     'LOCAL_STORAGE_FAILED',
@@ -116,7 +130,7 @@ export const createMcpMessageHandler = ({
                 authorization,
                 requestWbFetch: authorizationLease.requestWbFetch,
                 writer,
-                productLimitTotal,
+                productLimitPerScope,
                 productNmIds,
             });
             releaseAuthorization();
@@ -134,15 +148,32 @@ export const createMcpMessageHandler = ({
             );
         } catch (error) {
             releaseAuthorization();
+            let partialResult = {};
             if (writer) {
-                await writer.close().catch(() => undefined);
+                const writeErrors = await writer.close().catch(() => []);
+                partialResult = {
+                    ...(writer.persistedBytes > 0 ? { resultPath: writer.resultPath } : {}),
+                    ...(writeErrors.length > 0 ? { storageWarnings: writeErrors.map((writeError) => writeError.message) } : {}),
+                };
             }
-            sendResult(id, textResult(toolFailure(error, {
-                code: 'BROWSER_JOB_EXECUTION_FAILED',
-                message: 'The authorized Wildberries job could not be completed.',
-                stage: 'execution',
-                retryable: false,
-            }), true));
+            if (error instanceof ToolExecutionError && error.code === 'BROWSER_JOB_DESCRIPTOR_INVALID' && error.cause instanceof Error) {
+                log('rejected signed browser job descriptor:', error.cause.message);
+            }
+            sendResult(
+                id,
+                textResult(
+                    {
+                        ...toolFailure(error, {
+                            code: 'BROWSER_JOB_EXECUTION_FAILED',
+                            message: 'The authorized Wildberries job could not be completed.',
+                            stage: 'execution',
+                            retryable: false,
+                        }),
+                        ...partialResult,
+                    },
+                    true
+                )
+            );
         }
     };
 
@@ -171,27 +202,25 @@ export const createMcpMessageHandler = ({
         }
 
         const jobId = randomUUID();
+        let writer;
+        const closeWriter = async () => {
+            if (!writer) return [];
+            const currentWriter = writer;
+            writer = undefined;
+            return currentWriter.close();
+        };
         try {
-            const writer = await createJobWriter(jobId);
-            let activeImageProbes = 0;
-            const queuedImageProbes = [];
-            const limitedImageExists = async (url, probeTimeout) => {
-                if (activeImageProbes >= IMAGE_CONCURRENCY) {
-                    await new Promise((resolve) => queuedImageProbes.push(resolve));
-                }
-                activeImageProbes += 1;
-                try {
-                    return await imageExists(url, probeTimeout);
-                } finally {
-                    activeImageProbes -= 1;
-                    queuedImageProbes.shift()?.();
-                }
-            };
+            writer = await createWriter(jobId);
+            const currentWriter = writer;
+            const resultPath = writer.resultPath;
+            const limitedImageExists = createConcurrencyLimiter(IMAGE_CONCURRENCY, (url, requestTimeout) =>
+                probeImageExists(url, requestTimeout, shutdownSignal)
+            );
             const products = await runWithConcurrency(nmIds, IMAGE_CONCURRENCY, async (nmId) => {
                 const discovered = await discoverImageBasket(nmId, maxBasket, size, timeout, limitedImageExists);
                 if (!discovered) {
                     const result = { nmId, status: 'not_found', imageUrls: [] };
-                    await writer.append(result);
+                    await currentWriter.append(result);
                     return result;
                 }
                 const imageUrls = (
@@ -211,11 +240,12 @@ export const createMcpMessageHandler = ({
                     baseUrl: discovered.baseUrl,
                     imageUrls,
                 };
-                await writer.append(result);
+                await currentWriter.append(result);
                 return result;
             });
-            const writeErrors = await writer.close();
+            const writeErrors = await closeWriter();
             const succeeded = products.filter((product) => product.status === 'ok').length;
+            // A completed probe with only not_found rows is a normal negative result; only execution failures set MCP isError below.
             sendResult(
                 id,
                 textResult({
@@ -227,20 +257,31 @@ export const createMcpMessageHandler = ({
                     failed: products.length - succeeded,
                     size,
                     products,
-                    resultPath: writer.resultPath,
+                    resultPath,
                     ...(writeErrors.length > 0 ? { storageWarnings: writeErrors.map((error) => error.message) } : {}),
                 })
             );
         } catch (error) {
+            const partialWriter = writer;
+            const writeErrors = await closeWriter().catch(() => []);
+            const partialResult = partialWriter
+                ? {
+                      ...(partialWriter.persistedBytes > 0 ? { resultPath: partialWriter.resultPath } : {}),
+                      ...(writeErrors.length > 0 ? { storageWarnings: writeErrors.map((writeError) => writeError.message) } : {}),
+                  }
+                : {};
             sendResult(
                 id,
                 textResult(
-                    toolFailure(error, {
-                        code: 'IMAGE_LOOKUP_FAILED',
-                        message: 'The Wildberries image lookup could not be completed.',
-                        stage: 'images',
-                        retryable: true,
-                    }),
+                    {
+                        ...toolFailure(error, {
+                            code: 'IMAGE_LOOKUP_FAILED',
+                            message: 'The Wildberries image lookup could not be completed.',
+                            stage: 'images',
+                            retryable: true,
+                        }),
+                        ...partialResult,
+                    },
                     true
                 )
             );
@@ -296,6 +337,6 @@ export const createMcpMessageHandler = ({
             sendError(id, -32602, `Unknown tool: ${params?.name}`);
             return;
         }
-        await handler(id, params?.arguments);
+        await handler(id, params?.arguments ?? {});
     };
 };

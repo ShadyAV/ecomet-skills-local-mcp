@@ -1,9 +1,10 @@
 import {
     IMAGE_BASKET_BOUNDS,
-    RECOMMENDATION_PAGE_SIZE,
     IMAGE_CONCURRENCY,
+    MAX_BROWSER_JOB_URL_LENGTH,
     MAX_REQUEST_TIMEOUT_MS,
     MIN_REQUEST_TIMEOUT_MS,
+    RECOMMENDATION_PAGE_SIZE,
 } from './config.mjs';
 
 const ALLOWED_WB_HOSTS = new Set(['wildberries.ru', 'www.wildberries.ru']);
@@ -26,9 +27,13 @@ const isAllowedWbCardUrl = (url) => {
 
 export const isAllowedWbUrl = (value) => {
     try {
+        // Длина проверяется на собранном URL: ограничения на отдельные строки
+        // дескриптора не связывают их количество.
+        if (typeof value !== 'string' || value.length > MAX_BROWSER_JOB_URL_LENGTH) return false;
         const url = new URL(value);
         const hostname = url.hostname.toLowerCase();
-        if (url.protocol !== 'https:') return false;
+        if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) return false;
+        if (url.pathname.includes('%')) return false;
         return (ALLOWED_WB_HOSTS.has(hostname) && ALLOWED_WB_PATH.test(url.pathname)) || isAllowedWbCardUrl(url);
     } catch {
         return false;
@@ -46,13 +51,18 @@ export const isSuccessfulWbResponse = (response) =>
 
 export const numberOrUndefined = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
 
+const positiveSafeIntegerOrUndefined = (value) =>
+    Number.isSafeInteger(value) && value > 0 ? value : undefined;
+
 const toRub = (value) => (numberOrUndefined(value) === undefined ? undefined : Math.round(value) / 100);
 
 const summarizeListingProduct = (product, position, globalPosition) => {
+    const nmId = positiveSafeIntegerOrUndefined(product?.id);
+    if (nmId === undefined) return undefined;
     const sizes = Array.isArray(product?.sizes) ? product.sizes : [];
     const price = sizes.find((size) => size?.price)?.price || product?.price;
     const row = {
-        nmId: numberOrUndefined(product?.id) || 0,
+        nmId,
         name: typeof product?.name === 'string' ? product.name : undefined,
         brand: typeof product?.brand === 'string' ? product.brand : undefined,
         supplierId: numberOrUndefined(product?.supplierId),
@@ -60,23 +70,30 @@ const summarizeListingProduct = (product, position, globalPosition) => {
         rating: numberOrUndefined(product?.reviewRating),
         feedbacks: numberOrUndefined(product?.feedbacks),
         pics: numberOrUndefined(product?.pics),
+        promoted: isPromotedViewFlags(product?.viewFlags),
         position,
     };
     if (Number.isSafeInteger(globalPosition) && globalPosition > 0) {
         row.globalPosition = globalPosition;
     }
-    if (numberOrUndefined(product?.log?.cpm) !== undefined) {
-        row.promoted = true;
-    }
     return row;
+};
+
+const isPromotedViewFlags = (value) => {
+    if (typeof value === 'number') {
+        return Number.isSafeInteger(value) && value >= 0 && (BigInt(value) & 64n) !== 0n;
+    }
+    return typeof value === 'string' && /^\d{1,20}$/.test(value) && (BigInt(value) & 64n) !== 0n;
 };
 
 export const projectPageProducts = (products, globalOffset, productNmIds, remainingLimit, includeGlobalPosition = true) => {
     const filter = productNmIds ? new Set(productNmIds) : null;
-    const rows = products.map((product, index) =>
-        summarizeListingProduct(product, index + 1, includeGlobalPosition ? globalOffset + index + 1 : undefined)
-    );
-    const selected = filter ? rows.filter((row) => filter.has(row.nmId)) : rows.slice(0, remainingLimit);
+    const rows = products
+        .map((product, index) =>
+            summarizeListingProduct(product, index + 1, includeGlobalPosition ? globalOffset + index + 1 : undefined)
+        )
+        .filter(Boolean);
+    const selected = (filter ? rows.filter((row) => filter.has(row.nmId)) : rows).slice(0, remainingLimit);
     return selected;
 };
 
@@ -100,24 +117,58 @@ const basketNumberForVol = (vol) => {
     return index < 0 ? null : index + 1;
 };
 
+export const createConcurrencyLimiter = (concurrency, worker) => {
+    let active = 0;
+    const queued = [];
+    const acquire = () => {
+        if (active < concurrency) {
+            active += 1;
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => queued.push(resolve));
+    };
+    const release = () => {
+        const next = queued.shift();
+        if (next) next();
+        else active -= 1;
+    };
+    return async (...args) => {
+        await acquire();
+        try {
+            return await worker(...args);
+        } finally {
+            release();
+        }
+    };
+};
+
 export const imageBaseUrl = (nmId, basket) => {
     const testOrigin = process.env.NODE_ENV === 'test' ? process.env.ECOMET_LOCAL_BRIDGE_TEST_IMAGE_ORIGIN : undefined;
     const origin = testOrigin || `https://basket-${String(basket).padStart(2, '0')}.wbbasket.ru`;
     return `${origin}/vol${Math.floor(nmId / 100000)}/part${Math.floor(nmId / 1000)}/${nmId}/images`;
 };
 
-export const imageExists = async (url, timeout) => {
-    const signal = AbortSignal.timeout(timeout);
+const imageRequestSignal = (timeout, shutdownSignal) =>
+    shutdownSignal ? AbortSignal.any([AbortSignal.timeout(timeout), shutdownSignal]) : AbortSignal.timeout(timeout);
+
+export const imageExists = async (url, timeout, shutdownSignal) => {
     try {
-        const response = await fetch(url, { method: 'HEAD', signal });
+        const response = await fetch(url, { method: 'HEAD', signal: imageRequestSignal(timeout, shutdownSignal) });
         if (response.ok) return true;
         if (response.status !== 403 && response.status !== 405) return false;
     } catch {
         // Some CDN edges do not support HEAD; retry with a one-byte GET.
     }
     try {
-        const response = await fetch(url, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(timeout) });
-        return response.ok || response.status === 206;
+        const response = await fetch(url, {
+            headers: { Range: 'bytes=0-0' },
+            signal: imageRequestSignal(timeout, shutdownSignal),
+        });
+        try {
+            return response.ok || response.status === 206;
+        } finally {
+            await response.body?.cancel?.().catch(() => undefined);
+        }
     } catch {
         return false;
     }
@@ -126,9 +177,13 @@ export const imageExists = async (url, timeout) => {
 export const discoverImageBasket = async (nmId, maxBasket, size, timeout, probe = imageExists) => {
     const vol = Math.floor(nmId / 100000);
     const predicted = basketNumberForVol(vol);
+    const allBaskets = Array.from({ length: maxBasket }, (_, index) => index + 1);
+    const firstFutureBasket = IMAGE_BASKET_BOUNDS.length + 1;
     const candidates = predicted
-        ? [predicted, ...Array.from({ length: maxBasket }, (_, index) => index + 1).filter((basket) => basket !== predicted)]
-        : Array.from({ length: maxBasket }, (_, index) => index + 1);
+        ? [predicted, ...allBaskets.filter((basket) => basket !== predicted)]
+        : firstFutureBasket <= maxBasket
+          ? [...allBaskets.filter((basket) => basket >= firstFutureBasket), ...allBaskets.filter((basket) => basket < firstFutureBasket)]
+          : allBaskets;
     for (let index = 0; index < candidates.length; index += IMAGE_CONCURRENCY) {
         const batch = candidates.slice(index, index + IMAGE_CONCURRENCY);
         const matches = await Promise.all(
@@ -193,7 +248,7 @@ export const summarizeProduct = (nmId, response) => {
     const price = sizes.find((size) => size?.price)?.price || product.price;
 
     return {
-        nmId: numberOrUndefined(product.id) || nmId,
+        nmId: positiveSafeIntegerOrUndefined(product.id) ?? nmId,
         ok: true,
         name: typeof product.name === 'string' ? product.name : undefined,
         brand: typeof product.brand === 'string' ? product.brand : undefined,
@@ -203,11 +258,11 @@ export const summarizeProduct = (nmId, response) => {
         feedbacks: numberOrUndefined(product.feedbacks),
         pics: numberOrUndefined(product.pics),
         priceRub: {
-            basic: numberOrUndefined(price?.basic) === undefined ? undefined : price.basic / 100,
-            product: numberOrUndefined(price?.product) === undefined ? undefined : price.product / 100,
-            logistics: numberOrUndefined(price?.logistics) === undefined ? undefined : price.logistics / 100,
-            return: numberOrUndefined(price?.return) === undefined ? undefined : price.return / 100,
-            cashback: numberOrUndefined(price?.cashback) === undefined ? undefined : price.cashback / 100,
+            basic: toRub(price?.basic),
+            product: toRub(price?.product),
+            logistics: toRub(price?.logistics),
+            return: toRub(price?.return),
+            cashback: toRub(price?.cashback),
         },
         quantity: {
             total: quantityTotal,

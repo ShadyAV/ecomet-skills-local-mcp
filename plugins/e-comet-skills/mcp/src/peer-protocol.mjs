@@ -8,6 +8,7 @@ import {
     PEER_RECONNECT_MAX_MS,
 } from './config.mjs';
 import { createPeerAuthNonce, createPeerAuthProof, isValidPeerAuthNonce, peerTokensEqual } from './peer-auth.mjs';
+import { peerStatusMessage } from './extension-vocabulary.mjs';
 import { safeExternalToolError, ToolExecutionError, toolFailure } from './tool-errors.mjs';
 import { encodeFrame } from './websocket.mjs';
 import { validTimeout } from './wb-domain.mjs';
@@ -43,17 +44,15 @@ export const createPeerProtocol = ({
     log,
     broadcastStatus,
 }) => {
-    const peerStatusMessage = () => ({
-        type: 'peer_status',
-        extensionConnected: connections.extensionReady,
-        browserJobSupported: connections.extensionBrowserJobReady,
-        bridgeTransitioning: handoff.transitioning,
-        controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
-        extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
-        bridgeGeneration: handoff.generation,
-        bridgeVersion: BRIDGE_VERSION,
-        instanceId: handoff.instanceId,
-    });
+    const currentPeerStatus = () =>
+        peerStatusMessage({
+            connections,
+            handoff,
+            bridgeGeneration: handoff.generation,
+            bridgeVersion: BRIDGE_VERSION,
+            controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+            extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+        });
 
     const closeState = (state) => {
         if (state.role === 'client') {
@@ -72,6 +71,7 @@ export const createPeerProtocol = ({
         pendingPeerAuth: null,
         peerGeneration: null,
         peerInstanceId: null,
+        // The secondary reuses its authorize requestId as authorizationScopeId on every scoped fetch.
         authorizationLeases: new Map(),
         outboundHello:
             role === 'client'
@@ -222,15 +222,29 @@ export const createPeerProtocol = ({
         }
         if (message?.type === 'peer_browser_job_authorize_result' && typeof message.requestId === 'string') {
             if (message.error) requestBroker.rejectAuthorization(message.requestId, safeExternalToolError(message.error));
-            else requestBroker.resolveAuthorization(message.requestId, message.authorization);
+            else if (!requestBroker.resolveAuthorization(message.requestId, message.authorization)) {
+                try {
+                    state.socket.send(
+                        JSON.stringify({
+                            type: 'peer_browser_job_authorization_release',
+                            authorizationScopeId: message.requestId,
+                        })
+                    );
+                } catch (error) {
+                    log('failed to release late peer browser-job authorization:', error.message);
+                }
+            }
             return;
         }
         if (message?.type !== 'peer_wb_fetch_result' || typeof message.requestId !== 'string') return;
         if (message.error) {
-            requestBroker.rejectFetch(
-                message.requestId,
-                safeExternalToolError(message.toolError || message.error, 'Wildberries request failed.')
-            );
+            // Голая строка без toolError нормализовалась в stage 'authorization' и через
+            // rethrowAuthorizationError обрывала всё задание, требуя нового JWT. Отказ
+            // обслуживающего процесса — это провал одной единицы исполнения.
+            const peerError =
+                message.toolError ??
+                { code: 'PEER_REQUEST_REJECTED', message: String(message.error), stage: 'execution', retryable: false };
+            requestBroker.rejectFetch(message.requestId, safeExternalToolError(peerError, 'Wildberries request failed.'));
         } else {
             requestBroker.resolveFetch(message.requestId, message.response);
         }
@@ -287,27 +301,12 @@ export const createPeerProtocol = ({
             }
             return completeServerHandshake(state, pending.client);
         }
-        if (message?.type === 'peer_hello') {
-            if (
-                state.peerHandshakeComplete ||
-                message.controlProtocolVersion !== CONTROL_PROTOCOL_VERSION ||
-                !Number.isInteger(message.bridgeGeneration) ||
-                message.bridgeGeneration < 1 ||
-                typeof message.instanceId !== 'string' ||
-                message.instanceId.length === 0 ||
-                !peerTokensEqual(message.authToken, peerToken)
-            ) {
-                rejectUnauthenticated(state, 'Peer authentication failed');
-                return;
-            }
-            return completeServerHandshake(state, message);
-        }
         if (!state.peerHandshakeComplete) {
             rejectUnauthenticated(state, 'Peer handshake is required');
             return;
         }
         if (message?.type === 'peer_status_request') {
-            send(state.socket, peerStatusMessage());
+            send(state.socket, currentPeerStatus());
             return;
         }
         if (
@@ -366,7 +365,7 @@ export const createPeerProtocol = ({
         if (
             message?.type !== 'peer_wb_fetch' ||
             typeof message.requestId !== 'string' ||
-            (message.authorizationScopeId !== undefined && typeof message.authorizationScopeId !== 'string') ||
+            typeof message.authorizationScopeId !== 'string' ||
             typeof message.url !== 'string' ||
             typeof message.authorizationId !== 'string' ||
             message.authorizationId.length === 0 ||
@@ -381,27 +380,16 @@ export const createPeerProtocol = ({
         }
 
         try {
-            let response;
-            if (typeof message.authorizationScopeId === 'string') {
-                const authorizationLease = state.authorizationLeases.get(message.authorizationScopeId);
-                if (!authorizationLease || authorizationLease.authorization?.authorizationId !== message.authorizationId) {
-                    throw new ToolExecutionError(
-                        'BROWSER_JOB_REAUTHORIZATION_REQUIRED',
-                        'Browser job authorization must be acquired again after the bridge connection changed.',
-                        'authorization',
-                        true
-                    );
-                }
-                response = await authorizationLease.requestWbFetch(message.url, message.timeout);
-            } else {
-                for (const [authorizationScopeId, authorizationLease] of state.authorizationLeases) {
-                    if (authorizationLease.authorization?.authorizationId !== message.authorizationId) continue;
-                    state.authorizationLeases.delete(authorizationScopeId);
-                    authorizationLease.release();
-                    break;
-                }
-                response = await requestBroker.requestWbFetch(message.url, message.timeout, message.authorizationId);
+            const authorizationLease = state.authorizationLeases.get(message.authorizationScopeId);
+            if (!authorizationLease || authorizationLease.authorization?.authorizationId !== message.authorizationId) {
+                throw new ToolExecutionError(
+                    'BROWSER_JOB_REAUTHORIZATION_REQUIRED',
+                    'Browser job authorization must be acquired again after the bridge connection changed.',
+                    'authorization',
+                    true
+                );
             }
+            const response = await authorizationLease.requestWbFetch(message.url, message.timeout);
             send(state.socket, {
                 type: 'peer_wb_fetch_result',
                 requestId: message.requestId,
@@ -449,8 +437,22 @@ export const createPeerProtocol = ({
 
         const shouldTakeover = handoff.consumeTakeoverGrant();
         handoff.markDisconnected();
-        requestBroker.rejectPendingRequests('Primary local bridge disconnected before returning the WB response');
-        requestBroker.rejectPendingAuthorizations('Primary local bridge disconnected before authorizing the browser job');
+        requestBroker.rejectPendingRequests(
+            new ToolExecutionError(
+                    'EXTENSION_DISCONNECTED',
+                    'The primary local bridge disconnected before returning the WB response. Retry once it is back.',
+                    'extension',
+                    true
+                )
+        );
+        requestBroker.rejectPendingAuthorizations(
+            new ToolExecutionError(
+                    'EXTENSION_DISCONNECTED',
+                    'The primary local bridge disconnected before authorizing the browser job. Retry once it is back.',
+                    'extension',
+                    true
+                )
+        );
         clearTimeout(connections.peerReconnectTimer);
         const reconnectDelay = connections.nextPeerReconnectDelay({
             baseMs: PEER_RECONNECT_BASE_MS,

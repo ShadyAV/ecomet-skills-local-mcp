@@ -14,10 +14,10 @@ import {
     SESSION_NONCE,
     WS_HEARTBEAT_INTERVAL_MS,
 } from './config.mjs';
+import { localMessage, MESSAGE_TYPES, peerStatusMessage } from './extension-vocabulary.mjs';
 import { encodeFrame, parseFrames, sendWs } from './websocket.mjs';
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const localMessage = (id, type, payload) => ({ id, type, payload });
 
 const isAllowedExtensionOrigin = (origin) => {
     if (!origin.startsWith('chrome-extension://')) return false;
@@ -42,7 +42,7 @@ export const createBridgeRuntime = ({
     let closed = false;
 
     const server = createHttpServer((request, response) => {
-        if (request.url === '/health') {
+        if (request.url === '/health' && request.headers?.host === `${host}:${port}`) {
             response.writeHead(200, { 'content-type': 'application/json' });
             response.end(JSON.stringify({ ok: true, extensionConnected: connections.extensionReady }));
             return;
@@ -51,20 +51,18 @@ export const createBridgeRuntime = ({
         response.end();
     });
 
-    const peerStatusMessage = () => ({
-        type: 'peer_status',
-        extensionConnected: connections.extensionReady,
-        browserJobSupported: connections.extensionBrowserJobReady,
-        bridgeTransitioning: handoff.transitioning,
-        controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
-        extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
-        bridgeGeneration: BRIDGE_GENERATION,
-        bridgeVersion: BRIDGE_VERSION,
-        instanceId: handoff.instanceId,
-    });
+    const currentPeerStatus = () =>
+        peerStatusMessage({
+            connections,
+            handoff,
+            bridgeGeneration: BRIDGE_GENERATION,
+            bridgeVersion: BRIDGE_VERSION,
+            controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+            extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+        });
 
     const broadcastPeerStatus = () => {
-        const message = peerStatusMessage();
+        const message = currentPeerStatus();
         for (const state of acceptedPeerStates) {
             if (!state.peerHandshakeComplete) continue;
             try {
@@ -85,8 +83,10 @@ export const createBridgeRuntime = ({
     };
 
     let connectToPrimaryBridge;
-    const relinquishBridge = () => {
+    const relinquishBridge = (effect) => {
         handoff.deferListener();
+        // Close the narrow post-drain window before clearing the socket: new work must fail retryably, not wait for its timeout.
+        effect.invalidateAuthorizationWork();
         const currentExtensionSocket = connections.extensionSocket;
         connections.disconnectExtension(currentExtensionSocket);
 
@@ -161,10 +161,10 @@ export const createBridgeRuntime = ({
         }
         log(`handoff granted to generation ${targetState.peerGeneration} instance ${targetState.peerInstanceId}`);
         await delay(HANDOFF_DRAIN_POLL_MS);
-        relinquishBridge();
+        relinquishBridge(effect);
     };
 
-    const closeConnectionState = (state) => {
+    const closeConnectionState = (state, { destroySocket = true } = {}) => {
         if (state.closed) return;
         state.closed = true;
         clearInterval(state.heartbeatTimer);
@@ -172,7 +172,7 @@ export const createBridgeRuntime = ({
         connectionStates.delete(state);
         if (state.path === peerPath) peerProtocol.onDisconnect(state);
         else extensionProtocol.onDisconnect(state);
-        state.socket.destroy();
+        if (destroySocket) state.socket.destroy();
     };
 
     server.on('upgrade', (request, socket) => {
@@ -236,7 +236,7 @@ export const createBridgeRuntime = ({
             state.helloId = randomUUID();
             sendWs(
                 socket,
-                localMessage(state.helloId, 'hello', {
+                localMessage(state.helloId, MESSAGE_TYPES.hello, {
                     clientName: 'e-comet-local-bridge',
                     clientVersion: BRIDGE_VERSION,
                     protocolVersion: EXTENSION_PROTOCOL_VERSION,
@@ -277,7 +277,7 @@ export const createBridgeRuntime = ({
                             })
                             .catch((error) => log('WebSocket message handling failed:', error.message));
                     },
-                    () => closeConnectionState(state)
+                    (closeFrameSent) => closeConnectionState(state, { destroySocket: !closeFrameSent })
                 );
             } catch (error) {
                 log('WebSocket protocol error:', error.message);
@@ -291,6 +291,7 @@ export const createBridgeRuntime = ({
     const start = () => {
         if (closed || server.listening) return;
         try {
+            // Operational listen failures arrive through 'error'; keep this guard for synchronous argument/state errors.
             server.listen(port, host, () => {
                 connections.resetPeerAfterListen();
                 handoff.resetAfterListen();
@@ -352,6 +353,7 @@ export const createBridgeRuntime = ({
         if (closed) return;
         closed = true;
         clearTimeout(connections.peerReconnectTimer);
+        connections.close?.();
         connections.peerSocket?.close();
         for (const state of [...connectionStates]) {
             closeConnectionState(state);
@@ -360,8 +362,8 @@ export const createBridgeRuntime = ({
     };
 
     const status = () => ({
-        extensionConnected: connections.effectiveExtensionReady ?? connections.extensionReady,
-        browserJobSupported: connections.effectiveBrowserJobReady ?? connections.extensionBrowserJobReady,
+        extensionConnected: connections.effectiveExtensionReady,
+        browserJobSupported: connections.effectiveBrowserJobReady,
         bridgeRole: server.listening ? 'primary' : connections.peerReady ? 'secondary' : 'disconnected',
         bridgeTransitioning: handoff.transitioning,
     });

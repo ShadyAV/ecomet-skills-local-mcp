@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rename, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -12,6 +12,7 @@ const CLOCK_SKEW_MS = 5_000;
 const STORE_DIRECTORY = 'browser-job-handoff-v1';
 const PENDING_FILE_PATTERN = /^[a-f0-9]{64}\.json$/;
 const CLAIM_FILE_PREFIX = '.claim-';
+const LOCK_CANDIDATE_PATTERN = /^\.claim-lock-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const STAGE_FILE_PREFIX = '.stage-';
 const COLLISION_FILE_PREFIX = '.collision-';
 const LOCK_FILE_SUFFIX = '.lock';
@@ -97,11 +98,27 @@ const parseStoredEntry = (text) => {
 const isEntryFresh = (entry, nowMs) =>
     entry.createdAtMs <= nowMs + CLOCK_SKEW_MS && nowMs - entry.createdAtMs <= HANDOFF_TTL_MS;
 
-const removeFile = async (path) => {
-    try {
-        await unlink(path);
-    } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
+export const removeFile = async (
+    path,
+    { retryLimit = LOCK_RELEASE_RETRY_LIMIT, waitForRetry = wait, operations = {} } = {}
+) => {
+    const unlinkFile = operations.unlink ?? unlink;
+    for (let attempt = 0; attempt < retryLimit; attempt += 1) {
+        try {
+            await unlinkFile(path);
+            return;
+        } catch (error) {
+            if (error?.code === 'ENOENT') return;
+            if (!TRANSIENT_WINDOWS_LOCK_ERRORS.has(error?.code) || attempt === retryLimit - 1) throw error;
+            await waitForRetry(LOCK_RETRY_DELAY_MS);
+        }
+    }
+};
+
+const ensurePrivateStoreDirectory = async (dataDirectory) => {
+    await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') {
+        await chmod(dataDirectory, 0o700);
     }
 };
 
@@ -146,7 +163,7 @@ export const releaseOwnedSessionLock = async ({
     }
 };
 
-const acquireSessionLock = async (storeDirectory, sessionId) => {
+const acquireSessionLock = async (storeDirectory, sessionId, fileNow) => {
     const lockPath = lockPathForSession(storeDirectory, sessionId);
     for (let attempt = 0; attempt < LOCK_RETRY_LIMIT; attempt += 1) {
         const ownerId = `${process.pid}-${randomUUID()}`;
@@ -165,7 +182,7 @@ const acquireSessionLock = async (storeDirectory, sessionId) => {
 
         try {
             const lockStat = await stat(lockPath);
-            if (Date.now() - lockStat.mtimeMs > HANDOFF_TTL_MS) {
+            if (fileNow() - lockStat.mtimeMs > HANDOFF_TTL_MS) {
                 const stalePath = join(storeDirectory, `${CLAIM_FILE_PREFIX}stale-lock-${process.pid}-${randomUUID()}`);
                 try {
                     const currentLockStat = await stat(lockPath);
@@ -191,12 +208,20 @@ const acquireSessionLock = async (storeDirectory, sessionId) => {
     throw new HandoffError('HANDOFF_BUSY', 'Another browser authorization handoff is still in progress.');
 };
 
-const withSessionLock = async (storeDirectory, sessionId, operation) => {
-    const releaseLock = await acquireSessionLock(storeDirectory, sessionId);
+export const withSessionLock = async (storeDirectory, sessionId, fileNow, operation, acquireLock = acquireSessionLock) => {
+    const releaseLock = await acquireLock(storeDirectory, sessionId, fileNow);
+    let operationFailed = false;
     try {
         return await operation();
+    } catch (error) {
+        operationFailed = true;
+        throw error;
     } finally {
-        await releaseLock();
+        try {
+            await releaseLock();
+        } catch (error) {
+            if (!operationFailed) throw error;
+        }
     }
 };
 
@@ -257,7 +282,7 @@ const closeCollision = async (storeDirectory, sessionId) => {
     );
 };
 
-const cleanupStore = async (storeDirectory, nowMs) => {
+const cleanupStore = async (storeDirectory, nowMs, fileNowMs) => {
     let entries;
     try {
         entries = await readdir(storeDirectory, { withFileTypes: true });
@@ -268,6 +293,27 @@ const cleanupStore = async (storeDirectory, nowMs) => {
 
     let pendingCount = 0;
     for (const directoryEntry of entries) {
+        if (directoryEntry.isDirectory() && LOCK_CANDIDATE_PATTERN.test(directoryEntry.name)) {
+            const candidatePath = join(storeDirectory, directoryEntry.name);
+            try {
+                const candidateStat = await stat(candidatePath);
+                if (fileNowMs - candidateStat.mtimeMs > HANDOFF_TTL_MS) {
+                    const currentStat = await stat(candidatePath);
+                    if (
+                        currentStat.dev === candidateStat.dev &&
+                        currentStat.ino === candidateStat.ino &&
+                        currentStat.mtimeMs === candidateStat.mtimeMs
+                    ) {
+                        const stalePath = join(storeDirectory, `.claim-stale-lock-${process.pid}-${randomUUID()}`);
+                        await rename(candidatePath, stalePath);
+                        await rm(stalePath, { recursive: true, force: true });
+                    }
+                }
+            } catch (error) {
+                if (error?.code !== 'ENOENT') throw error;
+            }
+            continue;
+        }
         if (!directoryEntry.isFile()) continue;
         const path = join(storeDirectory, directoryEntry.name);
         if (PENDING_FILE_PATTERN.test(directoryEntry.name)) {
@@ -285,7 +331,7 @@ const cleanupStore = async (storeDirectory, nowMs) => {
         if (directoryEntry.name.startsWith(CLAIM_FILE_PREFIX)) {
             try {
                 const fileStat = await stat(path);
-                if (nowMs - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
+                if (fileNowMs - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
             } catch (error) {
                 if (error?.code !== 'ENOENT') throw error;
             }
@@ -294,7 +340,7 @@ const cleanupStore = async (storeDirectory, nowMs) => {
         if (directoryEntry.name.startsWith(STAGE_FILE_PREFIX)) {
             try {
                 const fileStat = await stat(path);
-                if (Date.now() - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
+                if (fileNowMs - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
             } catch (error) {
                 if (error?.code !== 'ENOENT') throw error;
             }
@@ -303,7 +349,7 @@ const cleanupStore = async (storeDirectory, nowMs) => {
         if (directoryEntry.name.startsWith(COLLISION_FILE_PREFIX)) {
             try {
                 const fileStat = await stat(path);
-                if (Date.now() - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
+                if (fileNowMs - fileStat.mtimeMs > HANDOFF_TTL_MS) await removeFile(path);
             } catch (error) {
                 if (error?.code !== 'ENOENT') throw error;
             }
@@ -312,10 +358,10 @@ const cleanupStore = async (storeDirectory, nowMs) => {
     return pendingCount;
 };
 
-export const stageTriggerUrl = async ({ dataDirectory, sessionId, triggerUrl, nowMs = Date.now() }) => {
+export const stageTriggerUrl = async ({ dataDirectory, sessionId, triggerUrl, nowMs = Date.now(), fileNow = Date.now }) => {
     validateSessionId(sessionId);
     validateTriggerUrl(triggerUrl);
-    await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+    await ensurePrivateStoreDirectory(dataDirectory);
     const stagePath = join(dataDirectory, `${stageFilePrefixForSession(sessionId)}${process.pid}-${randomUUID()}`);
     const observedCollision = await readCollision(dataDirectory, sessionId);
     await writeFile(
@@ -328,8 +374,8 @@ export const stageTriggerUrl = async ({ dataDirectory, sessionId, triggerUrl, no
         { encoding: 'utf8', flag: 'wx', mode: 0o600 }
     );
     try {
-        await withSessionLock(dataDirectory, sessionId, async () => {
-            const pendingCount = await cleanupStore(dataDirectory, nowMs);
+        await withSessionLock(dataDirectory, sessionId, fileNow, async () => {
+            const pendingCount = await cleanupStore(dataDirectory, nowMs, fileNow());
             if (pendingCount >= MAX_PENDING_ENTRIES) {
                 throw new HandoffError('HANDOFF_CAPACITY', 'Too many browser authorizations are waiting locally.');
             }
@@ -367,21 +413,25 @@ export const stageTriggerUrl = async ({ dataDirectory, sessionId, triggerUrl, no
             }
         });
     } finally {
-        await withSessionLock(dataDirectory, sessionId, async () => {
-            await removeFile(stagePath);
-            await cleanupStore(dataDirectory, nowMs);
-            if (!(await hasActiveStage(dataDirectory, sessionId))) {
-                await closeCollision(dataDirectory, sessionId);
-            }
-        });
+        await removeFile(stagePath);
+        try {
+            await withSessionLock(dataDirectory, sessionId, fileNow, async () => {
+                await cleanupStore(dataDirectory, nowMs, fileNow());
+                if (!(await hasActiveStage(dataDirectory, sessionId))) {
+                    await closeCollision(dataDirectory, sessionId);
+                }
+            });
+        } catch {
+            // The owned stage is already gone; remaining cleanup is recoverable housekeeping.
+        }
     }
 };
 
-export const claimTriggerUrl = async ({ dataDirectory, sessionId, nowMs = Date.now() }) => {
+export const claimTriggerUrl = async ({ dataDirectory, sessionId, nowMs = Date.now(), fileNow = Date.now }) => {
     validateSessionId(sessionId);
-    await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
-    return withSessionLock(dataDirectory, sessionId, async () => {
-        await cleanupStore(dataDirectory, nowMs);
+    await ensurePrivateStoreDirectory(dataDirectory);
+    return withSessionLock(dataDirectory, sessionId, fileNow, async () => {
+        await cleanupStore(dataDirectory, nowMs, fileNow());
         if ((await hasActiveStage(dataDirectory, sessionId)) || (await hasCollision(dataDirectory, sessionId))) {
             throw new HandoffError(
                 'HANDOFF_MISSING',
@@ -485,7 +535,7 @@ const safeHookError = (error) => {
     return new HandoffError('HANDOFF_STORAGE_ERROR', 'The local browser authorization handoff failed.');
 };
 
-export const processHookEvent = async (event, { env = process.env, nowMs = Date.now() } = {}) => {
+export const processHookEvent = async (event, { env = process.env, nowMs = Date.now(), fileNow = Date.now } = {}) => {
     if (!event || typeof event !== 'object') {
         const error = new HandoffError('HANDOFF_INVALID_EVENT', 'The desktop hook event is invalid.');
         return { exitCode: 2, stdout: '', stderr: `${error.code}: ${error.message}` };
@@ -506,6 +556,7 @@ export const processHookEvent = async (event, { env = process.env, nowMs = Date.
                 sessionId: event.session_id,
                 triggerUrl,
                 nowMs,
+                fileNow,
             });
             return { exitCode: 0, stdout: '', stderr: '' };
         } catch (error) {
@@ -523,6 +574,7 @@ export const processHookEvent = async (event, { env = process.env, nowMs = Date.
                 dataDirectory: resolveStoreDirectory(env),
                 sessionId: event.session_id,
                 nowMs,
+                fileNow,
             });
             return {
                 exitCode: 0,

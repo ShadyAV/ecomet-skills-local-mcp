@@ -4,13 +4,15 @@ import { join } from 'node:path';
 
 import {
     RESULT_DIR,
+    RESULT_ACTIVE_STALE_MS,
     RESULT_MAX_FILE_BYTES,
     RESULT_MAX_FILES,
     RESULT_MAX_TOTAL_BYTES,
     RESULT_RETENTION_MS,
 } from './config.mjs';
 
-const safeFilePart = (value) => value.replace(/[^a-zA-Z0-9_-]/g, '_');
+const RESULT_JOB_ID_FILE_PART_LENGTH = 128;
+const safeFilePart = (value) => value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, RESULT_JOB_ID_FILE_PART_LENGTH);
 
 const normalizeError = (error) => (error instanceof Error ? error : new Error(String(error)));
 const ACTIVE_RESULT_PREFIX = '.active-';
@@ -30,6 +32,7 @@ export const pruneResults = async ({
     resultDir = RESULT_DIR,
     now = Date.now(),
     retentionMs = RESULT_RETENTION_MS,
+    activeStaleMs = RESULT_ACTIVE_STALE_MS,
     maxTotalBytes = RESULT_MAX_TOTAL_BYTES,
     maxFiles = RESULT_MAX_FILES,
     excludePaths = [],
@@ -52,7 +55,9 @@ export const pruneResults = async ({
             await ensurePrivateResultFile(path);
             const metadata = await stat(path);
             const active = entry.name.startsWith(ACTIVE_RESULT_PREFIX);
-            if (!excluded.has(path) && now - metadata.mtimeMs > retentionMs) {
+            if (active && !excluded.has(path) && now - metadata.mtimeMs > activeStaleMs) {
+                await rm(path, { force: true });
+            } else if (!active && !excluded.has(path) && now - metadata.mtimeMs > retentionMs) {
                 await rm(path, { force: true });
             } else if (!active) {
                 files.push({ path, size: metadata.size, mtimeMs: metadata.mtimeMs });
@@ -86,12 +91,13 @@ export const createJobWriter = async (
         append = appendFile,
         maxFileBytes = RESULT_MAX_FILE_BYTES,
         retentionMs = RESULT_RETENTION_MS,
+        activeStaleMs = RESULT_ACTIVE_STALE_MS,
         maxTotalBytes = RESULT_MAX_TOTAL_BYTES,
         maxFiles = RESULT_MAX_FILES,
     } = {}
 ) => {
     await ensurePrivateResultDirectory(resultDir);
-    const retentionOptions = { resultDir, retentionMs, maxTotalBytes, maxFiles };
+    const retentionOptions = { resultDir, retentionMs, activeStaleMs, maxTotalBytes, maxFiles };
     const writeErrors = await pruneResults(retentionOptions);
     const resultName = `${safeFilePart(jobId)}-${randomUUID()}.ndjson`;
     const resultPath = join(resultDir, resultName);
@@ -101,9 +107,15 @@ export const createJobWriter = async (
     let writeChain = Promise.resolve();
     let persistedBytes = 0;
     let fileLimitReached = false;
+    let closed = false;
+    let closePromise;
     return {
         resultPath,
+        get persistedBytes() {
+            return persistedBytes;
+        },
         append(record) {
+            if (closed) return Promise.resolve();
             writeChain = writeChain.then(async () => {
                 try {
                     const serialized = `${JSON.stringify(record)}\n`;
@@ -123,16 +135,21 @@ export const createJobWriter = async (
             });
             return writeChain;
         },
-        async close() {
-            await writeChain;
-            try {
-                await rename(activeResultPath, resultPath);
-                await ensurePrivateResultFile(resultPath);
-            } catch (error) {
-                writeErrors.push(normalizeError(error));
-            }
-            writeErrors.push(...(await pruneResults({ ...retentionOptions, excludePaths: [resultPath] })));
-            return [...writeErrors];
+        close() {
+            if (closePromise) return closePromise;
+            closed = true;
+            closePromise = (async () => {
+                await writeChain;
+                try {
+                    await rename(activeResultPath, resultPath);
+                    await ensurePrivateResultFile(resultPath);
+                } catch (error) {
+                    writeErrors.push(normalizeError(error));
+                }
+                writeErrors.push(...(await pruneResults({ ...retentionOptions, excludePaths: [resultPath] })));
+                return [...writeErrors];
+            })();
+            return closePromise;
         },
     };
 };

@@ -42,7 +42,7 @@ export const tools = [
         description:
             'Get live Wildberries product-card data by article ID. Use for Russian requests about остаток, остатки, сток, наличие, склады, размеры, цена, карточка товара, описание, характеристики, or склейка. ' +
             authorizationWorkflow +
-            'Authorize with job {type:"product_card",articles:[integer,...]}; use 1-50 unique positive article IDs. Read products[]. For price use priceRub.product; priceRub.basic is the crossed-out/basic price. ' +
+            'Authorize with job {type:"product_card",product_ids:[integer,...]}; use 1-1000 positive product IDs. Read products[]. For price use priceRub.product; priceRub.basic is the crossed-out/basic price. ' +
             'For stock use quantity.total, quantity.byWarehouse, and quantity.bySize. Warehouse names are already in warehouse; if absent, display wh <id>. Use colors for merged articles, options for characteristics, and description for description. ' +
             'Translate raw field names for the user and render booleans as yes/no. A product-level ok:false is a failed WB request, not proof that the product does not exist. Report partial item errors. ' +
             'Values are a current WB-session snapshot. ' +
@@ -56,9 +56,9 @@ export const tools = [
         description:
             'Get live Wildberries search results, top products, and positions for one or more phrases. Use for Russian requests about поиск, поисковая выдача, позиция товара, место по запросу, or топ товаров. ' +
             authorizationWorkflow +
-            'Authorize with job {type:"search_by_query",queries:[{query:string,pages:integer},...]}; use at most 10 queries and 50 pages total. Start with 1 page for a top list or 2-3 pages when depth is unspecified. ' +
-            'For a targeted rank check, put phrases in remote job.queries and target article IDs in local productNmIds. For a top N list, use productLimitTotal:N. ' +
-            'Read queries[].pages[].products. Use globalPosition only when globalPositionsComplete is true; position is page-local. Mark promoted:true as реклама because it is paid placement. ' +
+            'Authorize with job {type:"search_by_query",queries:[{query:string,pages:integer},...]}; use at most 50 pages for each query and 1000 pages total. Start with 1 page for a top list or 2-3 pages when depth is unspecified. ' +
+            'For a targeted rank check, put phrases in remote job.queries and target article IDs in local productNmIds. For a top N list, use productLimitPerQuery:N. ' +
+            'Read queries[].pages[].products. Use globalPosition only when globalPositionsComplete is true; position is page-local. promoted is always boolean: promoted:true means реклама (paid placement), promoted:false means органика. ' +
             'If a target is absent, claim only that it was not found within the requested pages/positions, never that it is absent from all WB search results. Group multiple phrases separately and disclose failed pages. ' +
             'Results are a current WB-session snapshot. ' +
             resultPathGuidance,
@@ -71,9 +71,9 @@ export const tools = [
         description:
             'Get live Wildberries recommendation shelves for source article IDs and check whether specific products occur in them. Use for Russian requests about рекомендации, похожие товары, рекомендательная полка, соседние товары, or whether a product встречается в рекомендациях. ' +
             authorizationWorkflow +
-            'Authorize with job {type:"recommendations_by_product",articles:[{nm:integer,pages?:integer},...]}; use at most 20 unique source articles, 50 pages per article, and 50 страниц суммарно. ' +
-            'For первые N recommendations, explicitly request pages: 1 and pass local productLimitTotal: N. Omit pages only when the user explicitly needs the whole discovered shelf within local limits. ' +
-            'For a membership check, put исходные товары in remote job.articles and целевые товары in local productNmIds. Read articles[].pages[].products and group results by sourceNmId. ' +
+            'Authorize with job {type:"recommendations_by_product",products:[{product_id:integer,pages?:integer},...]}; use unique source product IDs, at most 50 pages for each product, and 1000 pages total; an omitted pages value counts as 50 toward the total. ' +
+            'For первые N recommendations, explicitly request pages: 1 and pass local productLimitPerSource: N. Omit pages only when the user explicitly needs the whole discovered shelf within local limits. ' +
+            'For a membership check, put исходные товары in remote job.products and целевые товары in local productNmIds. Read articles[].pages[].products and group results by sourceNmId. ' +
             'Use globalPosition only when globalPositionsComplete is true. If a target is absent, claim only that it was not found in the successfully requested part of that source shelf. ' +
             'Disclose status partial/failed, failed pages, complete:false, and truncatedByLocalLimit:true. Recommendations are a current WB-session snapshot. ' +
             resultPathGuidance,

@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026.8.1] - 2026-08-02
+
+### Changed
+- Updated the bundled local MCP to the hardened signed browser-job flow used by extension `1.4.1`.
+- Tightened descriptor, URL, WebSocket, peer-authorization, result-storage, and multi-process handoff handling.
+- Aligned browser-job product, entity, and account terminology with the current remote MCP contract.
+
 ## [2026.7.6] - 2026-07-24
 
 ### Added

@@ -4,10 +4,12 @@ export const attachStdioTransport = ({
     input = process.stdin,
     handleMessage,
     sendError,
+    onClose = () => undefined,
     maxMessageBytes = MAX_MCP_MESSAGE_BYTES,
 }) => {
     let buffer = '';
     let discardingOversizedLine = false;
+    let closed = false;
 
     input.setEncoding('utf8');
     const onData = (incomingChunk) => {
@@ -38,13 +40,33 @@ export const attachStdioTransport = ({
             const line = rawLine.trim();
             if (!line) continue;
             try {
-                void handleMessage(JSON.parse(line));
+                const message = JSON.parse(line);
+                void Promise.resolve(handleMessage(message)).catch(() => {
+                    try {
+                        sendError(message?.id ?? null, -32603, 'Internal error');
+                    } catch {
+                        // The host may have already closed STDIO; there is no remaining response channel.
+                    }
+                });
             } catch {
                 sendError(null, -32700, 'Parse error');
             }
         }
     };
 
+    const handleClose = () => {
+        if (closed) return;
+        closed = true;
+        onClose();
+    };
+
     input.on('data', onData);
-    return () => input.off('data', onData);
+    input.on('end', handleClose);
+    input.on('close', handleClose);
+    return () => {
+        closed = true;
+        input.off('data', onData);
+        input.off('end', handleClose);
+        input.off('close', handleClose);
+    };
 };
