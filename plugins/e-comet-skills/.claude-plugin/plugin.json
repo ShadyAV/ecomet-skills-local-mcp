@@ -8,12 +8,7 @@
     "e-comet-local": {
       "type": "stdio",
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/src/server.mjs"],
-      "env": {
-        "NODE_ENV": "development",
-        "ECOMET_ENABLE_EXTENSION_ID_OVERRIDE": "1",
-        "ECOMET_ALLOWED_EXTENSION_IDS": "kfdeggpflkbafbjdhbcmfgeibhdnmaio"
-      }
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/src/server.mjs"]
     }
   }
 }

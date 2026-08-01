@@ -1,5 +1,10 @@
 # Changelog
 
+## [2026.8.2] - 2026-08-02
+
+### Fixed
+- Removed the unpacked-extension ID override so the local bridge accepts the official e-Comet Chrome extension.
+
 ## [2026.8.1] - 2026-08-02
 
 ### Changed

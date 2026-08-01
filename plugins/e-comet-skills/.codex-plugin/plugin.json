@@ -1,6 +1,6 @@
 {
   "name": "e-comet-skills",
-  "version": "2026.8.1",
+  "version": "2026.8.2",
   "description": "Self-describing MCP tools for e-Comet analytics and live Wildberries data.",
   "author": {
     "name": "e-Comet",
@@ -15,12 +15,7 @@
       "type": "stdio",
       "command": "node",
       "args": ["mcp/src/server.mjs"],
-      "cwd": ".",
-      "env": {
-        "NODE_ENV": "development",
-        "ECOMET_ENABLE_EXTENSION_ID_OVERRIDE": "1",
-        "ECOMET_ALLOWED_EXTENSION_IDS": "kfdeggpflkbafbjdhbcmfgeibhdnmaio"
-      }
+      "cwd": "."
     }
   },
   "interface": {
