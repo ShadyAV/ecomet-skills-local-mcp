@@ -1,7 +1,7 @@
 {
   "name": "e-comet-skills",
   "version": "2026.8.2",
-  "description": "Self-describing MCP tools for e-Comet analytics and live Wildberries data.",
+  "description": "MCP tools for e-Comet seller analytics and live Wildberries data.",
   "author": {
     "name": "e-Comet",
     "url": "https://e-comet.io/"
@@ -11,6 +11,10 @@
   "license": "Apache-2.0",
   "keywords": ["mcp", "wildberries", "wb", "e-comet"],
   "mcpServers": {
+    "e-comet": {
+      "type": "http",
+      "url": "https://mcp.e-comet.io/mcp"
+    },
     "e-comet-local": {
       "type": "stdio",
       "command": "node",
@@ -19,9 +23,9 @@
     }
   },
   "interface": {
-    "displayName": "e-Comet",
-    "shortDescription": "WB analytics and live-data MCP tools",
-    "longDescription": "Analyze e-Comet account data and get authorized live WB data through the user's browser.",
+    "displayName": "e-Comet MCP Tools",
+    "shortDescription": "Seller analytics and live Wildberries data",
+    "longDescription": "Analyze e-Comet account data and get current Wildberries data through the user's browser.",
     "developerName": "e-Comet",
     "category": "Developer Tools",
     "capabilities": ["Interactive"],
