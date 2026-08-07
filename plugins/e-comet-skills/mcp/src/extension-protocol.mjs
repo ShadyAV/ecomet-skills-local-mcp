@@ -63,7 +63,7 @@ export const createExtensionProtocol = ({
                 Array.isArray(payload.capabilities) && payload.capabilities.includes('browser_job')
             );
             previousSocket?.end(encodeFrame('', 0x8));
-            handoff.markRoutable(connections.effectiveExtensionReady);
+            handoff.markTopologySettled();
             log(`extension connected, version ${payload.extensionVersion || 'unknown'}`);
             broadcastStatus();
             return;

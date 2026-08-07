@@ -36,8 +36,12 @@ export class HandoffState {
         return true;
     }
 
-    markRoutable(routable) {
-        if (routable) this.transitioning = false;
+    // `transitioning` describes the bridge topology alone: whether the primary/secondary arrangement is still
+    // settling. It deliberately says nothing about extension readiness, which callers report separately as
+    // `extensionConnected`. Conflating the two used to leave the flag stuck on whenever a peer reconnected to a
+    // primary that had no extension attached.
+    markTopologySettled() {
+        this.transitioning = false;
     }
 
     markDisconnected() {
@@ -81,5 +85,7 @@ export class HandoffState {
         this.takeoverGranted = false;
         this.listenerYieldUntil = 0;
         this.target = null;
+        // Owning the listener is a settled topology, so stop reporting a transition even if no extension ever attaches.
+        this.transitioning = false;
     }
 }

@@ -194,7 +194,12 @@ const handleMcpMessage = createMcpMessageHandler({
         websocket: `ws://${HOST}:${PORT}${EXTENSION_PATH}`,
         resultDirectory: RESULT_DIR,
     }),
-    waitForExtensionReady: () => connections.waitForExtensionReady(EXTENSION_READINESS_WAIT_MS),
+    // A degraded secondary retries slowly in the background; an actual request is the signal to try again now,
+    // so the wake-up happens here rather than in the tool handlers, which know nothing about reconnection.
+    waitForExtensionReady: () => {
+        runtime.ensureBridgeConnected();
+        return connections.waitForExtensionReady(EXTENSION_READINESS_WAIT_MS);
+    },
     requestBrowserJobAuthorization,
     shutdownSignal: shutdownController.signal,
     log,

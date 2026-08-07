@@ -4,9 +4,9 @@ import {
     EXTENSION_PROTOCOL_VERSION,
     MAX_BROWSER_JOB_TOKEN_BYTES,
     PEER_RECONNECT_BASE_MS,
-    PEER_RECONNECT_MAX_ATTEMPTS,
     PEER_RECONNECT_MAX_MS,
 } from './config.mjs';
+import { PEER_REJECTION_CODES } from './connection-state.mjs';
 import { createPeerAuthNonce, createPeerAuthProof, isValidPeerAuthNonce, peerTokensEqual } from './peer-auth.mjs';
 import { peerStatusMessage } from './extension-vocabulary.mjs';
 import { safeExternalToolError, ToolExecutionError, toolFailure } from './tool-errors.mjs';
@@ -95,8 +95,8 @@ export const createPeerProtocol = ({
         closeState(state);
     };
 
-    const rejectUntrustedPrimary = (state, reason = 'Primary peer authentication failed') => {
-        connections.recordPeerRejection(reason);
+    const rejectUntrustedPrimary = (state, code = PEER_REJECTION_CODES.authenticationFailed) => {
+        connections.recordPeerRejection(code);
         closeState(state);
     };
 
@@ -128,7 +128,9 @@ export const createPeerProtocol = ({
 
     const handlePeerClientMessage = async (state, message) => {
         if (message?.type === 'peer_rejected') {
-            connections.recordPeerRejection(message.reason);
+            // The frame's `reason` is written by whatever answered on loopback and is never propagated; only the
+            // fact of a rejection is trusted, and it is reported with a code this process chose.
+            connections.recordPeerRejection(PEER_REJECTION_CODES.authenticationFailed);
             closeState(state);
             return;
         }
@@ -184,7 +186,7 @@ export const createPeerProtocol = ({
             }
             state.peerHandshakeComplete = true;
             const wasReady = connections.updatePeerStatus(message);
-            handoff.markRoutable(connections.effectiveExtensionReady);
+            handoff.markTopologySettled();
             if (!wasReady) {
                 log(
                     `connected to primary local bridge generation ${message.bridgeGeneration} version ${
@@ -195,7 +197,7 @@ export const createPeerProtocol = ({
             return;
         }
         if (!state.peerHandshakeComplete) {
-            connections.recordPeerRejection('Peer handshake is required');
+            connections.recordPeerRejection(PEER_REJECTION_CODES.handshakeRequired);
             closeState(state);
             return;
         }
@@ -213,7 +215,7 @@ export const createPeerProtocol = ({
         }
         if (message?.type === 'peer_status') {
             const wasReady = connections.updatePeerStatus(message);
-            handoff.markRoutable(connections.effectiveExtensionReady);
+            handoff.markTopologySettled();
             if (!wasReady) {
                 const versionLabel = message.controlProtocolVersion ? `generation ${message.bridgeGeneration}` : 'legacy generation';
                 log(`connected to primary local bridge ${versionLabel}`);
@@ -437,6 +439,9 @@ export const createPeerProtocol = ({
 
         const shouldTakeover = handoff.consumeTakeoverGrant();
         handoff.markDisconnected();
+        // A socket that dropped without a protocol verdict is a plain connection failure. An verdict already
+        // reached for this attempt — an authentication rejection, say — must survive the close that follows it.
+        connections.classifyPeerCloseFailure();
         requestBroker.rejectPendingRequests(
             new ToolExecutionError(
                     'EXTENSION_DISCONNECTED',
@@ -453,17 +458,17 @@ export const createPeerProtocol = ({
                     true
                 )
         );
-        clearTimeout(connections.peerReconnectTimer);
-        const reconnectDelay = connections.nextPeerReconnectDelay({
+        connections.clearPeerRetrySchedule();
+        const { delayMs, saturated } = connections.nextPeerReconnectDelay({
             baseMs: PEER_RECONNECT_BASE_MS,
             maxMs: PEER_RECONNECT_MAX_MS,
-            maxAttempts: PEER_RECONNECT_MAX_ATTEMPTS,
         });
-        if (!shouldTakeover && reconnectDelay === null) {
-            handoff.observeCancellation();
-        }
+        // Fast recovery is a genuine transition. A saturated backoff is a steady degraded state, and a flag that
+        // stayed on for it would report a transition that never ends.
+        if (!shouldTakeover && saturated) handoff.markTopologySettled();
+        connections.endPeerAttempt();
         broadcastStatus();
-        return { disconnected: true, shouldTakeover, reconnectDelay };
+        return { disconnected: true, shouldTakeover, reconnectDelay: delayMs, saturated };
     };
 
     return { createState, handleMessage, onDisconnect };

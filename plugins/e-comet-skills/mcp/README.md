@@ -31,7 +31,8 @@ Local tools:
 - `wb_product_card` — discovers and executes signed live product-card requests;
 - `wb_search_by_query` — discovers and executes signed live WB search requests;
 - `wb_recommendations_by_product` — discovers and executes signed recommendation-shelf requests;
-- `local_bridge_status` — reports whether the extension is connected;
+- `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
+  peer when it cannot;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
 
 The agent discovers the matching typed local tool first. Its description then requires sending only the small task

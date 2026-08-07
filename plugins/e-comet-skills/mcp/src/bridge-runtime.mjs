@@ -10,7 +10,7 @@ import {
     HANDOFF_DRAIN_POLL_MS,
     HANDOFF_MAX_DRAIN_MS,
     HANDOFF_RECONNECT_GRACE_MS,
-    PEER_RECONNECT_MAX_ATTEMPTS,
+    PEER_WAKE_COOLDOWN_MS,
     SESSION_NONCE,
     WS_HEARTBEAT_INTERVAL_MS,
 } from './config.mjs';
@@ -36,10 +36,20 @@ export const createBridgeRuntime = ({
     handoff,
     connections,
     log,
+    now = Date.now,
 }) => {
     const acceptedPeerStates = new Set();
     const connectionStates = new Set();
     let closed = false;
+    // Guards a listener attempt between `listen()` and its callback or 'error' event, where `server.listening`
+    // is still false. Without it two nearly simultaneous wake-ups both reach `listen()`.
+    let bridgeStartPending = false;
+    let lastBridgeStartAttemptAtMs = null;
+    // Degraded transitions are logged once, not once per retry: a process that lives for days would otherwise
+    // write a line every 30 seconds forever. The flag is tracked separately from the code so that an
+    // unclassified failure still announces the episode exactly once.
+    let degradedLogged = false;
+    let loggedDegradedCode = null;
 
     const server = createHttpServer((request, response) => {
         if (request.url === '/health' && request.headers?.host === `${host}:${port}`) {
@@ -91,9 +101,9 @@ export const createBridgeRuntime = ({
         connections.disconnectExtension(currentExtensionSocket);
 
         server.close(() => {
-            if (closed) return;
-            clearTimeout(connections.peerReconnectTimer);
-            connections.peerReconnectTimer = setTimeout(connectToPrimaryBridge, 250);
+            // Deliberately reconnects as a peer rather than going through start(): the port was just handed to
+            // the promoted instance, and re-entering the listen path would race it for the port we gave away.
+            scheduleBridgeStart(250, connectToPrimaryBridge);
         });
 
         currentExtensionSocket?.end(encodeFrame('', 0x8));
@@ -288,18 +298,64 @@ export const createBridgeRuntime = ({
         socket.on('error', () => closeConnectionState(state));
     });
 
+    // Both ways out of a degraded episode end here, so the transition is announced exactly once whichever role
+    // the process recovers into.
+    const noteDegradedEpisodeEnded = (recovery) => {
+        if (!degradedLogged) return;
+        if (recovery !== 'primary' && !connections.peerReady) return;
+        degradedLogged = false;
+        loggedDegradedCode = null;
+        log(
+            recovery === 'primary'
+                ? 'recovered from the degraded peer state by taking over the local bridge listener'
+                : 'recovered from the degraded peer state by reconnecting to the primary local bridge'
+        );
+    };
+
     const start = () => {
-        if (closed || server.listening) return;
+        if (closed || server.listening || bridgeStartPending) return;
+        // Only an attempt that actually reaches `listen()` moves the cooldown. Stamping before the guards would
+        // let no-op wake-ups push the next real attempt further away.
+        lastBridgeStartAttemptAtMs = now();
+        bridgeStartPending = true;
         try {
             // Operational listen failures arrive through 'error'; keep this guard for synchronous argument/state errors.
             server.listen(port, host, () => {
+                bridgeStartPending = false;
+                noteDegradedEpisodeEnded('primary');
                 connections.resetPeerAfterListen();
                 handoff.resetAfterListen();
                 log(`listening on ws://${host}:${port}${extensionPath} as generation ${BRIDGE_GENERATION} version ${BRIDGE_VERSION}`);
             });
         } catch (error) {
+            // A synchronous throw runs neither the listen callback nor the 'error' event, so the flag has to be
+            // released here too. Leaving it set would disable every later recovery attempt without a trace.
+            bridgeStartPending = false;
             log('failed to start local bridge listener:', error.message);
         }
+    };
+
+    // The single owner of the reconnect timer: it cancels whatever was pending, publishes the retry time that
+    // `local_bridge_status` reports, and clears both before handing control to the attempt.
+    const scheduleBridgeStart = (delayMs, run = start) => {
+        if (closed) return;
+        connections.clearPeerRetrySchedule();
+        connections.notePeerRetryScheduled(delayMs);
+        connections.peerReconnectTimer = setTimeout(() => {
+            connections.clearPeerRetrySchedule();
+            run();
+        }, delayMs);
+    };
+
+    // Lets a tool call pull the next attempt forward instead of waiting out the degraded interval, without ever
+    // jumping a handoff yield: while the listener is deferred the port belongs to the instance being promoted.
+    // `retryDelay(0)` is 0 once that yield has expired and the remaining yield otherwise, so the same call
+    // expresses both "go now" and "go as soon as it is allowed".
+    const ensureBridgeConnected = () => {
+        if (closed || server.listening || bridgeStartPending) return;
+        if (connections.peerSocket && [0, 1].includes(connections.peerSocket.readyState)) return;
+        if (lastBridgeStartAttemptAtMs !== null && now() - lastBridgeStartAttemptAtMs < PEER_WAKE_COOLDOWN_MS) return;
+        scheduleBridgeStart(handoff.retryDelay(0));
     };
 
     connectToPrimaryBridge = () => {
@@ -308,38 +364,45 @@ export const createBridgeRuntime = ({
 
         const socket = createWebSocket(`ws://${host}:${port}${peerPath}`);
         const state = peerProtocol.createState(socket, { role: 'client' });
+        connections.beginPeerAttempt();
         connections.peerSocket = socket;
         socket.addEventListener('open', () => {
             socket.send(JSON.stringify(state.outboundHello));
         });
         socket.addEventListener('message', (event) => {
-            void Promise.resolve(peerProtocol.handleMessage(state, event.data)).catch((error) =>
-                log('peer protocol handling failed:', error.message)
-            );
+            void Promise.resolve(peerProtocol.handleMessage(state, event.data))
+                // Readiness is only ever reached by handling a peer_welcome or peer_status frame, so this is the
+                // moment a degraded episode ends by reconnecting rather than by taking over the listener. Closing
+                // the episode here, instead of lazily at the next disconnect, keeps one source of truth for it.
+                .then(noteDegradedEpisodeEnded)
+                .catch((error) => log('peer protocol handling failed:', error.message));
         });
         const disconnected = () => {
             const result = peerProtocol.onDisconnect(state);
             if (!result.disconnected || closed) return;
-            if (!result.shouldTakeover && result.reconnectDelay === null) {
-                log(
-                    `stopped reconnecting to the primary local bridge after ${PEER_RECONNECT_MAX_ATTEMPTS} attempts: ${
-                        connections.peerRejectionReason || 'connection failed'
-                    }`
-                );
-                return;
-            }
             const reconnectDelay = result.shouldTakeover
                 ? HANDOFF_DRAIN_POLL_MS
                 : Math.max(result.reconnectDelay, handoff.retryDelay());
-            connections.peerReconnectTimer = setTimeout(start, reconnectDelay);
+            if (!result.shouldTakeover && result.saturated && (!degradedLogged || connections.peerRejectionCode !== loggedDegradedCode)) {
+                degradedLogged = true;
+                loggedDegradedCode = connections.peerRejectionCode;
+                log(
+                    `degraded: no usable primary local bridge (${loggedDegradedCode}); ` +
+                        `retrying every ${Math.round(reconnectDelay / 1000)}s until it returns`
+                );
+            }
+            scheduleBridgeStart(reconnectDelay);
         };
         socket.addEventListener('close', disconnected, { once: true });
         socket.addEventListener('error', () => socket.close(), { once: true });
     };
 
     server.on('error', (error) => {
+        // Released before the EADDRINUSE branch returns: that is the common path here, and a flag left set there
+        // would make every later ensureBridgeConnected() a silent no-op.
+        bridgeStartPending = false;
         if (error.code === 'EADDRINUSE') {
-            if (connections.peerReconnectAttempts === 0) {
+            if (connections.peerReconnectBackoffStep === 0) {
                 log(`local bridge already exists at ${host}:${port}; using it as the primary instance`);
             }
             connectToPrimaryBridge();
@@ -352,7 +415,9 @@ export const createBridgeRuntime = ({
     const close = () => {
         if (closed) return;
         closed = true;
-        clearTimeout(connections.peerReconnectTimer);
+        bridgeStartPending = false;
+        connections.clearPeerRetrySchedule();
+        connections.endPeerAttempt();
         connections.close?.();
         connections.peerSocket?.close();
         for (const state of [...connectionStates]) {
@@ -361,13 +426,17 @@ export const createBridgeRuntime = ({
         if (server.listening) server.close();
     };
 
-    const status = () => ({
-        extensionConnected: connections.effectiveExtensionReady,
-        browserJobSupported: connections.effectiveBrowserJobReady,
-        bridgeRole: server.listening ? 'primary' : connections.peerReady ? 'secondary' : 'disconnected',
-        bridgeTransitioning: handoff.transitioning,
-    });
+    const status = () => {
+        const peerRejection = connections.peerRejectionStatus();
+        return {
+            extensionConnected: connections.effectiveExtensionReady,
+            browserJobSupported: connections.effectiveBrowserJobReady,
+            bridgeRole: server.listening ? 'primary' : connections.peerReady ? 'secondary' : 'disconnected',
+            bridgeTransitioning: handoff.transitioning,
+            ...(peerRejection === undefined ? {} : { peerRejection }),
+        };
+    };
     status.broadcast = broadcastPeerStatus;
 
-    return { start, close, status };
+    return { start, close, status, ensureBridgeConnected };
 };

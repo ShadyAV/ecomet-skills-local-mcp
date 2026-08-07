@@ -242,12 +242,25 @@ const imagesSuccessSchema = object({
     storageWarnings,
 }, ['ok', 'status', 'jobId', 'total', 'succeeded', 'failed', 'size', 'products', 'resultPath']);
 
+// Present only while the bridge cannot reach a primary peer: a healthy status omits it entirely rather than
+// carrying a null-filled object into the agent's context. `code` is a closed local vocabulary, never text
+// received over the socket.
+const peerRejectionSchema = object(
+    {
+        code: { type: 'string', enum: ['authentication_failed', 'protocol_mismatch', 'handshake_required', 'connection_failed'] },
+        since: string,
+        retryAt: string,
+    },
+    ['code', 'since']
+);
+
 const bridgeStatusSchema = object({
     ok: { const: true },
     extensionConnected: boolean,
     browserJobSupported: boolean,
     bridgeRole: { type: 'string', enum: ['primary', 'secondary', 'disconnected'] },
     bridgeTransitioning: boolean,
+    peerRejection: peerRejectionSchema,
     bridgeVersion: string,
     bridgeGeneration: positiveInteger,
     controlProtocolVersion: positiveInteger,

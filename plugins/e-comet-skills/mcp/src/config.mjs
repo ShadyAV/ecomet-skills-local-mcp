@@ -48,7 +48,11 @@ export const HANDOFF_DRAIN_POLL_MS = 25;
 export const EXTENSION_READINESS_WAIT_MS = 2000;
 export const PEER_RECONNECT_BASE_MS = 500;
 export const PEER_RECONNECT_MAX_MS = 30_000;
-export const PEER_RECONNECT_MAX_ATTEMPTS = 8;
+// Reconnection never gives up. Once the exponential delay reaches PEER_RECONNECT_MAX_MS the secondary is
+// degraded and keeps retrying at that cadence, so saturation is derived from the delay itself rather than from
+// an attempt ceiling that would have to be kept in sync with the backoff curve.
+// A tool call may pull the next attempt forward, but no more often than this.
+export const PEER_WAKE_COOLDOWN_MS = 2000;
 export const WS_HEARTBEAT_INTERVAL_MS = 30_000;
 export const REQUEST_TIMEOUT_MS = 45000;
 // Расширение отсчитывает свой таймаут от момента получения wb_fetch, то есть позже
@@ -111,11 +115,23 @@ export const resolveLocalStateDir = ({ platform = process.platform, env = proces
     return posix.join(env.XDG_DATA_HOME || posix.join(home, '.local', 'share'), 'e-comet', 'local-agent');
 };
 
+// The peer token is the shared secret both local agents authenticate with, so it must live outside every
+// per-application sandbox. On Windows an MSIX-packaged host redirects writes under %LOCALAPPDATA% into its own
+// package container, which silently gives each agent a private token and makes the peer handshake fail forever.
+// The user profile root is not redirected. Other platforms have no such redirection, so the token stays with the
+// rest of the local state there. Deliberately not env-configurable: pointing a shared secret at an
+// attacker-chosen directory is a footgun, and tests inject `directory` directly.
+export const resolvePeerTokenDir = ({ platform = process.platform, env = process.env, home = homedir() } = {}) => {
+    if (platform === 'win32') return win32.join(home, '.e-comet', 'local-agent');
+    return resolveLocalStateDir({ platform, env, home });
+};
+
 // Result-directory relocation is intentionally user-configurable in production; quota and retention overrides above are not.
 export const resolveResultDir = (options = {}) =>
     options.env?.ECOMET_LOCAL_AGENT_RESULT_DIR || (!options.env && process.env.ECOMET_LOCAL_AGENT_RESULT_DIR) || resolveLocalStateDir(options);
 
 export const LOCAL_STATE_DIR = resolveLocalStateDir();
+export const PEER_TOKEN_DIR = resolvePeerTokenDir();
 export const RESULT_DIR = resolveResultDir();
 export const SESSION_NONCE = randomUUID();
 export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
