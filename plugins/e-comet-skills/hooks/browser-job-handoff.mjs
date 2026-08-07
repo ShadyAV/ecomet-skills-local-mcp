@@ -20,8 +20,7 @@ const LOCK_RETRY_DELAY_MS = 5;
 const LOCK_RETRY_LIMIT = 200;
 const LOCK_RELEASE_RETRY_LIMIT = 20;
 const TRANSIENT_WINDOWS_LOCK_ERRORS = new Set(['EPERM', 'EBUSY']);
-const REMOTE_BROWSER_JOB_TOOL =
-    /^mcp__(?:plugin_e-comet-skills_)?e[-_]comet(?:[-_]stage)?__browser_job$/;
+const REMOTE_BROWSER_JOB_TOOL = /^mcp__.+__browser_job$/;
 const LOCAL_BROWSER_TOOL =
     /^mcp__(?:plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:wb_product_card|wb_search_by_query|wb_recommendations_by_product)$/;
 

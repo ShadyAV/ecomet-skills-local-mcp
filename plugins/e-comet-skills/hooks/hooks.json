@@ -3,7 +3,7 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "^mcp__(?:plugin_e-comet-skills_)?e[-_]comet(?:[-_]stage)?__browser_job$",
+        "matcher": "^mcp__.+__browser_job$",
         "hooks": [
           {
             "type": "command",
