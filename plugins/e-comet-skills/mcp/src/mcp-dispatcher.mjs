@@ -19,6 +19,12 @@ import { createConcurrencyLimiter, discoverImageBasket, imageExists, normalizeSt
 export const createMcpMessageHandler = ({
     getBridgeStatus,
     waitForExtensionReady,
+    // Non-blocking nudge that pulls the next bridge reconnect attempt forward. Applied once at the tools/call
+    // dispatch point to every tool declaring `needsBridge`, rather than from inside individual handlers: the
+    // wake-up inside waitForExtensionReady is reachable only by a fully-formed signed call, so the calls a
+    // degraded agent actually makes first — the status read and the discovery call without a triggerUrl —
+    // would otherwise each have to remember to nudge.
+    ensureBridgeConnected = () => undefined,
     requestBrowserJobAuthorization,
     sendError = mcpError,
     sendResult = mcpResult,
@@ -288,15 +294,34 @@ export const createMcpMessageHandler = ({
         }
     };
 
+    // `needsBridge` declares which tools depend on the bridge, so the wake-up is applied once at the dispatch
+    // point below instead of being remembered inside each handler. A tool added without the flag simply never
+    // nudges; a tool added with it cannot forget to. `wb_product_images` is the deliberate false: it is a
+    // public image-CDN lookup, and nudging for it would stamp the wake-up cooldown against a bridge it never
+    // uses. The status read carries the flag because that is what an agent reaches for when the bridge is
+    // degraded — the snapshot still describes the state as it was, and the nudge affects what happens next,
+    // so the diagnostic path can repair the bridge it describes.
     const toolHandlers = new Map([
-        ['local_bridge_status', async (id) => sendResult(id, textResult({ ok: true, ...getBridgeStatus() }))],
-        ['wb_product_card', (id, args) => handleBrowserJob(id, 'wb_product_card', 'product_card', args)],
-        ['wb_search_by_query', (id, args) => handleBrowserJob(id, 'wb_search_by_query', 'search_by_query', args)],
+        [
+            'local_bridge_status',
+            { needsBridge: true, run: async (id) => sendResult(id, textResult({ ok: true, ...getBridgeStatus() })) },
+        ],
+        [
+            'wb_product_card',
+            { needsBridge: true, run: (id, args) => handleBrowserJob(id, 'wb_product_card', 'product_card', args) },
+        ],
+        [
+            'wb_search_by_query',
+            { needsBridge: true, run: (id, args) => handleBrowserJob(id, 'wb_search_by_query', 'search_by_query', args) },
+        ],
         [
             'wb_recommendations_by_product',
-            (id, args) => handleBrowserJob(id, 'wb_recommendations_by_product', 'recommendations_by_product', args),
+            {
+                needsBridge: true,
+                run: (id, args) => handleBrowserJob(id, 'wb_recommendations_by_product', 'recommendations_by_product', args),
+            },
         ],
-        ['wb_product_images', (id, args) => handleProductImages(id, args)],
+        ['wb_product_images', { needsBridge: false, run: (id, args) => handleProductImages(id, args) }],
     ]);
 
     return async (message) => {
@@ -332,11 +357,15 @@ export const createMcpMessageHandler = ({
             return;
         }
 
-        const handler = toolHandlers.get(params?.name);
-        if (!handler) {
+        const tool = toolHandlers.get(params?.name);
+        if (!tool) {
             sendError(id, -32602, `Unknown tool: ${params?.name}`);
             return;
         }
-        await handler(id, params?.arguments ?? {});
+        // Before the handler runs, so a degraded agent's very first call starts the reconnect rather than
+        // waiting out the retry interval — including the signed-call forms that return early, before they ever
+        // reach waitForExtensionReady.
+        if (tool.needsBridge) ensureBridgeConnected();
+        await tool.run(id, params?.arguments ?? {});
     };
 };

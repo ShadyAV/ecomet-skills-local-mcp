@@ -141,11 +141,23 @@ export const createPeerProtocol = ({
     };
 
     const handlePeerClientMessage = async (state, message) => {
+        // Every frame is honoured only from the socket that is still current — the handshake frames above all,
+        // not just the operational ones below. `connectToPrimaryBridge` publishes the outbound socket before a
+        // frame can arrive on it, so a mismatch means this state belongs to an attempt that has been replaced.
+        // The predecessor stays readable for its whole destroy grace, and every early return below this point
+        // writes to process-wide state: a late rejection would pin its verdict on the attempt now in flight,
+        // and after `resetPeerAfterListen` — which nulls `peerSocket` when this process takes over the listener
+        // — it would leave a healthy primary reporting a `peerRejection` it never suffered, with nothing left
+        // to clear it. A null `peerSocket` therefore fails the check by design rather than skipping it.
+        // Returning without closing is safe: a socket only stops being current once it is already closing.
+        if (state.socket !== connections.peerSocket) return;
         if (message?.type === 'peer_rejected') {
-            // Nothing in this frame is trustworthy: no proof was ever exchanged, and its `reason` is written by
-            // whatever answered on loopback. Only the fact of a rejection is used, with a fixed code — reading
-            // the claimed protocol version here would let the responder pick the diagnostic for free.
-            connections.recordPeerRejection(PEER_REJECTION_CODES.authenticationFailed);
+            // Nothing in this frame is trustworthy: no proof was ever exchanged, and its `reason` is written
+            // by whatever answered on loopback, so the text is never surfaced. The claimed protocol version is
+            // read through the same deliberate trade-off `rejectionCodeFor` documents — this is the one frame
+            // a genuinely skewed primary actually sends (it rejects the hello before any challenge), so
+            // hardcoding a code here would leave version skew reported as a secret problem.
+            connections.recordPeerRejection(rejectionCodeFor(message));
             closeState(state);
             return;
         }
@@ -200,7 +212,10 @@ export const createPeerProtocol = ({
                 return;
             }
             state.peerHandshakeComplete = true;
-            const wasReady = connections.updatePeerStatus(message);
+            const wasReady = connections.updatePeerStatus(message, state.socket);
+            // A welcome on a superseded socket publishes nothing: the readiness it would set could never be
+            // cleared, because disconnectPeer only acts for the current socket.
+            if (wasReady === null) return;
             handoff.markTopologySettled();
             if (!wasReady) {
                 log(
@@ -216,6 +231,9 @@ export const createPeerProtocol = ({
             closeState(state);
             return;
         }
+        // What the guard at the top of this handler protects here: a frame buffered on a superseded transport
+        // would otherwise park recovery behind a full listener yield, grant a takeover against a primary that
+        // is still serving, or settle a broker request on behalf of a route this process no longer has.
         if (message?.type === 'peer_handoff') {
             handoff.observeHandoff(message);
             return;
@@ -229,9 +247,14 @@ export const createPeerProtocol = ({
             return;
         }
         if (message?.type === 'peer_status') {
-            const wasReady = connections.updatePeerStatus(message);
-            handoff.markTopologySettled();
+            const wasReady = connections.updatePeerStatus(message, state.socket);
+            if (wasReady === null) return;
+            // Only a connection *becoming* ready settles the topology here. A routine broadcast on an
+            // already-established socket is not a topology event: mid-handoff the draining primary keeps
+            // broadcasting status to bystanders, and settling on those frames would clear the transition
+            // observeHandoff just recorded.
             if (!wasReady) {
+                handoff.markTopologySettled();
                 const versionLabel = message.controlProtocolVersion ? `generation ${message.bridgeGeneration}` : 'legacy generation';
                 log(`connected to primary local bridge ${versionLabel}`);
             }
@@ -446,19 +469,25 @@ export const createPeerProtocol = ({
                 authorizationLease.release();
             }
             state.authorizationLeases.clear();
-            return { disconnected: false, shouldTakeover: false, reconnectDelay: null };
+            return { disconnected: false, shouldTakeover: false, reconnectDelay: null, rejectionCode: null };
         }
         if (!connections.disconnectPeer(state.socket)) {
-            return { disconnected: false, shouldTakeover: false, reconnectDelay: null };
+            return { disconnected: false, shouldTakeover: false, reconnectDelay: null, rejectionCode: null };
         }
 
         const shouldTakeover = handoff.consumeTakeoverGrant();
+        // A close inside an observed handoff's listener yield is read before markDisconnected below: it means
+        // the primary is draining away to an instance being promoted, which is a healthy, by-design topology
+        // change for this bystander too, not a failure of its connection.
+        const observedHandoffClose = handoff.retryDelay(0) > 0;
         handoff.markDisconnected();
         // A socket that dropped without a protocol verdict is a plain connection failure, and a verdict already
-        // reached for this attempt â€” an authentication rejection, say â€” must survive the close that follows it.
+        // reached for this attempt — an authentication rejection, say — must survive the close that follows it.
         // The close that completes a granted takeover is not a failure at all: this peer is being promoted
-        // exactly as designed, and recording a rejection would surface one for a healthy handoff.
-        if (!shouldTakeover) connections.classifyPeerCloseFailure();
+        // exactly as designed, and recording a rejection would surface one for a healthy handoff. The same
+        // holds for a bystander whose primary hands off to a third instance.
+        const classifiedFailure = !shouldTakeover && !observedHandoffClose;
+        if (classifiedFailure) connections.classifyPeerCloseFailure();
         requestBroker.rejectPendingRequests(
             new ToolExecutionError(
                     'EXTENSION_DISCONNECTED',
@@ -482,9 +511,15 @@ export const createPeerProtocol = ({
         // Fast recovery is a genuine transition. A saturated backoff is a steady degraded state, and a flag that
         // stayed on for it would report a transition that never ends.
         if (!shouldTakeover && saturated) handoff.markTopologySettled();
+        // The verdict for *this* close travels with the result instead of being re-read from
+        // `connections.peerRejectionCode` by the caller: that field outlives the attempt, so a close this path
+        // deliberately did not classify — a granted takeover, or a bystander watching its primary hand off —
+        // would otherwise be announced under whatever code the previous streak happened to leave behind, or
+        // under `null` when the streak had been reset.
+        const rejectionCode = classifiedFailure ? connections.peerRejectionCode : null;
         connections.clearPeerAttemptVerdict();
         broadcastStatus();
-        return { disconnected: true, shouldTakeover, reconnectDelay: delayMs, saturated };
+        return { disconnected: true, shouldTakeover, reconnectDelay: delayMs, saturated, rejectionCode };
     };
 
     return { createState, handleMessage, onDisconnect };

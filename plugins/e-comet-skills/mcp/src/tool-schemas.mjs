@@ -8,6 +8,7 @@ import {
     MAX_PRODUCT_ARTICLES,
     MAX_RETURNED_PRODUCTS,
 } from './config.mjs';
+import { PEER_REJECTION_CODES } from './connection-state.mjs';
 
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
@@ -242,16 +243,23 @@ const imagesSuccessSchema = object({
     storageWarnings,
 }, ['ok', 'status', 'jobId', 'total', 'succeeded', 'failed', 'size', 'products', 'resultPath']);
 
-// Present only while the bridge cannot reach a primary peer: a healthy status omits it entirely rather than
-// carrying a null-filled object into the agent's context. `code` is a closed local vocabulary, never text
-// received over the socket.
+// Present only while the bridge cannot reach a primary peer or bind its own listener: a healthy status omits
+// it entirely rather than carrying a null-filled object into the agent's context. `code` is the closed local
+// vocabulary from PEER_REJECTION_CODES, never text received over the socket.
+//
+// Only `code` is required. Both timestamps are best-effort by design: `retryAt` is absent whenever no retry is
+// armed, and `peerRejectionStatus` omits either one rather than throwing on a clock value Date cannot
+// represent. Requiring `since` here would turn that deliberate omission into a schema violation in the one
+// tool an operator reaches for when the bridge is already wedged.
 const peerRejectionSchema = object(
     {
-        code: { type: 'string', enum: ['authentication_failed', 'protocol_mismatch', 'handshake_required', 'connection_failed'] },
+        // Derived, never restated: a hand-copied list would let a new rejection code ship as tool output that
+        // fails this very schema, in the one tool an operator reads when the bridge is already wedged.
+        code: { type: 'string', enum: Object.values(PEER_REJECTION_CODES) },
         since: string,
         retryAt: string,
     },
-    ['code', 'since']
+    ['code']
 );
 
 const bridgeStatusSchema = object({

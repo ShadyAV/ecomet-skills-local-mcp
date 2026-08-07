@@ -3,13 +3,16 @@
 // otherwise write arbitrary text into a tool result and from there into the model's context.
 /**
  * The whole vocabulary, so a caller cannot be narrowed to whichever code happens to be a default.
- * @typedef {'authentication_failed' | 'protocol_mismatch' | 'handshake_required' | 'connection_failed'} PeerRejectionCode
+ * @typedef {'authentication_failed' | 'protocol_mismatch' | 'handshake_required' | 'connection_failed' | 'listen_failed'} PeerRejectionCode
  */
 export const PEER_REJECTION_CODES = Object.freeze({
     authenticationFailed: 'authentication_failed',
     protocolMismatch: 'protocol_mismatch',
     handshakeRequired: 'handshake_required',
     connectionFailed: 'connection_failed',
+    // This process could not bind the listener at all — no peer was ever contacted. Reporting it through
+    // `connection_failed` would send the reader to investigate a primary that was never reached.
+    listenFailed: 'listen_failed',
 });
 
 export class ConnectionState {
@@ -69,7 +72,12 @@ export class ConnectionState {
         return true;
     }
 
-    updatePeerStatus({ extensionConnected, browserJobSupported }) {
+    // Returns null for a frame from a socket that is no longer the peer socket. The old client socket's
+    // message listener is never detached, so frames queued before its close completes still arrive; without
+    // the identity check (which `disconnectPeer` already has) a late frame would republish readiness for a
+    // socket that no longer exists and silently cancel a retry that was just armed.
+    updatePeerStatus({ extensionConnected, browserJobSupported }, socket) {
+        if (socket !== undefined && socket !== this.peerSocket) return null;
         const wasReady = this.peerReady;
         this.resetPeerReconnect();
         this.peerReady = true;
@@ -165,10 +173,16 @@ export class ConnectionState {
     // Absent while the bridge is healthy: a null-filled object in every status would be noise in the agent's context.
     peerRejectionStatus() {
         if (this.peerRejectionCode === null || this.peerFailureSinceMs === null) return undefined;
+        // This feeds the one tool an operator uses to diagnose a wedged bridge, so it must report the failure
+        // rather than become one: a millisecond value outside the Date range would make toISOString() throw
+        // on every status call. Such a timestamp is omitted, never thrown on.
+        const isoTime = (ms) => (Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : undefined);
+        const since = isoTime(this.peerFailureSinceMs);
+        const retryAt = this.peerNextRetryAtMs === null ? undefined : isoTime(this.peerNextRetryAtMs);
         return {
             code: this.peerRejectionCode,
-            since: new Date(this.peerFailureSinceMs).toISOString(),
-            ...(this.peerNextRetryAtMs === null ? {} : { retryAt: new Date(this.peerNextRetryAtMs).toISOString() }),
+            ...(since === undefined ? {} : { since }),
+            ...(retryAt === undefined ? {} : { retryAt }),
         };
     }
 

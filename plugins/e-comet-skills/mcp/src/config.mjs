@@ -30,19 +30,21 @@ export const resolveBridgePort = ({ env = process.env } = {}) => {
 export const PORT = resolveBridgePort();
 export const EXTENSION_PATH = '/extension';
 export const PEER_PATH = '/mcp-peer';
-// Bumped to 2 when the peer token moved out of the per-application state directory. Builds on either side of
-// that move cannot pair whatever this says — they read different token files — but without the bump they agree
-// on the protocol, fail the proof, and report `authentication_failed`, sending whoever reads the status after
-// an upgrade to investigate the secret instead of restarting both applications. Raising it makes the
-// incompatibility explicit and diagnosable as `protocol_mismatch`.
+// Deliberately unchanged by the peer-token move: the `/mcp-peer` frames are wire-identical on both sides of
+// it, and the compatibility promise in AGENTS.md is what keeps drain-and-takeover upgrades possible. The move
+// is a change of pairing *secret*, not of protocol — on Windows a mixed pair reads two different token files
+// and fails the proof, which correctly reports `authentication_failed`; the remedy after an upgrade is to
+// restart both applications, as the release notes state. Raise this only when a frame actually changes shape.
 //
-// Peer-only: the Chrome extension never reads this field. Its contract pins `extensionProtocolVersion`, which
-// is unchanged.
-export const CONTROL_PROTOCOL_VERSION = 2;
+// Peer-only: the Chrome extension never reads this field. Its contract pins `extensionProtocolVersion`.
+export const CONTROL_PROTOCOL_VERSION = 1;
 export const EXTENSION_PROTOCOL_VERSION = 1;
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-06-18'];
 export const LATEST_MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0];
-const DEFAULT_BRIDGE_GENERATION = 2;
+// 3: the release that moved the peer token and made reconnection endless must replace an already-running
+// primary wherever a mixed pair can still complete the handshake (macOS and Linux, where the token file did
+// not move), so the fixed behaviour owns the listener instead of idling behind the old build.
+const DEFAULT_BRIDGE_GENERATION = 3;
 export const resolveBridgeGeneration = ({ env = process.env } = {}) => {
     const mode = env.NODE_ENV;
     if (mode !== 'test' && mode !== 'development') return DEFAULT_BRIDGE_GENERATION;
@@ -52,6 +54,9 @@ export const resolveBridgeGeneration = ({ env = process.env } = {}) => {
 export const BRIDGE_GENERATION = resolveBridgeGeneration();
 export const BRIDGE_VERSION = readBuildVersion();
 export const HANDOFF_RECONNECT_GRACE_MS = 2000;
+// The grace a peer_handoff frame carries is peer-supplied input. Accepting it verbatim would let a single
+// frame park this instance's listener arbitrarily far into the future, so observers clamp it to this ceiling.
+export const HANDOFF_RECONNECT_GRACE_MAX_MS = 30_000;
 export const HANDOFF_DRAIN_POLL_MS = 25;
 export const EXTENSION_READINESS_WAIT_MS = 2000;
 export const PEER_RECONNECT_BASE_MS = 500;
@@ -64,6 +69,10 @@ export const PEER_WAKE_COOLDOWN_MS = 2000;
 // A peer that has neither connected nor completed a handshake by now is wedged, not slow. Without this the
 // socket would sit open and silent, emitting no close and so scheduling no further attempt.
 export const PEER_HANDSHAKE_TIMEOUT_MS = 5000;
+// close() only starts the closing handshake; a peer that never answers the Close frame would otherwise hold
+// the TCP handle in CLOSING until the process exits — one leaked handle per retry against a silent listener.
+// After this grace the client transport destroys its socket outright.
+export const WS_CLIENT_CLOSE_GRACE_MS = 1000;
 export const WS_HEARTBEAT_INTERVAL_MS = 30_000;
 export const REQUEST_TIMEOUT_MS = 45000;
 // Расширение отсчитывает свой таймаут от момента получения wb_fetch, то есть позже

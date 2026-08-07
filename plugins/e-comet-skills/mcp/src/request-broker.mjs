@@ -237,6 +237,11 @@ export class RequestBroker {
                 collection.delete(requestId);
                 reject(createTimeoutError());
             }, timeout);
+            // Unref'd like the authorization-scope expiry above: the deadline must still fire while the process
+            // is serving, but it must not be what keeps the event loop alive after shutdown has closed every
+            // route. Without this a single in-flight request holds the process open for its whole timeout and
+            // pushes shutdown onto the hard-exit backstop.
+            timer.unref?.();
             const resolvePending = (value) => {
                 try {
                     resolve(transform(value, requestId, pending.routeResult));
