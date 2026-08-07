@@ -1,6 +1,10 @@
 // Peer failures are reported to the agent, so the vocabulary is a closed set owned by this process. A reason
 // string received from the other side of the socket is never surfaced: anything listening on loopback could
 // otherwise write arbitrary text into a tool result and from there into the model's context.
+/**
+ * The whole vocabulary, so a caller cannot be narrowed to whichever code happens to be a default.
+ * @typedef {'authentication_failed' | 'protocol_mismatch' | 'handshake_required' | 'connection_failed'} PeerRejectionCode
+ */
 export const PEER_REJECTION_CODES = Object.freeze({
     authenticationFailed: 'authentication_failed',
     protocolMismatch: 'protocol_mismatch',
@@ -32,6 +36,12 @@ export class ConnectionState {
 
     constructor({ now = Date.now } = {}) {
         this.#now = now;
+    }
+
+    // The one clock for everything that ends up compared or reported together. The bridge runtime reads it
+    // through here rather than taking its own injection, so `since` and `retryAt` cannot come from two epochs.
+    now() {
+        return this.#now();
     }
 
     get effectiveExtensionReady() {
@@ -113,11 +123,7 @@ export class ConnectionState {
         this.resetPeerReconnect();
     }
 
-    beginPeerAttempt() {
-        this.peerAttemptRejectionCode = null;
-    }
-
-    endPeerAttempt() {
+    clearPeerAttemptVerdict() {
         this.peerAttemptRejectionCode = null;
     }
 
@@ -144,8 +150,10 @@ export class ConnectionState {
         return { delayMs, saturated };
     }
 
-    notePeerRetryScheduled(delayMs) {
-        this.peerNextRetryAtMs = this.#now() + delayMs;
+    // Takes an absolute time rather than a delay: the runtime that schedules the timer owns the clock this is
+    // later compared against, so the value must not be stamped from a second, independently injectable one.
+    notePeerRetryScheduled(retryAtMs) {
+        this.peerNextRetryAtMs = retryAtMs;
     }
 
     clearPeerRetrySchedule() {

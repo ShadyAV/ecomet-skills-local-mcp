@@ -10,10 +10,13 @@ import {
     HANDOFF_DRAIN_POLL_MS,
     HANDOFF_MAX_DRAIN_MS,
     HANDOFF_RECONNECT_GRACE_MS,
+    PEER_HANDSHAKE_TIMEOUT_MS,
+    PEER_RECONNECT_MAX_MS,
     PEER_WAKE_COOLDOWN_MS,
     SESSION_NONCE,
     WS_HEARTBEAT_INTERVAL_MS,
 } from './config.mjs';
+import { PEER_REJECTION_CODES } from './connection-state.mjs';
 import { localMessage, MESSAGE_TYPES, peerStatusMessage } from './extension-vocabulary.mjs';
 import { encodeFrame, parseFrames, sendWs } from './websocket.mjs';
 
@@ -36,7 +39,8 @@ export const createBridgeRuntime = ({
     handoff,
     connections,
     log,
-    now = Date.now,
+    // Only a test seam: a suite cannot wait out the production deadline to prove a silent peer is abandoned.
+    peerHandshakeTimeoutMs = PEER_HANDSHAKE_TIMEOUT_MS,
 }) => {
     const acceptedPeerStates = new Set();
     const connectionStates = new Set();
@@ -45,11 +49,11 @@ export const createBridgeRuntime = ({
     // is still false. Without it two nearly simultaneous wake-ups both reach `listen()`.
     let bridgeStartPending = false;
     let lastBridgeStartAttemptAtMs = null;
-    // Degraded transitions are logged once, not once per retry: a process that lives for days would otherwise
-    // write a line every 30 seconds forever. The flag is tracked separately from the code so that an
-    // unclassified failure still announces the episode exactly once.
-    let degradedLogged = false;
-    let loggedDegradedCode = null;
+    // Which classifications the current degraded episode has already announced. A retry is never logged on its
+    // own — a process that lives for days would write a line every 30 seconds — and a code that alternates
+    // between attempts cannot re-announce either, because each one is only ever recorded once. The set is
+    // bounded by the closed rejection vocabulary and is emptied when the episode ends.
+    const announcedDegradedCodes = new Set();
 
     const server = createHttpServer((request, response) => {
         if (request.url === '/health' && request.headers?.host === `${host}:${port}`) {
@@ -105,6 +109,10 @@ export const createBridgeRuntime = ({
             // the promoted instance, and re-entering the listen path would race it for the port we gave away.
             scheduleBridgeStart(250, connectToPrimaryBridge);
         });
+        // close() waits for every open connection, and an idle keep-alive client on /health is tracked by
+        // neither connectionStates nor acceptedPeerStates, so nothing below would end it. Without this the
+        // callback above can never run and the process is left with no listener, no peer and no armed retry.
+        server.closeIdleConnections?.();
 
         currentExtensionSocket?.end(encodeFrame('', 0x8));
         for (const state of [...acceptedPeerStates]) {
@@ -115,6 +123,8 @@ export const createBridgeRuntime = ({
             for (const state of [...acceptedPeerStates]) {
                 state.socket.destroy();
             }
+            // Anything still holding the server open past the grace, including a keep-alive request in flight.
+            server.closeAllConnections?.();
         }, 100);
         destroyTimer.unref?.();
     };
@@ -138,9 +148,9 @@ export const createBridgeRuntime = ({
                 `draining ${effect.activeRequestCount()} active request(s)`
         );
 
-        const drainDeadline = Date.now() + HANDOFF_MAX_DRAIN_MS;
+        const drainDeadline = connections.now() + HANDOFF_MAX_DRAIN_MS;
         while (effect.activeRequestCount() > 0 && handoff.isTarget(targetState) && !targetState.socket.destroyed) {
-            if (Date.now() >= drainDeadline) {
+            if (connections.now() >= drainDeadline) {
                 log(`handoff drain exceeded ${HANDOFF_MAX_DRAIN_MS} ms; invalidating active browser-job authorization work`);
                 effect.invalidateAuthorizationWork();
                 break;
@@ -298,13 +308,18 @@ export const createBridgeRuntime = ({
         socket.on('error', () => closeConnectionState(state));
     });
 
+    // One spelling of "this peer socket is worth waiting on", so a change to what counts as live cannot apply to
+    // some callers and not others. CONNECTING is included deliberately: an attempt already in flight must not be
+    // duplicated.
+    const peerSocketLive = () =>
+        Boolean(connections.peerSocket) && [WebSocket.CONNECTING, WebSocket.OPEN].includes(connections.peerSocket.readyState);
+
     // Both ways out of a degraded episode end here, so the transition is announced exactly once whichever role
     // the process recovers into.
     const noteDegradedEpisodeEnded = (recovery) => {
-        if (!degradedLogged) return;
+        if (announcedDegradedCodes.size === 0) return;
         if (recovery !== 'primary' && !connections.peerReady) return;
-        degradedLogged = false;
-        loggedDegradedCode = null;
+        announcedDegradedCodes.clear();
         log(
             recovery === 'primary'
                 ? 'recovered from the degraded peer state by taking over the local bridge listener'
@@ -316,12 +331,15 @@ export const createBridgeRuntime = ({
         if (closed || server.listening || bridgeStartPending) return;
         // Only an attempt that actually reaches `listen()` moves the cooldown. Stamping before the guards would
         // let no-op wake-ups push the next real attempt further away.
-        lastBridgeStartAttemptAtMs = now();
+        lastBridgeStartAttemptAtMs = connections.now();
         bridgeStartPending = true;
         try {
             // Operational listen failures arrive through 'error'; keep this guard for synchronous argument/state errors.
             server.listen(port, host, () => {
                 bridgeStartPending = false;
+                // An earlier listen failure marked the process as failed. Now that a retry has succeeded that
+                // verdict is stale, and leaving it would make a healthy agent exit non-zero on shutdown.
+                if (process.exitCode === 1) process.exitCode = 0;
                 noteDegradedEpisodeEnded('primary');
                 connections.resetPeerAfterListen();
                 handoff.resetAfterListen();
@@ -340,54 +358,81 @@ export const createBridgeRuntime = ({
     const scheduleBridgeStart = (delayMs, run = start) => {
         if (closed) return;
         connections.clearPeerRetrySchedule();
-        connections.notePeerRetryScheduled(delayMs);
+        // The runtime stamps the absolute time itself: `ensureBridgeConnected` compares this against its own
+        // clock, and letting the two sides read different injected clocks would make the comparison meaningless.
+        connections.notePeerRetryScheduled(connections.now() + delayMs);
         connections.peerReconnectTimer = setTimeout(() => {
             connections.clearPeerRetrySchedule();
             run();
         }, delayMs);
     };
 
-    // Lets a tool call pull the next attempt forward instead of waiting out the degraded interval, without ever
-    // jumping a handoff yield: while the listener is deferred the port belongs to the instance being promoted.
-    // `retryDelay(0)` is 0 once that yield has expired and the remaining yield otherwise, so the same call
-    // expresses both "go now" and "go as soon as it is allowed".
+    // Lets a tool call pull the next attempt forward instead of waiting out the degraded interval. Every guard
+    // below exists to keep that shortcut from doing damage: it never runs beside an attempt already in flight,
+    // never more often than the cooldown, never during a handoff, and never in place of a schedule that is
+    // about to fire on its own.
     const ensureBridgeConnected = () => {
         if (closed || server.listening || bridgeStartPending) return;
-        if (connections.peerSocket && [0, 1].includes(connections.peerSocket.readyState)) return;
-        if (lastBridgeStartAttemptAtMs !== null && now() - lastBridgeStartAttemptAtMs < PEER_WAKE_COOLDOWN_MS) return;
-        scheduleBridgeStart(handoff.retryDelay(0));
+        if (peerSocketLive()) return;
+        if (lastBridgeStartAttemptAtMs !== null && connections.now() - lastBridgeStartAttemptAtMs < PEER_WAKE_COOLDOWN_MS) return;
+        // A deferred listener means the port belongs to an instance being promoted. Between server.close() and
+        // its callback nothing is published yet, so without this a wake-up in that window would arm a start()
+        // that re-binds the port mid-handoff. The relinquish path owns the next attempt; stand down entirely.
+        if (handoff.retryDelay(0) > 0) return;
+        // Pull an attempt forward, never push one back, and never replace a schedule that is about to fire
+        // anyway. The post-handoff peer reconnect and the takeover poll are both scheduled tighter than the
+        // wake-up cooldown; taking them over would delay recovery and, worse, swap a deliberate peer reconnect
+        // for a listen attempt that races the instance the port was just handed to.
+        const scheduledSoonEnough =
+            connections.peerNextRetryAtMs !== null && connections.peerNextRetryAtMs <= connections.now() + PEER_WAKE_COOLDOWN_MS;
+        if (scheduledSoonEnough) return;
+        scheduleBridgeStart(0);
     };
 
     connectToPrimaryBridge = () => {
         if (closed) return;
-        if (connections.peerSocket && [0, 1].includes(connections.peerSocket.readyState)) return;
+        if (peerSocketLive()) return;
 
         const socket = createWebSocket(`ws://${host}:${port}${peerPath}`);
         const state = peerProtocol.createState(socket, { role: 'client' });
-        connections.beginPeerAttempt();
+        connections.clearPeerAttemptVerdict();
         connections.peerSocket = socket;
+        // A peer that never answers leaves this socket silent forever: no 'close' fires, so nothing schedules the
+        // next attempt, and `ensureBridgeConnected` keeps seeing a live socket and stands down. That silence can
+        // fall either side of the upgrade — a connect stuck in SYN_SENT, or a process that accepts the socket
+        // and then stalls — so the deadline covers the whole handshake, not just the connect, and is only
+        // cleared once the peer has actually completed one. Forcing the socket closed restores the normal path.
+        const handshakeDeadline = setTimeout(() => {
+            if (state.peerHandshakeComplete) return;
+            log('peer did not complete a handshake in time; abandoning the attempt');
+            socket.close();
+        }, peerHandshakeTimeoutMs);
+        handshakeDeadline.unref?.();
         socket.addEventListener('open', () => {
             socket.send(JSON.stringify(state.outboundHello));
         });
         socket.addEventListener('message', (event) => {
             void Promise.resolve(peerProtocol.handleMessage(state, event.data))
-                // Readiness is only ever reached by handling a peer_welcome or peer_status frame, so this is the
-                // moment a degraded episode ends by reconnecting rather than by taking over the listener. Closing
-                // the episode here, instead of lazily at the next disconnect, keeps one source of truth for it.
-                .then(noteDegradedEpisodeEnded)
+                .then(() => {
+                    if (state.peerHandshakeComplete) clearTimeout(handshakeDeadline);
+                    // Readiness is only ever reached by handling a peer_welcome or peer_status frame, so this is
+                    // the moment a degraded episode ends by reconnecting rather than by taking over the listener.
+                    // Closing it here, not lazily at the next disconnect, keeps one source of truth for it.
+                    noteDegradedEpisodeEnded('peer');
+                })
                 .catch((error) => log('peer protocol handling failed:', error.message));
         });
         const disconnected = () => {
+            clearTimeout(handshakeDeadline);
             const result = peerProtocol.onDisconnect(state);
             if (!result.disconnected || closed) return;
             const reconnectDelay = result.shouldTakeover
                 ? HANDOFF_DRAIN_POLL_MS
                 : Math.max(result.reconnectDelay, handoff.retryDelay());
-            if (!result.shouldTakeover && result.saturated && (!degradedLogged || connections.peerRejectionCode !== loggedDegradedCode)) {
-                degradedLogged = true;
-                loggedDegradedCode = connections.peerRejectionCode;
+            if (!result.shouldTakeover && result.saturated && !announcedDegradedCodes.has(connections.peerRejectionCode)) {
+                announcedDegradedCodes.add(connections.peerRejectionCode);
                 log(
-                    `degraded: no usable primary local bridge (${loggedDegradedCode}); ` +
+                    `degraded: no usable primary local bridge (${connections.peerRejectionCode}); ` +
                         `retrying every ${Math.round(reconnectDelay / 1000)}s until it returns`
                 );
             }
@@ -398,6 +443,14 @@ export const createBridgeRuntime = ({
     };
 
     server.on('error', (error) => {
+        // 'error' also fires for handle-level failures after the port is bound. Those are not listen attempts:
+        // treating one as such would cancel the single-flight guard for a listen genuinely in flight and pin a
+        // permanent rejection on a primary that is serving traffic, since nothing a still-listening process does
+        // will clear it.
+        if (server.listening) {
+            log(`local bridge listener error while serving ${host}:${port}:`, error.message);
+            return;
+        }
         // Released before the EADDRINUSE branch returns: that is the common path here, and a flag left set there
         // would make every later ensureBridgeConnected() a silent no-op.
         bridgeStartPending = false;
@@ -408,8 +461,13 @@ export const createBridgeRuntime = ({
             connectToPrimaryBridge();
             return;
         }
+        // Not a contended port but a refused one — an excluded loopback range, for instance. The timer that ran
+        // this attempt has already cleared itself, so without re-arming here the process would sit with no
+        // listener, no peer and no scheduled retry, contradicting the invariant that reconnection never gives up.
         log(`failed to listen on ${host}:${port}:`, error.message);
         process.exitCode = 1;
+        connections.recordPeerRejection(PEER_REJECTION_CODES.connectionFailed);
+        scheduleBridgeStart(PEER_RECONNECT_MAX_MS);
     });
 
     const close = () => {
@@ -417,7 +475,7 @@ export const createBridgeRuntime = ({
         closed = true;
         bridgeStartPending = false;
         connections.clearPeerRetrySchedule();
-        connections.endPeerAttempt();
+        connections.clearPeerAttemptVerdict();
         connections.close?.();
         connections.peerSocket?.close();
         for (const state of [...connectionStates]) {

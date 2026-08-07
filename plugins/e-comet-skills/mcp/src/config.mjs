@@ -30,7 +30,15 @@ export const resolveBridgePort = ({ env = process.env } = {}) => {
 export const PORT = resolveBridgePort();
 export const EXTENSION_PATH = '/extension';
 export const PEER_PATH = '/mcp-peer';
-export const CONTROL_PROTOCOL_VERSION = 1;
+// Bumped to 2 when the peer token moved out of the per-application state directory. Builds on either side of
+// that move cannot pair whatever this says — they read different token files — but without the bump they agree
+// on the protocol, fail the proof, and report `authentication_failed`, sending whoever reads the status after
+// an upgrade to investigate the secret instead of restarting both applications. Raising it makes the
+// incompatibility explicit and diagnosable as `protocol_mismatch`.
+//
+// Peer-only: the Chrome extension never reads this field. Its contract pins `extensionProtocolVersion`, which
+// is unchanged.
+export const CONTROL_PROTOCOL_VERSION = 2;
 export const EXTENSION_PROTOCOL_VERSION = 1;
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-06-18'];
 export const LATEST_MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0];
@@ -47,12 +55,15 @@ export const HANDOFF_RECONNECT_GRACE_MS = 2000;
 export const HANDOFF_DRAIN_POLL_MS = 25;
 export const EXTENSION_READINESS_WAIT_MS = 2000;
 export const PEER_RECONNECT_BASE_MS = 500;
+// Reconnection never gives up. Once the exponential delay reaches this ceiling the secondary is degraded and
+// keeps retrying at that cadence, so saturation is derived from the delay itself rather than from an attempt
+// ceiling that would have to be kept in sync with the backoff curve.
 export const PEER_RECONNECT_MAX_MS = 30_000;
-// Reconnection never gives up. Once the exponential delay reaches PEER_RECONNECT_MAX_MS the secondary is
-// degraded and keeps retrying at that cadence, so saturation is derived from the delay itself rather than from
-// an attempt ceiling that would have to be kept in sync with the backoff curve.
 // A tool call may pull the next attempt forward, but no more often than this.
 export const PEER_WAKE_COOLDOWN_MS = 2000;
+// A peer that has neither connected nor completed a handshake by now is wedged, not slow. Without this the
+// socket would sit open and silent, emitting no close and so scheduling no further attempt.
+export const PEER_HANDSHAKE_TIMEOUT_MS = 5000;
 export const WS_HEARTBEAT_INTERVAL_MS = 30_000;
 export const REQUEST_TIMEOUT_MS = 45000;
 // Расширение отсчитывает свой таймаут от момента получения wb_fetch, то есть позже
@@ -130,7 +141,6 @@ export const resolvePeerTokenDir = ({ platform = process.platform, env = process
 export const resolveResultDir = (options = {}) =>
     options.env?.ECOMET_LOCAL_AGENT_RESULT_DIR || (!options.env && process.env.ECOMET_LOCAL_AGENT_RESULT_DIR) || resolveLocalStateDir(options);
 
-export const LOCAL_STATE_DIR = resolveLocalStateDir();
 export const PEER_TOKEN_DIR = resolvePeerTokenDir();
 export const RESULT_DIR = resolveResultDir();
 export const SESSION_NONCE = randomUUID();

@@ -95,6 +95,20 @@ export const createPeerProtocol = ({
         closeState(state);
     };
 
+    // Version skew and a wrong secret both end the handshake, but they are different problems for whoever reads
+    // the status: skew is resolved by restarting both applications, not by investigating the token.
+    //
+    // The version this reads is the peer's own unverified claim, so a hostile process holding the port can make
+    // the status say `protocol_mismatch` when the real answer is `authentication_failed`. That is accepted
+    // deliberately: the alternative is no skew diagnostic at all, since a genuinely skewed primary fails this
+    // check before any proof can be exchanged. The code steers a reader, never what is accepted, and it is not
+    // evidence when a rogue local process is suspected.
+    const rejectionCodeFor = (message) =>
+        message?.controlProtocolVersion === CONTROL_PROTOCOL_VERSION
+            ? PEER_REJECTION_CODES.authenticationFailed
+            : PEER_REJECTION_CODES.protocolMismatch;
+
+    /** @param {import('./connection-state.mjs').PeerRejectionCode} [code] */
     const rejectUntrustedPrimary = (state, code = PEER_REJECTION_CODES.authenticationFailed) => {
         connections.recordPeerRejection(code);
         closeState(state);
@@ -128,8 +142,9 @@ export const createPeerProtocol = ({
 
     const handlePeerClientMessage = async (state, message) => {
         if (message?.type === 'peer_rejected') {
-            // The frame's `reason` is written by whatever answered on loopback and is never propagated; only the
-            // fact of a rejection is trusted, and it is reported with a code this process chose.
+            // Nothing in this frame is trustworthy: no proof was ever exchanged, and its `reason` is written by
+            // whatever answered on loopback. Only the fact of a rejection is used, with a fixed code — reading
+            // the claimed protocol version here would let the responder pick the diagnostic for free.
             connections.recordPeerRejection(PEER_REJECTION_CODES.authenticationFailed);
             closeState(state);
             return;
@@ -145,7 +160,7 @@ export const createPeerProtocol = ({
                 isValidPeerAuthNonce(message.serverNonce) &&
                 typeof message.serverProof === 'string';
             if (!validChallenge) {
-                rejectUntrustedPrimary(state);
+                rejectUntrustedPrimary(state, rejectionCodeFor(message));
                 return;
             }
             const primary = {
@@ -181,7 +196,7 @@ export const createPeerProtocol = ({
                 message.bridgeVersion !== authenticatedPrimary.bridgeVersion ||
                 message.instanceId !== authenticatedPrimary.instanceId
             ) {
-                rejectUntrustedPrimary(state);
+                rejectUntrustedPrimary(state, rejectionCodeFor(message));
                 return;
             }
             state.peerHandshakeComplete = true;
@@ -439,9 +454,11 @@ export const createPeerProtocol = ({
 
         const shouldTakeover = handoff.consumeTakeoverGrant();
         handoff.markDisconnected();
-        // A socket that dropped without a protocol verdict is a plain connection failure. An verdict already
-        // reached for this attempt — an authentication rejection, say — must survive the close that follows it.
-        connections.classifyPeerCloseFailure();
+        // A socket that dropped without a protocol verdict is a plain connection failure, and a verdict already
+        // reached for this attempt â€” an authentication rejection, say â€” must survive the close that follows it.
+        // The close that completes a granted takeover is not a failure at all: this peer is being promoted
+        // exactly as designed, and recording a rejection would surface one for a healthy handoff.
+        if (!shouldTakeover) connections.classifyPeerCloseFailure();
         requestBroker.rejectPendingRequests(
             new ToolExecutionError(
                     'EXTENSION_DISCONNECTED',
@@ -458,7 +475,6 @@ export const createPeerProtocol = ({
                     true
                 )
         );
-        connections.clearPeerRetrySchedule();
         const { delayMs, saturated } = connections.nextPeerReconnectDelay({
             baseMs: PEER_RECONNECT_BASE_MS,
             maxMs: PEER_RECONNECT_MAX_MS,
@@ -466,7 +482,7 @@ export const createPeerProtocol = ({
         // Fast recovery is a genuine transition. A saturated backoff is a steady degraded state, and a flag that
         // stayed on for it would report a transition that never ends.
         if (!shouldTakeover && saturated) handoff.markTopologySettled();
-        connections.endPeerAttempt();
+        connections.clearPeerAttemptVerdict();
         broadcastStatus();
         return { disconnected: true, shouldTakeover, reconnectDelay: delayMs, saturated };
     };
