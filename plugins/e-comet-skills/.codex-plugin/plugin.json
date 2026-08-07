@@ -11,10 +11,6 @@
   "license": "Apache-2.0",
   "keywords": ["mcp", "wildberries", "wb", "e-comet"],
   "mcpServers": {
-    "e-comet": {
-      "type": "http",
-      "url": "https://mcp.e-comet.io/mcp"
-    },
     "e-comet-local": {
       "type": "stdio",
       "command": "node",
@@ -40,3 +36,4 @@
     "logo": "./assets/logo.png"
   }
 }
+
