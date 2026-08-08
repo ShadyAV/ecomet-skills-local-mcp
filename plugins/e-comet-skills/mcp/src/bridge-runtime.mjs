@@ -250,6 +250,10 @@ export const createBridgeRuntime = ({
             fragments: [],
             fragmentBytes: 0,
             awaitingPong: false,
+            awaitingPongResumeGraceGranted: false,
+            heartbeatResumeGraceUntil: 0,
+            grantHeartbeatResumeGrace: false,
+            processingApplicationMessage: false,
             heartbeatTimer: null,
             closed: false,
         });
@@ -277,38 +281,75 @@ export const createBridgeRuntime = ({
                 closeConnectionState(state);
                 return;
             }
+            if (state.processingApplicationMessage || Date.now() < state.heartbeatResumeGraceUntil) return;
             if (state.awaitingPong) {
                 log(`closing unresponsive WebSocket client on ${state.path}`);
                 closeConnectionState(state);
                 return;
             }
             state.awaitingPong = true;
+            state.awaitingPongResumeGraceGranted = false;
             socket.write(encodeFrame('', 0x9));
         }, WS_HEARTBEAT_INTERVAL_MS);
         state.heartbeatTimer.unref();
 
         socket.on('data', (chunk) => {
-            try {
-                parseFrames(
-                    state,
-                    chunk,
-                    (message) => {
-                        const operation =
-                            state.path === peerPath
-                                ? peerProtocol.handleMessage(state, message)
-                                : extensionProtocol.handleMessage(state, message);
-                        void Promise.resolve(operation)
-                            .then((effect) => {
-                                if (effect?.type === 'handoff_requested') return beginHandoff(effect);
-                            })
-                            .catch((error) => log('WebSocket message handling failed:', error.message));
-                    },
-                    (closeFrameSent) => closeConnectionState(state, { destroySocket: !closeFrameSent })
-                );
-            } catch (error) {
-                log('WebSocket protocol error:', error.message);
-                closeConnectionState(state);
+            if (state.path === peerPath) {
+                try {
+                    parseFrames(
+                        state,
+                        chunk,
+                        (message) => {
+                            void Promise.resolve(peerProtocol.handleMessage(state, message))
+                                .then((effect) => {
+                                    if (effect?.type === 'handoff_requested') return beginHandoff(effect);
+                                })
+                                .catch((error) => log('WebSocket message handling failed:', error.message));
+                        },
+                        (closeFrameSent) => closeConnectionState(state, { destroySocket: !closeFrameSent })
+                    );
+                } catch (error) {
+                    log('WebSocket protocol error:', error.message);
+                    closeConnectionState(state);
+                }
+                return;
             }
+            state.processingApplicationMessage = true;
+            state.grantHeartbeatResumeGrace = state.awaitingPong && !state.awaitingPongResumeGraceGranted;
+            if (state.grantHeartbeatResumeGrace) state.awaitingPongResumeGraceGranted = true;
+            socket.pause?.();
+            void (async () => {
+                let nextChunk = chunk;
+                while (!state.closed) {
+                    let message;
+                    try {
+                        const handled = parseFrames(
+                            state,
+                            nextChunk,
+                            (nextMessage) => {
+                                message = nextMessage;
+                            },
+                            (closeFrameSent) => closeConnectionState(state, { destroySocket: !closeFrameSent }),
+                            { maxApplicationMessages: 1 }
+                        );
+                        nextChunk = Buffer.alloc(0);
+                        if (!handled || !message || state.closed) break;
+                        const effect = await extensionProtocol.handleMessage(state, message);
+                        if (effect?.type === 'handoff_requested') await beginHandoff(effect);
+                    } catch (error) {
+                        log('WebSocket protocol error:', error.message);
+                        closeConnectionState(state);
+                        break;
+                    }
+                }
+            })().finally(() => {
+                state.processingApplicationMessage = false;
+                if (state.grantHeartbeatResumeGrace) {
+                    state.heartbeatResumeGraceUntil = Date.now() + WS_HEARTBEAT_INTERVAL_MS;
+                    state.grantHeartbeatResumeGrace = false;
+                }
+                if (!state.closed && !socket.destroyed) socket.resume?.();
+            });
         });
         socket.on('close', () => closeConnectionState(state));
         socket.on('error', () => closeConnectionState(state));

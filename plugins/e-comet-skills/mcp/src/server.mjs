@@ -98,6 +98,34 @@ const requestBroker = new RequestBroker({
             );
         }
     },
+    routeSellerOperation: ({ requestId, sellerOperation, timeout, authorizationId, authorizationScopeId }) => {
+        if (connections.extensionReady) {
+            sendWs(
+                connections.extensionSocket,
+                localMessage(requestId, MESSAGE_TYPES.wbFetch, { authorizationId, sellerOperation, timeout })
+            );
+            return;
+        }
+        if (connections.peerReady && connections.peerSocket?.readyState === WebSocket.OPEN) {
+            connections.peerSocket.send(
+                JSON.stringify({
+                    type: 'peer_seller_operation',
+                    requestId,
+                    authorizationScopeId,
+                    authorizationId,
+                    sellerOperation,
+                    timeout,
+                })
+            );
+            return;
+        }
+        throw new ToolExecutionError(
+            'EXTENSION_DISCONNECTED',
+            'The e-Comet Chrome extension is not connected. Open an authenticated Wildberries tab and retry.',
+            'extension',
+            true
+        );
+    },
     routeAuthorization: ({ requestId, token }) => {
         if (connections.extensionReady && !connections.extensionBrowserJobReady) {
             throw new ToolExecutionError(
@@ -112,6 +140,21 @@ const requestBroker = new RequestBroker({
             sendWs(extensionSocket, localMessage(requestId, MESSAGE_TYPES.browserJobAuthorize, { token }));
             return {
                 isActive: () => connections.extensionReady && connections.extensionSocket === extensionSocket,
+                release: (authorizationId) =>
+                    requestBroker.requestAuthorizationRelease(authorizationId, ({ requestId: releaseRequestId }) => {
+                        if (!connections.extensionReady || connections.extensionSocket !== extensionSocket) {
+                            throw new ToolExecutionError(
+                                'EXTENSION_DISCONNECTED',
+                                'The e-Comet Chrome extension disconnected before releasing browser-job authorization.',
+                                'extension',
+                                true
+                            );
+                        }
+                        sendWs(
+                            extensionSocket,
+                            localMessage(releaseRequestId, MESSAGE_TYPES.browserJobAuthorizationRelease, { authorizationId })
+                        );
+                    }),
             };
         }
         if (connections.peerReady && !connections.peerExtensionBrowserJobReady) {
@@ -128,19 +171,24 @@ const requestBroker = new RequestBroker({
             return {
                 isActive: () =>
                     connections.peerReady && connections.peerSocket === peerSocket && peerSocket.readyState === WS_OPEN,
-                release: () => {
-                    if (peerSocket.readyState !== WS_OPEN) return;
-                    try {
+                release: (authorizationId) =>
+                    requestBroker.requestAuthorizationRelease(authorizationId, ({ requestId: releaseRequestId }) => {
+                        if (peerSocket.readyState !== WS_OPEN) {
+                            throw new ToolExecutionError(
+                                'EXTENSION_DISCONNECTED',
+                                'The primary local bridge disconnected before releasing browser-job authorization.',
+                                'extension',
+                                true
+                            );
+                        }
                         peerSocket.send(
                             JSON.stringify({
                                 type: 'peer_browser_job_authorization_release',
+                                requestId: releaseRequestId,
                                 authorizationScopeId: requestId,
                             })
                         );
-                    } catch (error) {
-                        log('failed to release peer browser-job authorization:', error.message);
-                    }
-                },
+                    }),
             };
         }
         throw new ToolExecutionError(

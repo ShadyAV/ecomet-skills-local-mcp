@@ -20,8 +20,9 @@ export const serverInstructions =
     'остаток, остатки, сток, наличие, склады, размеры, цена, описание, характеристики или карточка товара — wb_product_card; ' +
     'поиск, поисковая выдача, позиция, место или топ товаров по запросу — wb_search_by_query; ' +
     'рекомендации, похожие товары или рекомендательная полка — wb_recommendations_by_product; ' +
+    'скачать или экспортировать отчёт по отзывам продавца — wb_seller_reviews; ' +
     'фото, фотографии, картинки, изображения или галерея — wb_product_images. ' +
-    'Не начинайте с browser_job. После выбора одной из первых трёх локальных tools следуйте её описанию: ' +
+    'Не начинайте с browser_job. После выбора подписанного локального инструмента следуйте его описанию: ' +
     'browser_job используется только следующим шагом для получения подписанной авторизации выбранного задания.';
 
 export const tools = [
@@ -84,6 +85,21 @@ export const tools = [
             resultPathGuidance,
         inputSchema: toolInputSchemas.wb_recommendations_by_product,
         outputSchema: toolOutputSchemas.wb_recommendations_by_product,
+        annotations: liveToolAnnotations,
+    },
+    {
+        name: 'wb_seller_reviews',
+        description:
+            'Export original Wildberries seller-review XLSX reports for the signed seller_reviews browser_job. ' +
+            authorizationWorkflow +
+            'Authorize one mixed request with job {type:"seller_reviews",exports:[{product_id?:integer,dateFrom?:"YYYY-MM-DD",dateTo?:"YYYY-MM-DD",isAnswered?:boolean,ratings?:[1|2|3|4|5,...],content?:"media"},...],org?:{id:string}|{name:string}}. ' +
+            'Put every requested product, period, answer state, rating filter, and media filter into that single exports array. Omit product_id to export all products in the selected organization. Omitted ratings mean all ratings; content:"media" selects reviews with photo or video, while omitted content means any content. Omitted dates mean all time; otherwise provide both inclusive dates. Omitted isAnswered produces separate answered and unanswered workbooks. ' +
+            'Omit org to use the organization active in the seller portal. Include exactly one signed org id or exact name only when the user explicitly selects another organization. ' +
+            'Use at most 50 logical exports and 100 physical reports after expanding all. Each XLSX is limited to 100 MiB, the job to 500 MiB, and artifacts are retained for 24 hours. The shared artifact store is limited to 512 MiB and 1000 files; oldest completed artifacts are evicted first. ' +
+            'Return every successful resource link (resource_link) and explicitly summarize complete, failed, and skipped exports when status is partial. Do not infer product ownership from an empty workbook. ' +
+            'Returns compact metadata and private local resource links only; XLSX bytes never enter the tool result or model context, and base64 is never returned. Do not read or summarize workbook contents unless the user separately asks.',
+        inputSchema: toolInputSchemas.wb_seller_reviews,
+        outputSchema: toolOutputSchemas.wb_seller_reviews,
         annotations: liveToolAnnotations,
     },
     {

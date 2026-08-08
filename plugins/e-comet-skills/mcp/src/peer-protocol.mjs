@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
     BRIDGE_VERSION,
     CONTROL_PROTOCOL_VERSION,
@@ -7,8 +9,14 @@ import {
     PEER_RECONNECT_MAX_MS,
 } from './config.mjs';
 import { PEER_REJECTION_CODES } from './connection-state.mjs';
+import {
+    isValidSellerOperation,
+    isValidSellerStreamChunk,
+    isValidSellerStreamEnd,
+    isValidSellerStreamStart,
+} from './extension-protocol.mjs';
 import { createPeerAuthNonce, createPeerAuthProof, isValidPeerAuthNonce, peerTokensEqual } from './peer-auth.mjs';
-import { peerStatusMessage } from './extension-vocabulary.mjs';
+import { peerStatusMessage, SELLER_OPERATION_STAGES } from './extension-vocabulary.mjs';
 import { safeExternalToolError, ToolExecutionError, toolFailure } from './tool-errors.mjs';
 import { encodeFrame } from './websocket.mjs';
 import { validTimeout } from './wb-domain.mjs';
@@ -35,6 +43,30 @@ const peerAuthTranscript = (client, primary) =>
         primary.instanceId,
     ]);
 
+const hasOnlyKeys = (value, keys) =>
+    Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every((key) => keys.includes(key));
+const isValidPeerRequestId = (value) => typeof value === 'string' && value.length > 0 && value.length <= 128;
+const isValidPeerSellerOperationRequest = (message) =>
+    hasOnlyKeys(message, ['type', 'requestId', 'authorizationScopeId', 'authorizationId', 'sellerOperation', 'timeout']) &&
+    message?.type === 'peer_seller_operation' &&
+    isValidPeerRequestId(message.requestId) &&
+    isValidPeerRequestId(message.authorizationScopeId) &&
+    isValidPeerRequestId(message.authorizationId) &&
+    isValidSellerOperation(message.sellerOperation) &&
+    validTimeout(message.timeout);
+const isValidPeerSellerStreamMessage = (message, type, metadataValidator) =>
+    hasOnlyKeys(message, ['type', 'requestId', 'metadata', 'ackId']) &&
+    message?.type === type &&
+    isValidPeerRequestId(message.requestId) &&
+    isValidPeerRequestId(message.ackId) &&
+    metadataValidator(message.metadata);
+const isValidPeerSellerChunkMessage = (message) =>
+    hasOnlyKeys(message, ['type', 'requestId', 'index', 'data', 'ackId']) &&
+    message?.type === 'peer_seller_operation_chunk' &&
+    isValidPeerRequestId(message.requestId) &&
+    isValidPeerRequestId(message.ackId) &&
+    isValidSellerStreamChunk({ index: message.index, data: message.data });
+
 export const createPeerProtocol = ({
     connections,
     requestBroker,
@@ -43,6 +75,8 @@ export const createPeerProtocol = ({
     send,
     log,
     broadcastStatus,
+    waitForSellerAck: waitForSellerAckOverride = undefined,
+    createSellerAckId: createSellerAckIdOverride = undefined,
 }) => {
     const currentPeerStatus = () =>
         peerStatusMessage({
@@ -53,6 +87,26 @@ export const createPeerProtocol = ({
             controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
             extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
         });
+    const createSellerAckId = createSellerAckIdOverride || (() => randomUUID());
+    const waitForSellerAck =
+        waitForSellerAckOverride ||
+        ((state, ackId, requestId, timeout) =>
+            new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    state.sellerFrameAcks.delete(ackId);
+                    reject(new Error('Secondary seller stream acknowledgement timed out.'));
+                }, timeout);
+                state.sellerFrameAcks.set(ackId, { requestId, resolve, reject, timer });
+            }));
+    const releaseLeaseInBackground = (authorizationLease, context) => {
+        try {
+            void Promise.resolve(authorizationLease.release()).catch((error) =>
+                log(`failed to release browser-job authorization ${context}:`, error.message)
+            );
+        } catch (error) {
+            log(`failed to release browser-job authorization ${context}:`, error.message);
+        }
+    };
 
     const closeState = (state) => {
         if (state.role === 'client') {
@@ -66,6 +120,7 @@ export const createPeerProtocol = ({
         socket,
         role,
         peerHandshakeComplete: false,
+        mutualPeerAuthentication: false,
         primaryProofVerified: false,
         authenticatedPrimary: null,
         pendingPeerAuth: null,
@@ -73,6 +128,8 @@ export const createPeerProtocol = ({
         peerInstanceId: null,
         // The secondary reuses its authorize requestId as authorizationScopeId on every scoped fetch.
         authorizationLeases: new Map(),
+        sellerOperationRequests: new Set(),
+        sellerFrameAcks: new Map(),
         outboundHello:
             role === 'client'
                 ? {
@@ -114,10 +171,11 @@ export const createPeerProtocol = ({
         closeState(state);
     };
 
-    const completeServerHandshake = (state, peerIdentity) => {
+    const completeServerHandshake = (state, peerIdentity, { mutualPeerAuthentication = false } = {}) => {
         state.peerGeneration = peerIdentity.bridgeGeneration;
         state.peerInstanceId = peerIdentity.instanceId;
         state.peerHandshakeComplete = true;
+        state.mutualPeerAuthentication = mutualPeerAuthentication;
         state.pendingPeerAuth = null;
         send(state.socket, {
             type: 'peer_welcome',
@@ -216,6 +274,7 @@ export const createPeerProtocol = ({
             // A welcome on a superseded socket publishes nothing: the readiness it would set could never be
             // cleared, because disconnectPeer only acts for the current socket.
             if (wasReady === null) return;
+            state.mutualPeerAuthentication = true;
             handoff.markTopologySettled();
             if (!wasReady) {
                 log(
@@ -263,16 +322,82 @@ export const createPeerProtocol = ({
         if (message?.type === 'peer_browser_job_authorize_result' && typeof message.requestId === 'string') {
             if (message.error) requestBroker.rejectAuthorization(message.requestId, safeExternalToolError(message.error));
             else if (!requestBroker.resolveAuthorization(message.requestId, message.authorization)) {
-                try {
+                const sendLateRelease = (releaseRequestId) =>
                     state.socket.send(
                         JSON.stringify({
                             type: 'peer_browser_job_authorization_release',
+                            requestId: releaseRequestId,
                             authorizationScopeId: message.requestId,
                         })
                     );
-                } catch (error) {
-                    log('failed to release late peer browser-job authorization:', error.message);
+                const lateAuthorizationId = message.authorization?.authorizationId;
+                if (typeof lateAuthorizationId === 'string' && lateAuthorizationId.length > 0) {
+                    void requestBroker
+                        .requestAuthorizationRelease(lateAuthorizationId, ({ requestId: releaseRequestId }) =>
+                            sendLateRelease(releaseRequestId)
+                        )
+                        .catch((error) => log('failed to release late peer browser-job authorization:', error.message));
+                } else {
+                    // The scope is keyed by the authorize requestId on the primary, so it can still be
+                    // released without an authorizationId. Skipping the frame would strand it until expiry.
+                    try {
+                        sendLateRelease(randomUUID());
+                    } catch (error) {
+                        log('failed to release late peer browser-job authorization:', error.message);
+                    }
                 }
+            }
+            return;
+        }
+        if (
+            message?.type === 'peer_browser_job_authorization_release_result' &&
+            isValidPeerRequestId(message.requestId) &&
+            hasOnlyKeys(message, ['type', 'requestId', 'released', 'error'])
+        ) {
+            if (message.error) {
+                requestBroker.rejectAuthorizationRelease(
+                    message.requestId,
+                    safeExternalToolError(message.error, 'Browser job authorization release failed through the primary local bridge.')
+                );
+            } else if (message.released === true) {
+                requestBroker.resolveAuthorizationRelease(message.requestId);
+            }
+            return;
+        }
+        if (
+            isValidPeerSellerStreamMessage(message, 'peer_seller_operation_start', isValidSellerStreamStart) ||
+            isValidPeerSellerChunkMessage(message) ||
+            isValidPeerSellerStreamMessage(message, 'peer_seller_operation_end', isValidSellerStreamEnd)
+        ) {
+            if (message.type === 'peer_seller_operation_start') {
+                const handled = await requestBroker.startSellerStream(message.requestId, message.metadata);
+                if (handled && typeof message.ackId === 'string') {
+                    state.socket.send(JSON.stringify({ type: 'peer_seller_operation_ack', requestId: message.requestId, ackId: message.ackId }));
+                }
+            } else if (message.type === 'peer_seller_operation_chunk') {
+                const handled = await requestBroker.appendSellerStreamChunk(message.requestId, message.index, message.data);
+                if (handled && typeof message.ackId === 'string') {
+                    state.socket.send(JSON.stringify({ type: 'peer_seller_operation_ack', requestId: message.requestId, ackId: message.ackId }));
+                }
+            } else {
+                const handled = await requestBroker.endSellerStream(message.requestId, message.metadata);
+                if (handled && typeof message.ackId === 'string') {
+                    state.socket.send(JSON.stringify({ type: 'peer_seller_operation_ack', requestId: message.requestId, ackId: message.ackId }));
+                }
+            }
+            return;
+        }
+        if (message?.type === 'peer_seller_operation_result' && isValidPeerRequestId(message.requestId)) {
+            if (message.error) {
+                const peerError =
+                    message.toolError ??
+                    { code: 'PEER_REQUEST_REJECTED', message: String(message.error), stage: 'execution', retryable: false };
+                requestBroker.rejectSellerOperation(
+                    message.requestId,
+                    safeExternalToolError(peerError, 'Seller operation failed through the primary local bridge.')
+                );
+            } else {
+                requestBroker.resolveSellerOperation(message.requestId, message.response);
             }
             return;
         }
@@ -339,7 +464,7 @@ export const createPeerProtocol = ({
                 rejectUnauthenticated(state, 'Peer authentication failed');
                 return;
             }
-            return completeServerHandshake(state, pending.client);
+            return completeServerHandshake(state, pending.client, { mutualPeerAuthentication: true });
         }
         if (!state.peerHandshakeComplete) {
             rejectUnauthenticated(state, 'Peer handshake is required');
@@ -350,14 +475,128 @@ export const createPeerProtocol = ({
             return;
         }
         if (
+            message?.type === 'peer_seller_operation_ack' &&
+            isValidPeerRequestId(message.requestId) &&
+            isValidPeerRequestId(message.ackId) &&
+            hasOnlyKeys(message, ['type', 'requestId', 'ackId'])
+        ) {
+            const pendingAck = state.sellerFrameAcks.get(message.ackId);
+            if (pendingAck && pendingAck.requestId === message.requestId) {
+                state.sellerFrameAcks.delete(message.ackId);
+                clearTimeout(pendingAck.timer);
+                pendingAck.resolve();
+            }
+            return;
+        }
+        if (
             message?.type === 'peer_browser_job_authorization_release' &&
-            typeof message.authorizationScopeId === 'string'
+            isValidPeerRequestId(message.requestId) &&
+            isValidPeerRequestId(message.authorizationScopeId) &&
+            hasOnlyKeys(message, ['type', 'requestId', 'authorizationScopeId'])
         ) {
             const authorizationLease = state.authorizationLeases.get(message.authorizationScopeId);
-            if (authorizationLease) {
-                state.authorizationLeases.delete(message.authorizationScopeId);
-                authorizationLease.release();
+            state.authorizationLeases.delete(message.authorizationScopeId);
+            try {
+                if (authorizationLease) await authorizationLease.release();
+                send(state.socket, {
+                    type: 'peer_browser_job_authorization_release_result',
+                    requestId: message.requestId,
+                    released: true,
+                });
+            } catch (error) {
+                send(state.socket, {
+                    type: 'peer_browser_job_authorization_release_result',
+                    requestId: message.requestId,
+                    error: toolFailure(error, {
+                        code: 'BROWSER_JOB_AUTHORIZATION_RELEASE_FAILED',
+                        message: 'Browser job authorization release failed.',
+                        stage: 'extension',
+                        retryable: false,
+                    }),
+                });
             }
+            return;
+        }
+        if (isValidPeerSellerOperationRequest(message)) {
+            if (!state.mutualPeerAuthentication) {
+                send(state.socket, {
+                    type: 'peer_seller_operation_result',
+                    requestId: message.requestId,
+                    error: 'Mutual peer authentication is required for seller operations.',
+                });
+                return;
+            }
+            if (state.sellerOperationRequests.has(message.requestId)) {
+                send(state.socket, {
+                    type: 'peer_seller_operation_result',
+                    requestId: message.requestId,
+                    error: 'Duplicate peer seller operation request',
+                });
+                return;
+            }
+            const authorizationLease = state.authorizationLeases.get(message.authorizationScopeId);
+            if (!authorizationLease || authorizationLease.authorization?.authorizationId !== message.authorizationId) {
+                send(state.socket, {
+                    type: 'peer_seller_operation_result',
+                    requestId: message.requestId,
+                    error: 'Seller authorization is no longer active.',
+                    toolError: toolFailure(
+                        new ToolExecutionError(
+                            'BROWSER_JOB_REAUTHORIZATION_REQUIRED',
+                            'Browser job authorization must be acquired again after the bridge connection changed.',
+                            'authorization',
+                            true
+                        )
+                    ),
+                });
+                return;
+            }
+            state.sellerOperationRequests.add(message.requestId);
+            try {
+                const relay = async (type, fields, suffix) => {
+                    const ackId = createSellerAckId({ requestId: message.requestId, type, suffix });
+                    if (!isValidPeerRequestId(ackId)) throw new Error('Seller stream acknowledgement identifier is invalid.');
+                    send(state.socket, { type, requestId: message.requestId, ackId, ...fields });
+                    await waitForSellerAck(state, ackId, message.requestId, message.timeout);
+                };
+                const result = await authorizationLease.requestSellerOperation(
+                    message.sellerOperation,
+                    {
+                        onStart: (metadata) =>
+                            relay('peer_seller_operation_start', { metadata }, 'start'),
+                        onChunk: (index, data) =>
+                            relay('peer_seller_operation_chunk', { index, data }, `chunk:${index}`),
+                        onEnd: (metadata) =>
+                            relay('peer_seller_operation_end', { metadata }, 'end'),
+                    },
+                    message.timeout
+                );
+                if (message.sellerOperation.stage !== SELLER_OPERATION_STAGES.download) {
+                    send(state.socket, { type: 'peer_seller_operation_result', requestId: message.requestId, response: result });
+                }
+            } catch (error) {
+                send(state.socket, {
+                    type: 'peer_seller_operation_result',
+                    requestId: message.requestId,
+                    error: 'Seller operation failed.',
+                    toolError: toolFailure(error, {
+                        code: 'SELLER_OPERATION_FAILED',
+                        message: 'Seller operation failed.',
+                        stage: 'execution',
+                        retryable: false,
+                    }),
+                });
+            } finally {
+                state.sellerOperationRequests.delete(message.requestId);
+            }
+            return;
+        }
+        if (message?.type === 'peer_seller_operation') {
+            send(state.socket, {
+                type: 'peer_seller_operation_result',
+                requestId: isValidPeerRequestId(message.requestId) ? message.requestId : undefined,
+                error: 'Invalid peer seller operation',
+            });
             return;
         }
         if (
@@ -385,7 +624,7 @@ export const createPeerProtocol = ({
                     });
                 } catch (error) {
                     state.authorizationLeases.delete(message.requestId);
-                    authorizationLease.release();
+                    releaseLeaseInBackground(authorizationLease, 'after peer send failure');
                     throw error;
                 }
             } catch (error) {
@@ -465,8 +704,13 @@ export const createPeerProtocol = ({
     const onDisconnect = (state) => {
         if (state.role !== 'client') {
             handoff.abandon(state);
+            for (const pendingAck of state.sellerFrameAcks.values()) {
+                clearTimeout(pendingAck.timer);
+                pendingAck.reject(new Error('Secondary peer disconnected before acknowledging the seller stream.'));
+            }
+            state.sellerFrameAcks.clear();
             for (const authorizationLease of state.authorizationLeases.values()) {
-                authorizationLease.release();
+                releaseLeaseInBackground(authorizationLease, 'after peer disconnect');
             }
             state.authorizationLeases.clear();
             return { disconnected: false, shouldTakeover: false, reconnectDelay: null, rejectionCode: null };

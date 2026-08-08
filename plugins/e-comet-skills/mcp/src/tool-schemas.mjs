@@ -150,7 +150,7 @@ export const toolErrorSchema = object({
     message: string,
     stage: {
         type: 'string',
-        enum: ['arguments', 'handoff', 'extension', 'authorization', 'execution', 'storage', 'images', 'local'],
+        enum: ['arguments', 'handoff', 'extension', 'authorization', 'execution', 'storage', 'images', 'seller', 'local'],
     },
     retryable: boolean,
     resultPath: string,
@@ -229,6 +229,45 @@ const imageProductSchema = object({
     baseUrl: string,
     imageUrls: array(string),
 }, ['nmId', 'status', 'imageUrls']);
+
+const sellerArtifactSchema = object({
+    name: string,
+    path: string,
+    uri: string,
+    mimeType: { const: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+    size: nonNegativeInteger,
+    sha256: { type: 'string', minLength: 64, maxLength: 64 },
+}, ['name', 'path', 'uri', 'mimeType', 'size', 'sha256']);
+
+const sellerExportErrorSchema = object({
+    code: string,
+    message: string,
+    stage: string,
+    retryable: boolean,
+}, ['code', 'message', 'stage', 'retryable']);
+
+const sellerExportSchema = object({
+    product_id: positiveInteger,
+    dateFrom: string,
+    dateTo: string,
+    isAnswered: boolean,
+    ratings: array({ type: 'integer', minimum: 1, maximum: 5 }, { minItems: 1, maxItems: 5, uniqueItems: true }),
+    content: { const: 'media' },
+    status: { type: 'string', enum: ['complete', 'failed', 'skipped'] },
+    artifact: sellerArtifactSchema,
+    error: sellerExportErrorSchema,
+}, ['isAnswered', 'status']);
+
+const sellerReviewsSuccessSchema = object({
+    ok: boolean,
+    status: { type: 'string', enum: ['complete', 'partial', 'failed'] },
+    jobType: { const: 'seller_reviews' },
+    jobId: string,
+    org: object({ id: string, name: string }, [], false),
+    exports: array(sellerExportSchema, { minItems: 1 }),
+    // Present when the exports themselves are described accurately but restoring the seller cabinet failed.
+    releaseError: toolErrorSchema,
+}, ['ok', 'status', 'jobType', 'jobId', 'exports']);
 
 const imagesSuccessSchema = object({
     ok: boolean,
@@ -316,6 +355,7 @@ export const toolInputSchemas = {
     wb_product_card: liveInputSchema(),
     wb_search_by_query: liveInputSchema('productLimitPerQuery', 'query'),
     wb_recommendations_by_product: liveInputSchema('productLimitPerSource', 'source product'),
+    wb_seller_reviews: liveInputSchema(),
     wb_product_images: object(
         {
             nmIds: {
@@ -349,6 +389,7 @@ export const toolOutputSchemas = {
     wb_product_card: objectUnion(...liveAggregateSchemas(productCardSuccessSchema), toolErrorSchema),
     wb_search_by_query: objectUnion(...liveAggregateSchemas(searchSuccessSchema), toolErrorSchema),
     wb_recommendations_by_product: objectUnion(...liveAggregateSchemas(recommendationsSuccessSchema), toolErrorSchema),
+    wb_seller_reviews: objectUnion(sellerReviewsSuccessSchema, toolErrorSchema),
     wb_product_images: objectUnion(...liveAggregateSchemas(imagesSuccessSchema), toolErrorSchema),
 };
 

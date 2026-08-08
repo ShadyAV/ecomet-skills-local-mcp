@@ -38,7 +38,7 @@ export const PEER_PATH = '/mcp-peer';
 //
 // Peer-only: the Chrome extension never reads this field. Its contract pins `extensionProtocolVersion`.
 export const CONTROL_PROTOCOL_VERSION = 1;
-export const EXTENSION_PROTOCOL_VERSION = 1;
+export const EXTENSION_PROTOCOL_VERSION = 4;
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-06-18'];
 export const LATEST_MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0];
 // 3: the release that moved the peer token and made reconnection endless must replace an already-running
@@ -75,12 +75,20 @@ export const PEER_HANDSHAKE_TIMEOUT_MS = 5000;
 export const WS_CLIENT_CLOSE_GRACE_MS = 1000;
 export const WS_HEARTBEAT_INTERVAL_MS = 30_000;
 export const REQUEST_TIMEOUT_MS = 45000;
+// Cabinet restoration can include a portal ping, activation/reload and a retry. Keep its acknowledgement
+// budget independent from the shorter per-request default so a successful export is not reported failed early.
+export const AUTHORIZATION_RELEASE_TIMEOUT_MS = 75_000;
 // Расширение отсчитывает свой таймаут от момента получения wb_fetch, то есть позже
 // нас. Без запаса наш таймер всегда срабатывал первым, и типизированный
 // WB_FETCH_TIMEOUT не доезжал до агента никогда.
 export const REQUEST_TIMEOUT_GRACE_MS = 2000;
 export const MIN_REQUEST_TIMEOUT_MS = 1000;
 export const MAX_REQUEST_TIMEOUT_MS = 120000;
+// A seller download streams the whole workbook as base64 frames, so its budget must cover the page-side
+// encode plus every chunk rather than the single JSON round trip the generic default was sized for.
+// Observed downloads finish in seconds, tens of seconds at worst, so this is headroom over the real
+// worst case and not a capacity estimate — keep it tight enough that a wedged stream still surfaces.
+export const SELLER_DOWNLOAD_TIMEOUT_MS = 60_000;
 export const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 export const MAX_MCP_MESSAGE_BYTES = 1024 * 1024;
 export const MAX_BROWSER_JOB_TOKEN_BYTES = 128 * 1024;
@@ -96,6 +104,20 @@ export const MAX_SEARCH_REQUEST_UNITS = 1000;
 export const SEARCH_CONCURRENCY = 4;
 export const MAX_RECOMMENDATION_PAGES_PER_PRODUCT = 50;
 export const MAX_RECOMMENDATION_REQUEST_UNITS = 1000;
+export const MAX_SELLER_REVIEW_EXPORTS = 50;
+export const MAX_SELLER_REVIEW_PHYSICAL_REPORTS = 100;
+export const MAX_SELLER_REVIEW_POLLS_PER_REPORT = 100;
+export const MAX_SELLER_REVIEW_DOWNLOAD_ATTEMPTS = 2;
+// Порог приёмки расширения. Здесь он объявлен только ради сверки контракта: применяет его
+// расширение, а агент держит собственный, заведомо больший темп.
+export const MIN_SELLER_OPERATION_INTERVAL_MS = 1000;
+// Политика локального агента, а не подписанный лимит: расширение ограничивает, сколько операций
+// вправе потратить скоуп, а это — как долго агент продолжает тратить их в отказывающий эндпоинт.
+export const MAX_CONSECUTIVE_SELLER_POLL_FAILURES = 3;
+export const MAX_CONSECUTIVE_SELLER_EXPORT_FAILURES = 3;
+// Темп со стороны агента. Намеренно выше порога приёмки расширения: часы двух процессов и
+// round-trip по WebSocket независимы, поэтому равные значения давали бы ложные срабатывания порога.
+export const MIN_SELLER_OPERATION_AGENT_INTERVAL_MS = 1500;
 export const RECOMMENDATION_PAGE_SIZE = 100;
 export const RECOMMENDATION_CONCURRENCY = 4;
 export const MAX_RETURNED_PRODUCTS = 200;
@@ -113,6 +135,23 @@ export const positiveIntegerEnv = (name, fallback, { env = process.env } = {}) =
     return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 };
 export const AUTHORIZATION_SCOPE_MAX_MS = positiveIntegerEnv('ECOMET_AUTHORIZATION_SCOPE_MAX_MS', 10 * 60 * 1000);
+// A seller export creates, polls and downloads many reports under one signed scope, so the generic
+// single-round-trip ceiling would expire it mid-job. Its executor stops one poll cadence before this
+// deadline, so the scope outlives the work instead of cancelling it.
+export const SELLER_AUTHORIZATION_SCOPE_MAX_MS = positiveIntegerEnv('ECOMET_SELLER_AUTHORIZATION_SCOPE_MAX_MS', 60 * 60 * 1000);
+export const sellerJobDurationMs = (scopeMaxMs, configuredDuration) => {
+    if (!Number.isSafeInteger(scopeMaxMs) || scopeMaxMs <= 0) {
+        throw new RangeError('Seller authorization scope maximum must be a positive safe integer');
+    }
+    const scopeCeiling = Math.max(1, scopeMaxMs - MIN_REQUEST_TIMEOUT_MS);
+    const defaultDuration = scopeMaxMs - SELLER_DOWNLOAD_TIMEOUT_MS;
+    const candidate = Number.isSafeInteger(configuredDuration) && configuredDuration > 0 ? configuredDuration : defaultDuration;
+    return Math.min(Math.max(1, candidate > 0 ? candidate : scopeCeiling), scopeCeiling);
+};
+export const SELLER_JOB_MAX_DURATION_MS = sellerJobDurationMs(
+    SELLER_AUTHORIZATION_SCOPE_MAX_MS,
+    positiveIntegerEnv('ECOMET_SELLER_JOB_MAX_DURATION_MS', SELLER_AUTHORIZATION_SCOPE_MAX_MS - SELLER_DOWNLOAD_TIMEOUT_MS)
+);
 export const HANDOFF_MAX_DRAIN_MS = positiveIntegerEnv('ECOMET_HANDOFF_MAX_DRAIN_MS', 10_000);
 export const MAX_ACTIVE_AUTHORIZATION_SCOPES = positiveIntegerEnv('ECOMET_MAX_ACTIVE_AUTHORIZATION_SCOPES', 32);
 export const RESULT_RETENTION_MS = positiveIntegerEnv('ECOMET_RESULT_RETENTION_MS', 24 * 60 * 60 * 1000);
@@ -151,7 +190,22 @@ export const resolveResultDir = (options = {}) =>
     options.env?.ECOMET_LOCAL_AGENT_RESULT_DIR || (!options.env && process.env.ECOMET_LOCAL_AGENT_RESULT_DIR) || resolveLocalStateDir(options);
 
 export const PEER_TOKEN_DIR = resolvePeerTokenDir();
+export const resolveArtifactDir = (options = {}) => {
+    const configuredDirectory = options.env?.ECOMET_LOCAL_AGENT_ARTIFACT_DIR || (!options.env && process.env.ECOMET_LOCAL_AGENT_ARTIFACT_DIR);
+    if (configuredDirectory) return configuredDirectory;
+    const stateDirectory = resolveLocalStateDir(options);
+    return (options.platform || process.platform) === 'win32' ? win32.join(stateDirectory, 'artifacts') : posix.join(stateDirectory, 'artifacts');
+};
+
+export const LOCAL_STATE_DIR = resolveLocalStateDir();
 export const RESULT_DIR = resolveResultDir();
+export const ARTIFACT_DIR = resolveArtifactDir();
+export const ARTIFACT_RETENTION_MS = positiveIntegerEnv('ECOMET_ARTIFACT_RETENTION_MS', 24 * 60 * 60 * 1000);
+export const ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_TOTAL_BYTES', 512 * 1024 * 1024);
+export const ARTIFACT_MAX_FILE_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_FILE_BYTES', 100 * 1024 * 1024);
+export const ARTIFACT_MAX_JOB_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_JOB_BYTES', 500 * 1024 * 1024);
+export const ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_FILES', 1000);
+export const ARTIFACT_MAX_CHUNK_BYTES = 256 * 1024;
 export const SESSION_NONCE = randomUUID();
 export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
 export const EXTENSION_ID_OVERRIDE_ENABLED =

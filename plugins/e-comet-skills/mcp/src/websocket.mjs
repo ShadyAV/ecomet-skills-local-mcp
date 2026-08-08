@@ -112,7 +112,14 @@ export const resetFrameBuffer = (state) => {
 // out unmasked. The client transport passes `requireMasked: false` (a masked server frame is a protocol
 // violation it must fail on, RFC 6455 §5.1) and `replyEncoder: encodeMaskedFrame` so its close echoes and
 // pongs stay legal client frames.
-export const parseFrames = (state, chunk, onMessage, onClose, { requireMasked = true, replyEncoder = encodeFrame } = {}) => {
+export const parseFrames = (
+    state,
+    chunk,
+    onMessage,
+    onClose,
+    { requireMasked = true, replyEncoder = encodeFrame, maxApplicationMessages = Infinity } = {}
+) => {
+    let applicationMessages = 0;
     if (chunk.length > 0) {
         pendingChunks(state).push(chunk);
         state.pendingBytes += chunk.length;
@@ -201,6 +208,10 @@ export const parseFrames = (state, chunk, onMessage, onClose, { requireMasked = 
                 state.fragments = [];
                 state.fragmentBytes = 0;
                 onMessage(message.toString('utf8'));
+                applicationMessages += 1;
+                if (applicationMessages >= maxApplicationMessages) return applicationMessages;
+                applicationMessages += 1;
+                if (applicationMessages >= maxApplicationMessages) return applicationMessages;
             }
         } else if (opcode === 0x1) {
             if (state.fragmentOpcode) {
@@ -208,6 +219,10 @@ export const parseFrames = (state, chunk, onMessage, onClose, { requireMasked = 
             }
             if (fin) {
                 onMessage(payload.toString('utf8'));
+                applicationMessages += 1;
+                if (applicationMessages >= maxApplicationMessages) return applicationMessages;
+                applicationMessages += 1;
+                if (applicationMessages >= maxApplicationMessages) return applicationMessages;
             } else {
                 state.fragmentOpcode = opcode;
                 state.fragments = [payload];
@@ -229,4 +244,5 @@ export const parseFrames = (state, chunk, onMessage, onClose, { requireMasked = 
             state.awaitingPong = false;
         }
     }
+    return applicationMessages;
 };

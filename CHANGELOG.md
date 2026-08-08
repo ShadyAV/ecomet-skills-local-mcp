@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Added `wb_seller_reviews` for mixed, entity-bound Wildberries seller-review exports with per-report partial results
+  and private local XLSX resource links.
+- Added bounded artifact streaming and storage with 100 MiB per-file, 500 MiB per-job, and 24-hour retention limits.
+
+### Changed
+- Extended the trusted one-use browser authorization handoff to the seller-review export tool while keeping the plugin
+  MCP-only.
+
 ## [2026.8.2] - 2026-08-07
 
 Initial public release of the e-Comet skill pack.

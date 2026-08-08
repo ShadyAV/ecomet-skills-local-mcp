@@ -31,6 +31,7 @@ Local tools:
 - `wb_product_card` — discovers and executes signed live product-card requests;
 - `wb_search_by_query` — discovers and executes signed live WB search requests;
 - `wb_recommendations_by_product` — discovers and executes signed recommendation-shelf requests;
+- `wb_seller_reviews` — exports original WB seller-review XLSX reports through the authenticated seller portal;
 - `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
   peer when it cannot;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
@@ -42,6 +43,13 @@ executes both MCP calls inside one `exec` and passes the value only through a lo
 not reproduce the token as text. The extension verifies the RS256 signature, expiry, account UUID, job type, and exact
 derived WB URLs. It rejects direct `wb_fetch` calls without that authorization. WB response bodies remain on the user's
 computer and do not pass through e-Comet backend services.
+
+`wb_seller_reviews` accepts the signed mixed export descriptor, expands an omitted `isAnswered` into separate answered and
+unanswered physical reports, and preserves successful work when another export fails. It returns compact status metadata plus
+one private local `resource_link` for each successful XLSX workbook. Workbook bytes and base64 never enter tool content or model
+context; opening or summarizing a workbook is a separate explicit action. Artifacts are retained locally for 24 hours. Each
+workbook is limited to 100 MiB and each job to 500 MiB; the shared artifact store is limited to 512 MiB and 1000 files, with
+oldest completed artifacts evicted first.
 
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
