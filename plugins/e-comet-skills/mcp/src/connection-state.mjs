@@ -3,7 +3,7 @@
 // otherwise write arbitrary text into a tool result and from there into the model's context.
 /**
  * The whole vocabulary, so a caller cannot be narrowed to whichever code happens to be a default.
- * @typedef {'authentication_failed' | 'protocol_mismatch' | 'handshake_required' | 'connection_failed' | 'listen_failed' | 'token_unavailable'} PeerRejectionCode
+ * @typedef {'authentication_failed' | 'protocol_mismatch' | 'handshake_required' | 'connection_failed' | 'listen_failed' | 'token_permission_denied' | 'token_unavailable'} PeerRejectionCode
  */
 export const PEER_REJECTION_CODES = Object.freeze({
     authenticationFailed: 'authentication_failed',
@@ -13,6 +13,7 @@ export const PEER_REJECTION_CODES = Object.freeze({
     // This process could not bind the listener at all — no peer was ever contacted. Reporting it through
     // `connection_failed` would send the reader to investigate a primary that was never reached.
     listenFailed: 'listen_failed',
+    tokenPermissionDenied: 'token_permission_denied',
     tokenUnavailable: 'token_unavailable',
 });
 

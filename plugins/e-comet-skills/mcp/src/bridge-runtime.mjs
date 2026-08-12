@@ -549,7 +549,11 @@ export const createBridgeRuntime = ({
             }
             if (!tokenResult.ok) {
                 peerConnectPending = false;
-                connections.recordPeerRejection(PEER_REJECTION_CODES.tokenUnavailable);
+                const rejectionCode =
+                    ['permission_denied', 'insecure_permissions'].includes(tokenResult.reason)
+                        ? PEER_REJECTION_CODES.tokenPermissionDenied
+                        : PEER_REJECTION_CODES.tokenUnavailable;
+                connections.recordPeerRejection(rejectionCode);
                 const retry = connections.nextPeerReconnectDelay({ baseMs: PEER_RECONNECT_BASE_MS, maxMs: PEER_RECONNECT_MAX_MS });
                 scheduleBridgeStart(retry.delayMs, connectToPrimaryBridge);
                 return;

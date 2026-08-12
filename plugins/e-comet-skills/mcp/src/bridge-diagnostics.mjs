@@ -15,6 +15,7 @@ export const deriveBridgeDiagnostics = (raw, nowMs) => {
     let recommendedAction;
     if (raw.listenerState === 'pending' && noRoute) [state, recommendedAction] = ['initializing', 'WAIT_FOR_EXTENSION'];
     else if (noRoute && (raw.listenerState === 'failed' || rejection === 'listen_failed')) [state, recommendedAction] = ['listen_failed', 'RESTART_DESKTOP_HOSTS'];
+    else if (noRoute && rejection === 'token_permission_denied') [state, recommendedAction] = ['peer_unavailable', 'FIX_PEER_TOKEN_PERMISSIONS'];
     else if (noRoute && rejection === 'token_unavailable') [state, recommendedAction] = ['peer_unavailable', 'USE_PRIMARY_AGENT'];
     else if (noRoute && ['protocol_mismatch', 'authentication_failed', 'handshake_required'].includes(rejection)) [state, recommendedAction] = ['peer_reconnecting', 'RESTART_DESKTOP_HOSTS'];
     else if (noRoute && (rejection === 'connection_failed' || raw.listenerState === 'address_in_use')) [state, recommendedAction] = ['peer_reconnecting', 'WAIT_FOR_EXTENSION'];

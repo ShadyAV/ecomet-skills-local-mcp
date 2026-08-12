@@ -353,7 +353,7 @@ const bridgeStatusSchema = object({
     bridgeTransitioning: boolean,
     listenerState: { type: 'string', enum: ['pending', 'listening', 'address_in_use', 'failed'] },
     state: { type: 'string', enum: ['initializing', 'listen_failed', 'waiting_for_extension', 'extension_connected_no_wb_tab', 'extension_context_unknown', 'peer_context_unknown', 'ready', 'extension_update_required', 'peer_reconnecting', 'peer_unavailable'] },
-    recommendedAction: { type: 'string', enum: ['NONE', 'WAIT_FOR_EXTENSION', 'OPEN_OR_REFRESH_WB', 'OPEN_AUTHENTICATED_WB', 'UPDATE_EXTENSION', 'RESTART_DESKTOP_HOSTS', 'USE_PRIMARY_AGENT'] },
+    recommendedAction: { type: 'string', enum: ['FIX_PEER_TOKEN_PERMISSIONS', 'NONE', 'WAIT_FOR_EXTENSION', 'OPEN_OR_REFRESH_WB', 'OPEN_AUTHENTICATED_WB', 'UPDATE_EXTENSION', 'RESTART_DESKTOP_HOSTS', 'USE_PRIMARY_AGENT'] },
     extension: object({
         state: { type: 'string', enum: ['never_connected', 'connected', 'disconnected'] },
         route: { type: 'string', enum: ['direct', 'peer', 'none'] },
