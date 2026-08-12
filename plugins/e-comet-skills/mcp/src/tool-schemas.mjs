@@ -187,6 +187,50 @@ const searchSuccessSchema = object({
     queries: array(searchQuerySchema),
 }, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'pagesRequested', 'pagesSucceeded', 'pagesFailed', 'productFilterApplied', 'queries']);
 
+const checkProductSchema = object({
+    nmId: positiveInteger,
+    name: string,
+    brand: string,
+}, ['nmId']);
+
+const checkQueryProperties = {
+    query: string,
+    pagesChecked: nonNegativeInteger,
+    error: string,
+};
+const checkQueryRequired = ['query', 'found', 'pagesChecked', 'completionReason'];
+const checkQuerySchema = objectUnion(
+    object(
+        {
+            ...checkQueryProperties,
+            found: { const: true },
+            completionReason: { const: 'found' },
+        },
+        checkQueryRequired
+    ),
+    object(
+        {
+            ...checkQueryProperties,
+            found: { const: false },
+            completionReason: {
+                type: 'string',
+                enum: ['empty_page', 'repeated_page', 'page_limit', 'request_failed', 'card_failed'],
+            },
+        },
+        checkQueryRequired
+    )
+);
+
+const checkSuccessSchema = object({
+    ...liveBaseProperties,
+    jobType: { const: 'check_by_query' },
+    complete: boolean,
+    product_id: positiveInteger,
+    product: checkProductSchema,
+    requestsMade: positiveInteger,
+    queries: array(checkQuerySchema),
+}, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'complete', 'product_id', 'requestsMade', 'queries']);
+
 const recommendationArticleSchema = object({
     sourceNmId: positiveInteger,
     pagesRequested: positiveInteger,
@@ -307,6 +351,26 @@ const bridgeStatusSchema = object({
     browserJobSupported: boolean,
     bridgeRole: { type: 'string', enum: ['primary', 'secondary', 'disconnected'] },
     bridgeTransitioning: boolean,
+    listenerState: { type: 'string', enum: ['pending', 'listening', 'address_in_use', 'failed'] },
+    state: { type: 'string', enum: ['initializing', 'listen_failed', 'waiting_for_extension', 'extension_connected_no_wb_tab', 'extension_context_unknown', 'peer_context_unknown', 'ready', 'extension_update_required', 'peer_reconnecting', 'peer_unavailable'] },
+    recommendedAction: { type: 'string', enum: ['NONE', 'WAIT_FOR_EXTENSION', 'OPEN_OR_REFRESH_WB', 'OPEN_AUTHENTICATED_WB', 'UPDATE_EXTENSION', 'RESTART_DESKTOP_HOSTS', 'USE_PRIMARY_AGENT'] },
+    extension: object({
+        state: { type: 'string', enum: ['never_connected', 'connected', 'disconnected'] },
+        route: { type: 'string', enum: ['direct', 'peer', 'none'] },
+        lastConnectedAt: string,
+        lastDisconnectedAt: string,
+        version: string,
+    }, ['state', 'route']),
+    peer: object({ bridgeVersion: string, browserContextPropagationSupported: boolean }),
+    browserContext: object({
+        state: { type: 'string', enum: ['unknown', 'known'] },
+        wbTabConnected: boolean,
+        sellerTabConnected: boolean,
+        changedAt: string,
+    }, ['state']),
+    extensionLastConnectedAtMs: { type: ['number', 'null'] },
+    extensionLastDisconnectedAtMs: { type: ['number', 'null'] },
+    extensionVersion: string,
     peerRejection: peerRejectionSchema,
     bridgeVersion: string,
     bridgeGeneration: positiveInteger,
@@ -354,6 +418,7 @@ export const toolInputSchemas = {
     local_bridge_status: object({}),
     wb_product_card: liveInputSchema(),
     wb_search_by_query: liveInputSchema('productLimitPerQuery', 'query'),
+    wb_check_by_query: liveInputSchema(),
     wb_recommendations_by_product: liveInputSchema('productLimitPerSource', 'source product'),
     wb_seller_reviews: liveInputSchema(),
     wb_product_images: object(
@@ -388,6 +453,7 @@ export const toolOutputSchemas = {
     local_bridge_status: bridgeStatusSchema,
     wb_product_card: objectUnion(...liveAggregateSchemas(productCardSuccessSchema), toolErrorSchema),
     wb_search_by_query: objectUnion(...liveAggregateSchemas(searchSuccessSchema), toolErrorSchema),
+    wb_check_by_query: objectUnion(...liveAggregateSchemas(checkSuccessSchema), toolErrorSchema),
     wb_recommendations_by_product: objectUnion(...liveAggregateSchemas(recommendationsSuccessSchema), toolErrorSchema),
     wb_seller_reviews: objectUnion(sellerReviewsSuccessSchema, toolErrorSchema),
     wb_product_images: objectUnion(...liveAggregateSchemas(imagesSuccessSchema), toolErrorSchema),

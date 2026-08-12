@@ -429,13 +429,16 @@ export const createMcpMessageHandler = ({
             }
         }
     };
-    // `needsBridge` declares which tools depend on the bridge, so the wake-up is applied once at the dispatch
-    // point below instead of being remembered inside each handler. `wb_product_images` is deliberately false:
-    // it is a public image-CDN lookup and does not use the bridge.
+
+    // `needsBridge` declares which operational tools depend on the bridge, so the wake-up is applied once at
+    // the dispatch point below instead of being remembered inside each handler. A tool added without the flag
+    // never nudges; a tool added with it cannot forget to. `local_bridge_status` is deliberately false because
+    // its read-only contract forbids a diagnostic call from pulling forward peer-token creation.
+    // `wb_product_images` is also false: it is a public image-CDN lookup that never uses the bridge.
     const toolHandlers = new Map([
         [
             'local_bridge_status',
-            { needsBridge: true, run: async (id) => sendResult(id, textResult({ ok: true, ...getBridgeStatus() })) },
+            { needsBridge: false, run: async (id) => sendResult(id, textResult({ ok: true, ...getBridgeStatus() })) },
         ],
         [
             'wb_product_card',
@@ -444,6 +447,10 @@ export const createMcpMessageHandler = ({
         [
             'wb_search_by_query',
             { needsBridge: true, run: (id, args) => handleBrowserJob(id, 'wb_search_by_query', 'search_by_query', args) },
+        ],
+        [
+            'wb_check_by_query',
+            { needsBridge: true, run: (id, args) => handleBrowserJob(id, 'wb_check_by_query', 'check_by_query', args) },
         ],
         [
             'wb_recommendations_by_product',

@@ -69,6 +69,9 @@ export const PEER_WAKE_COOLDOWN_MS = 2000;
 // A peer that has neither connected nor completed a handshake by now is wedged, not slow. Without this the
 // socket would sit open and silent, emitting no close and so scheduling no further attempt.
 export const PEER_HANDSHAKE_TIMEOUT_MS = 5000;
+export const PEER_TOKEN_READ_TIMEOUT_MS = 1000;
+export const PEER_TOKEN_CREATE_TIMEOUT_MS = 5000;
+export const PEER_PENDING_UPGRADE_LIMIT = 16;
 // close() only starts the closing handshake; a peer that never answers the Close frame would otherwise hold
 // the TCP handle in CLOSING until the process exits — one leaked handle per retry against a silent listener.
 // After this grace the client transport destroys its socket outright.
@@ -102,6 +105,12 @@ export const PRODUCT_CARD_CONCURRENCY = 4;
 export const MAX_SEARCH_PAGES_PER_QUERY = 50;
 export const MAX_SEARCH_REQUEST_UNITS = 1000;
 export const SEARCH_CONCURRENCY = 4;
+export const MAX_CHECK_QUERIES = 100;
+export const MAX_CHECK_PAGES_PER_QUERY = 10;
+export const MAX_CHECK_SEARCH_REQUESTS = 1000;
+// Keep per-job in-flight work conservative; the extension independently owns
+// the service-worker-wide dispatch budget of 30 WB requests per 2.5 seconds.
+export const CHECK_QUERY_CONCURRENCY = 4;
 export const MAX_RECOMMENDATION_PAGES_PER_PRODUCT = 50;
 export const MAX_RECOMMENDATION_REQUEST_UNITS = 1000;
 export const MAX_SELLER_REVIEW_EXPORTS = 50;
@@ -139,18 +148,24 @@ export const AUTHORIZATION_SCOPE_MAX_MS = positiveIntegerEnv('ECOMET_AUTHORIZATI
 // single-round-trip ceiling would expire it mid-job. Its executor stops one poll cadence before this
 // deadline, so the scope outlives the work instead of cancelling it.
 export const SELLER_AUTHORIZATION_SCOPE_MAX_MS = positiveIntegerEnv('ECOMET_SELLER_AUTHORIZATION_SCOPE_MAX_MS', 60 * 60 * 1000);
+// The executor reserves this much of the signed token for the tail of a job, and the reserve has to
+// cover every download attempt the retry loop may make, not just the first. Reserving one attempt
+// here while the executor reserves all of them is what left a token outliving the scope ceiling with
+// a 60s gap between the job deadline and the scope timer: the second attempt then died as
+// BROWSER_JOB_REAUTHORIZATION_REQUIRED instead of the accurate SELLER_JOB_DEADLINE_EXCEEDED.
+export const SELLER_JOB_DOWNLOAD_RESERVE_MS = SELLER_DOWNLOAD_TIMEOUT_MS * MAX_SELLER_REVIEW_DOWNLOAD_ATTEMPTS;
 export const sellerJobDurationMs = (scopeMaxMs, configuredDuration) => {
     if (!Number.isSafeInteger(scopeMaxMs) || scopeMaxMs <= 0) {
         throw new RangeError('Seller authorization scope maximum must be a positive safe integer');
     }
     const scopeCeiling = Math.max(1, scopeMaxMs - MIN_REQUEST_TIMEOUT_MS);
-    const defaultDuration = scopeMaxMs - SELLER_DOWNLOAD_TIMEOUT_MS;
+    const defaultDuration = scopeMaxMs - SELLER_JOB_DOWNLOAD_RESERVE_MS;
     const candidate = Number.isSafeInteger(configuredDuration) && configuredDuration > 0 ? configuredDuration : defaultDuration;
     return Math.min(Math.max(1, candidate > 0 ? candidate : scopeCeiling), scopeCeiling);
 };
 export const SELLER_JOB_MAX_DURATION_MS = sellerJobDurationMs(
     SELLER_AUTHORIZATION_SCOPE_MAX_MS,
-    positiveIntegerEnv('ECOMET_SELLER_JOB_MAX_DURATION_MS', SELLER_AUTHORIZATION_SCOPE_MAX_MS - SELLER_DOWNLOAD_TIMEOUT_MS)
+    positiveIntegerEnv('ECOMET_SELLER_JOB_MAX_DURATION_MS', SELLER_AUTHORIZATION_SCOPE_MAX_MS - SELLER_JOB_DOWNLOAD_RESERVE_MS)
 );
 export const HANDOFF_MAX_DRAIN_MS = positiveIntegerEnv('ECOMET_HANDOFF_MAX_DRAIN_MS', 10_000);
 export const MAX_ACTIVE_AUTHORIZATION_SCOPES = positiveIntegerEnv('ECOMET_MAX_ACTIVE_AUTHORIZATION_SCOPES', 32);
@@ -189,7 +204,6 @@ export const resolvePeerTokenDir = ({ platform = process.platform, env = process
 export const resolveResultDir = (options = {}) =>
     options.env?.ECOMET_LOCAL_AGENT_RESULT_DIR || (!options.env && process.env.ECOMET_LOCAL_AGENT_RESULT_DIR) || resolveLocalStateDir(options);
 
-export const PEER_TOKEN_DIR = resolvePeerTokenDir();
 export const resolveArtifactDir = (options = {}) => {
     const configuredDirectory = options.env?.ECOMET_LOCAL_AGENT_ARTIFACT_DIR || (!options.env && process.env.ECOMET_LOCAL_AGENT_ARTIFACT_DIR);
     if (configuredDirectory) return configuredDirectory;
@@ -197,7 +211,7 @@ export const resolveArtifactDir = (options = {}) => {
     return (options.platform || process.platform) === 'win32' ? win32.join(stateDirectory, 'artifacts') : posix.join(stateDirectory, 'artifacts');
 };
 
-export const LOCAL_STATE_DIR = resolveLocalStateDir();
+export const PEER_TOKEN_DIR = resolvePeerTokenDir();
 export const RESULT_DIR = resolveResultDir();
 export const ARTIFACT_DIR = resolveArtifactDir();
 export const ARTIFACT_RETENTION_MS = positiveIntegerEnv('ECOMET_ARTIFACT_RETENTION_MS', 24 * 60 * 60 * 1000);

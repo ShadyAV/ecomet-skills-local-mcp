@@ -19,6 +19,7 @@ export const serverInstructions =
     'Для живых данных Wildberries сначала выберите локальный типизированный инструмент по намерению пользователя: ' +
     'остаток, остатки, сток, наличие, склады, размеры, цена, описание, характеристики или карточка товара — wb_product_card; ' +
     'поиск, поисковая выдача, позиция, место или топ товаров по запросу — wb_search_by_query; ' +
+    'проверка, находится ли конкретный артикул в поиске по одной или нескольким фразам — wb_check_by_query; ' +
     'рекомендации, похожие товары или рекомендательная полка — wb_recommendations_by_product; ' +
     'скачать или экспортировать отчёт по отзывам продавца — wb_seller_reviews; ' +
     'фото, фотографии, картинки, изображения или галерея — wb_product_images. ' +
@@ -28,7 +29,16 @@ export const serverInstructions =
 export const tools = [
     {
         name: 'local_bridge_status',
-        description: 'Check whether the local e-Comet Chrome extension is connected to this MCP server.',
+        description:
+            'Reports extensionConnected, the stable state code, and actionable recommendedAction. Translate the stable state into a short user-facing explanation; keep structured protocol codes in English. ' +
+            'ready means only that the local bridge, extension protocol, and an observed WB or seller browser context are available; each typed tool still decides its own live WB or seller prerequisites. ' +
+            'Use these Russian examples when speaking to a Russian-language user: ' +
+            'waiting_for_extension: «Локальный bridge запущен и ждёт подключения расширения.» ' +
+            'extension_connected_no_wb_tab: «Расширение подключено; откройте авторизованную вкладку Wildberries.» ' +
+            'extension_context_unknown: «Расширение подключено, но эта версия не сообщает контекст вкладок; обновите расширение. Конкретный инструмент всё ещё проверит свои условия сам.» ' +
+            'peer_context_unknown: «Расширение доступно через другой локальный процесс, но он не передаёт контекст вкладок; перезапустите или обновите desktop hosts. Не делайте вывод, что устарело само расширение.» ' +
+            'ready: «Локальный bridge и расширение подключены; найдена вкладка Wildberries. Готовность конкретного задания проверит выбранный инструмент.» ' +
+            'peer_unavailable: «Мостом уже владеет другой агент, и связаться с ним не удалось — работайте в нём.»',
         inputSchema: toolInputSchemas.local_bridge_status,
         outputSchema: toolOutputSchemas.local_bridge_status,
         annotations: {
@@ -70,6 +80,21 @@ export const tools = [
             resultPathGuidance,
         inputSchema: toolInputSchemas.wb_search_by_query,
         outputSchema: toolOutputSchemas.wb_search_by_query,
+        annotations: liveToolAnnotations,
+    },
+    {
+        name: 'wb_check_by_query',
+        description:
+            'Check whether one Wildberries article appears in search results for 1-100 phrases. Use for Russian requests about проверка артикула в выдаче, находится ли артикул по фразе, индексируется ли товар, or по каким запросам виден товар. ' +
+            authorizationWorkflow +
+            'Authorize with job {type:"check_by_query",product_id:integer,queries:[string,...]}; send one positive product ID and 1-100 unique non-empty phrases. Page depth is fixed by the service; do not supply it. ' +
+            'Read queries[] separately. For found:true, report only that the product was found for the phrase. For found:false, report only that the product was not found for the phrase. ' +
+            'Do not mention pagesChecked, completionReason, page limits, or brand-filtered depth unless the user explicitly asks for diagnostics. Never present pagesChecked as a page, position, rank, or search depth in ordinary unfiltered search. ' +
+            'request_failed and card_failed mean the check was incomplete; report that the check was incomplete rather than reporting the product as not found. ' +
+            'Do not claim that the product is absent from all Wildberries search results. Results are a current WB-session snapshot. ' +
+            resultPathGuidance,
+        inputSchema: toolInputSchemas.wb_check_by_query,
+        outputSchema: toolOutputSchemas.wb_check_by_query,
         annotations: liveToolAnnotations,
     },
     {

@@ -3,6 +3,12 @@
 Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` command. The server has no npm runtime
 dependencies; all required source modules are included in this directory. Node.js 22+ is required.
 
+`local_bridge_status` distinguishes bridge startup, extension waiting, Wildberries-tab readiness,
+update needs, and pairing failures, and returns a recommended next action. Peer-token storage affects
+pairing only; if a second agent reports `peer_unavailable`, continue in the agent that owns the bridge.
+Browser jobs may still return `LOCAL_STORAGE_FAILED` when result or artifact directories are
+unwritable; storage classification, fallback, and retry work is deferred.
+
 The canonical source and tests live under `e-comet-local-mcp/` in the private skills repository. This plugin contains a
 release snapshot of its `src/` directory.
 
@@ -15,6 +21,8 @@ Each result file is UTF-8 NDJSON with one fetched unit per line:
 
 - product card: `{ jobId, nmId, key, url, response }`;
 - search: `{ jobId, queryIndex, query, page, url, response }`;
+- check-by-query card: `{ jobId, kind: "card", product_id, url, response }`;
+- check-by-query search: `{ jobId, kind: "search", query, page, url, response }`;
 - recommendations: `{ jobId, nmId, page, url, response }`.
 
 The original WB payload is at `response.data.body`. Product-card responses may additionally contain
@@ -30,6 +38,7 @@ Local tools:
 
 - `wb_product_card` — discovers and executes signed live product-card requests;
 - `wb_search_by_query` — discovers and executes signed live WB search requests;
+- `wb_check_by_query` — checks whether one article appears in search for up to 100 phrases, without reporting a position;
 - `wb_recommendations_by_product` — discovers and executes signed recommendation-shelf requests;
 - `wb_seller_reviews` — exports original WB seller-review XLSX reports through the authenticated seller portal;
 - `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
