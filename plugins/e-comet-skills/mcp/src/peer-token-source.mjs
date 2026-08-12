@@ -25,7 +25,6 @@ export const createPeerTokenSource = ({ load, loadOrCreate, readDeadlineMs = 100
                 .catch((error) => ({ ok: false, reason: classifyFailure(error) })),
             new Promise((resolve) => {
                 timer = setTimeout(() => resolve({ ok: false, reason: 'io_error', expired: true }), deadlineMs);
-                timer.unref?.();
             }),
         ]).finally(() => clearTimeout(timer));
         return { identity, promise, current };
