@@ -16,6 +16,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "^mcp__(?:plugin_e-comet-skills_)?e[-_]comet[-_]local__.*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/system-message-preview.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "^mcp__(?:plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:wb_product_card|wb_search_by_query|wb_recommendations_by_product|wb_seller_reviews)$",
         "hooks": [
           {
