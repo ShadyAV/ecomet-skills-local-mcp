@@ -1,4 +1,5 @@
 import {
+    CHECK_QUERY_CONCURRENCY,
     DEFAULT_RETURNED_PRODUCTS,
     MAX_CONSECUTIVE_SELLER_EXPORT_FAILURES,
     MAX_CONSECUTIVE_SELLER_POLL_FAILURES,
@@ -6,6 +7,9 @@ import {
     MAX_BROWSER_JOB_TOKEN_BYTES,
     MAX_BROWSER_JOB_TEXT_LENGTH,
     MAX_BROWSER_JOB_URL_LENGTH,
+    MAX_CHECK_PAGES_PER_QUERY,
+    MAX_CHECK_QUERIES,
+    MAX_CHECK_SEARCH_REQUESTS,
     MAX_PRODUCT_CARD_PRODUCTS,
     MAX_PRODUCT_CARD_REQUEST_UNITS,
     MAX_RECOMMENDATION_PAGES_PER_PRODUCT,
@@ -39,6 +43,20 @@ import {
     validTimeout,
 } from './wb-domain.mjs';
 
+const CHECK_SEARCH_DEFAULT_PARAMS = Object.freeze({
+    curr: 'rub',
+    dest: '-446115',
+    hide_dtype: '15',
+    hide_vflags: '4294967296',
+    inheritFilters: 'false',
+    lang: 'ru',
+    locale: 'ru',
+    sort: 'popular',
+    spp: '30',
+    suppressSpellcheck: 'false',
+    uclusters: '0',
+});
+
 const validJobTimeout = (job) => job.timeout === undefined || validTimeout(job.timeout);
 const invalidDescriptor = (cause) =>
     new ToolExecutionError(
@@ -68,6 +86,14 @@ const validProductArticle = (article) =>
     Number.isSafeInteger(article.nm) &&
     article.nm > 0 &&
     Object.values(article).every((value) => typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value)));
+
+const cardUrlMatchesArticle = (cardUrl, article) => {
+    try {
+        return Number(new URL(cardUrl).searchParams.get('nm')) === article;
+    } catch {
+        return false;
+    }
+};
 const validIsoDate = (value) => {
     if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
     const date = new Date(`${value}T00:00:00.000Z`);
@@ -137,6 +163,33 @@ export const validateAuthorizedJobLimits = (authorization) => {
             if (queries.reduce((total, [, pages]) => total + pages, 0) > MAX_SEARCH_REQUEST_UNITS)
                 throw new Error(`Browser search job requires at most ${MAX_SEARCH_REQUEST_UNITS} total pages`);
             if (!descriptorPagesAllowed(job.endpoint, job.params, queries))
+                throw new Error('Invalid browser job assembled endpoint URL');
+            return;
+        }
+
+        if (authorization.jobType === 'check_by_query') {
+            const queries = job.queries;
+            if (job.type !== 'wb-check-by-query') throw new Error('Invalid check-by-query descriptor type');
+            if (!Number.isSafeInteger(job.article) || job.article <= 0)
+                throw new Error('Invalid check-by-query product');
+            if (!validEndpoint(job.cardUrl) || !cardUrlMatchesArticle(job.cardUrl, job.article))
+                throw new Error('Invalid check-by-query card URL');
+            if (!validEndpoint(job.endpoint)) throw new Error('Invalid browser job endpoint');
+            if (!validParams(job.params) || job.params.fbrand !== undefined || job.params.resultset !== undefined)
+                throw new Error('Invalid browser job params');
+            if (
+                !Array.isArray(queries) ||
+                queries.length < 1 ||
+                queries.length > MAX_CHECK_QUERIES ||
+                !queries.every((query) => boundedText(query) && query.trim().length > 0) ||
+                new Set(queries).size !== queries.length
+            )
+                throw new Error(`Browser check-by-query job requires 1-${MAX_CHECK_QUERIES} unique queries`);
+            if (job.maxPages !== MAX_CHECK_PAGES_PER_QUERY)
+                throw new Error(`Browser check-by-query job requires exactly ${MAX_CHECK_PAGES_PER_QUERY} pages per query`);
+            if (queries.length * job.maxPages > MAX_CHECK_SEARCH_REQUESTS)
+                throw new Error(`Browser check-by-query job requires at most ${MAX_CHECK_SEARCH_REQUESTS} search requests`);
+            if (!descriptorCheckPagesAllowed(job, queries))
                 throw new Error('Invalid browser job assembled endpoint URL');
             return;
         }
@@ -285,6 +338,27 @@ const descriptorPagesAllowed = (endpoint, params, scopes) =>
         return true;
     });
 
+const buildCheckDescriptorUrl = (job, query, page, brandId) => {
+    const url = new URL(buildDescriptorUrl(job.endpoint, job.params, query, page));
+    // FE-1290's signer omitted the normal WB search context. Supply only missing values used by wb_search_by_query.
+    for (const [key, value] of Object.entries(CHECK_SEARCH_DEFAULT_PARAMS)) {
+        if (!url.searchParams.has(key)) url.searchParams.set(key, value);
+    }
+    // Match front's checkAvailabilityForArticle flow: catalog search narrowed by the card-derived brand.
+    url.searchParams.set('resultset', 'catalog');
+    url.searchParams.set('fbrand', String(brandId));
+    return url.toString();
+};
+
+const descriptorCheckPagesAllowed = (job, queries) =>
+    queries.every((query) => {
+        for (let page = 1; page <= job.maxPages; page += 1) {
+            // The extension derives fbrand from WB card data, so reserve URL space for every valid brand identity.
+            if (!isAllowedWbUrl(buildCheckDescriptorUrl(job, query, page, Number.MAX_SAFE_INTEGER))) return false;
+        }
+        return true;
+    });
+
 const fillTemplate = (template, article) =>
     template.replace(/\{(\w+)\}/g, (_match, key) => {
         const value = Object.prototype.hasOwnProperty.call(article, key) ? article[key] : undefined;
@@ -401,6 +475,147 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
         pagesFailed: fetched.length - succeeded,
         productFilterApplied: Boolean(projection.productNmIds),
         productLimitPerQuery: projection.productNmIds ? undefined : projection.productLimitPerScope,
+        queries,
+    };
+};
+
+const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, writer }) => {
+    // product_id is the public tool terminology; article is retained only in the signed wire descriptor.
+    const productId = job.article;
+    let cardResponse;
+    try {
+        cardResponse = await requestWbFetch(job.cardUrl, job.timeout ?? REQUEST_TIMEOUT_MS, authorizationId);
+        await writer.append({ jobId: job.jobId, kind: 'card', product_id: productId, url: job.cardUrl, response: cardResponse });
+    } catch (error) {
+        rethrowAuthorizationError(error);
+        await writer.append({ jobId: job.jobId, kind: 'card', product_id: productId, url: job.cardUrl, error: error.message });
+        return {
+            ok: false,
+            status: 'failed',
+            complete: false,
+            product_id: productId,
+            requestsMade: 1,
+            queries: job.queries.map((query) => ({
+                query,
+                found: false,
+                pagesChecked: 0,
+                completionReason: 'card_failed',
+                error: error.message,
+            })),
+        };
+    }
+
+    const cardProducts = responseProducts(cardResponse);
+    const cardProduct = cardProducts.find((product) => numberOrUndefined(product?.id) === productId);
+    const brandId = numberOrUndefined(cardProduct?.brandId);
+    if (!isSuccessfulWbResponse(cardResponse) || !Number.isSafeInteger(brandId) || brandId <= 0) {
+        const error = !isSuccessfulWbResponse(cardResponse)
+            ? cardResponse?.error || cardResponse?.data?.statusText || 'WB product-card request failed'
+            : 'WB product card did not contain a valid brand';
+        return {
+            ok: false,
+            status: 'failed',
+            complete: false,
+            product_id: productId,
+            product: {
+                nmId: numberOrUndefined(cardProduct?.id) ?? productId,
+                name: typeof cardProduct?.name === 'string' ? cardProduct.name : undefined,
+                brand: typeof cardProduct?.brand === 'string' ? cardProduct.brand : undefined,
+            },
+            requestsMade: 1,
+            queries: job.queries.map((query) => ({
+                query,
+                found: false,
+                pagesChecked: 0,
+                completionReason: 'card_failed',
+                error,
+            })),
+        };
+    }
+
+    let searchRequestsMade = 0;
+    const queries = await runWithConcurrency(job.queries, CHECK_QUERY_CONCURRENCY, async (query) => {
+        let previousFingerprint;
+        for (let page = 1; page <= job.maxPages; page += 1) {
+            const url = buildCheckDescriptorUrl(job, query, page, brandId);
+            let response;
+            try {
+                searchRequestsMade += 1;
+                response = await requestWbFetch(url, job.timeout ?? REQUEST_TIMEOUT_MS, authorizationId);
+                await writer.append({ jobId: job.jobId, kind: 'search', query, page, url, response });
+            } catch (error) {
+                rethrowAuthorizationError(error);
+                await writer.append({ jobId: job.jobId, kind: 'search', query, page, url, error: error.message });
+                return {
+                    query,
+                    found: false,
+                    pagesChecked: page - 1,
+                    completionReason: 'request_failed',
+                    error: error.message,
+                };
+            }
+            const body = response?.data?.body;
+            const hasProductArray = Array.isArray(body?.products);
+            // WB's current valid no-results response is metadata-only and omits products entirely.
+            const isMetadataOnlyNoResult =
+                isSuccessfulWbResponse(response) &&
+                body !== null &&
+                typeof body === 'object' &&
+                typeof body.name === 'string' &&
+                typeof body.query === 'string' &&
+                body.shardKey === 'merger' &&
+                body.search_result !== null &&
+                typeof body.search_result === 'object' &&
+                !Object.hasOwn(body, 'products');
+            const products = hasProductArray ? responseProducts(response) : [];
+            if (!isSuccessfulWbResponse(response) || (!hasProductArray && !isMetadataOnlyNoResult)) {
+                return {
+                    query,
+                    found: false,
+                    pagesChecked: page - 1,
+                    completionReason: 'request_failed',
+                    error: response?.error || response?.data?.statusText || 'WB search request failed',
+                };
+            }
+
+            const position = products.findIndex((product) => numberOrUndefined(product?.id) === productId);
+            if (position >= 0) {
+                return {
+                    query,
+                    found: true,
+                    pagesChecked: page,
+                    completionReason: 'found',
+                };
+            }
+            if (products.length === 0) {
+                return { query, found: false, pagesChecked: page, completionReason: 'empty_page' };
+            }
+            const fingerprint = JSON.stringify(products.map((product) => numberOrUndefined(product?.id) ?? null));
+            if (fingerprint === previousFingerprint) {
+                return { query, found: false, pagesChecked: page, completionReason: 'repeated_page' };
+            }
+            previousFingerprint = fingerprint;
+        }
+        return {
+            query,
+            found: false,
+            pagesChecked: job.maxPages,
+            completionReason: 'page_limit',
+        };
+    });
+
+    const successfulQueries = queries.filter((query) => query.completionReason !== 'request_failed').length;
+    return {
+        ok: successfulQueries > 0,
+        status: normalizeStatus(successfulQueries, queries.length),
+        complete: successfulQueries === queries.length,
+        product_id: productId,
+        product: {
+            nmId: numberOrUndefined(cardProduct?.id) ?? productId,
+            name: typeof cardProduct?.name === 'string' ? cardProduct.name : undefined,
+            brand: typeof cardProduct?.brand === 'string' ? cardProduct.brand : undefined,
+        },
+        requestsMade: 1 + searchRequestsMade,
         queries,
     };
 };
@@ -1011,6 +1226,13 @@ export const executeAuthorizedBrowserJob = async ({
             requestWbFetch,
             writer,
             projection,
+        });
+    } else if (authorization.jobType === 'check_by_query') {
+        result = await executeCheckByQueryJob({
+            authorizationId: authorization.authorizationId,
+            job: authorization.job,
+            requestWbFetch,
+            writer,
         });
     } else if (authorization.jobType === 'product_card') {
         result = await executeProductCardJob({

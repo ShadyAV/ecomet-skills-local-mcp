@@ -111,7 +111,9 @@ export const resetFrameBuffer = (state) => {
 // Defaults describe the server side of the connection: inbound frames must be masked and control replies go
 // out unmasked. The client transport passes `requireMasked: false` (a masked server frame is a protocol
 // violation it must fail on, RFC 6455 §5.1) and `replyEncoder: encodeMaskedFrame` so its close echoes and
-// pongs stay legal client frames.
+// pongs stay legal client frames. `maxApplicationMessages` lets the extension route parse exactly one
+// application message per turn so it can await its handler before the next frame is decoded; the count of
+// messages delivered is returned so that caller can tell an empty parse from a delivered one.
 export const parseFrames = (
     state,
     chunk,
@@ -131,7 +133,7 @@ export const parseFrames = (
         // Enough to read any header, or everything there is when that is less. The frame body is merged only
         // after the length below proves it has fully arrived.
         materialize(state, Math.min(HEADER_MAX_BYTES, bufferedBytes(state)));
-        if (state.buffer.length < 2) return;
+        if (state.buffer.length < 2) return applicationMessages;
         const first = state.buffer[0];
         const second = state.buffer[1];
         const fin = (first & 0x80) !== 0;
@@ -157,11 +159,11 @@ export const parseFrames = (
             throw new Error('Server WebSocket frames must not be masked');
         }
         if (length === 126) {
-            if (state.buffer.length < 4) return;
+            if (state.buffer.length < 4) return applicationMessages;
             length = state.buffer.readUInt16BE(2);
             offset = 4;
         } else if (length === 127) {
-            if (state.buffer.length < 10) return;
+            if (state.buffer.length < 10) return applicationMessages;
             const bigLength = state.buffer.readBigUInt64BE(2);
             if (bigLength > BigInt(MAX_FRAME_BYTES)) {
                 throw new Error('WebSocket frame is too large');
@@ -181,7 +183,7 @@ export const parseFrames = (
         const frameLength = offset + maskBytes + length;
         // Measured against everything received, not only what has been merged: a frame still arriving stays
         // in the chunk list untouched, and is copied once here when it is finally complete.
-        if (bufferedBytes(state) < frameLength) return;
+        if (bufferedBytes(state) < frameLength) return applicationMessages;
         materialize(state, frameLength);
 
         const payload = Buffer.from(state.buffer.subarray(offset + maskBytes, frameLength));
@@ -210,8 +212,6 @@ export const parseFrames = (
                 onMessage(message.toString('utf8'));
                 applicationMessages += 1;
                 if (applicationMessages >= maxApplicationMessages) return applicationMessages;
-                applicationMessages += 1;
-                if (applicationMessages >= maxApplicationMessages) return applicationMessages;
             }
         } else if (opcode === 0x1) {
             if (state.fragmentOpcode) {
@@ -219,8 +219,6 @@ export const parseFrames = (
             }
             if (fin) {
                 onMessage(payload.toString('utf8'));
-                applicationMessages += 1;
-                if (applicationMessages >= maxApplicationMessages) return applicationMessages;
                 applicationMessages += 1;
                 if (applicationMessages >= maxApplicationMessages) return applicationMessages;
             } else {
@@ -235,7 +233,7 @@ export const parseFrames = (
                 closeFrameSent = true;
             }
             onClose(closeFrameSent);
-            return;
+            return applicationMessages;
         } else if (opcode === 0x9) {
             if (!state.socket.destroyed && state.socket.writable) {
                 state.socket.write(replyEncoder(payload, 0x0a));
