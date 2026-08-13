@@ -221,8 +221,7 @@ export const ARTIFACT_MAX_JOB_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_JO
 export const ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_FILES', 1000);
 export const ARTIFACT_MAX_CHUNK_BYTES = 256 * 1024;
 export const SESSION_NONCE = randomUUID();
-// Temporary local unpacked extension ID for personal testing (was CWS: apeallgchpgibifmbgefkhifidihmodh).
-export const OFFICIAL_EXTENSION_ID = 'kfdeggpflkbafbjdhbcmfgeibhdnmaio';
+export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
 export const EXTENSION_ID_OVERRIDE_ENABLED =
     process.env.ECOMET_ENABLE_EXTENSION_ID_OVERRIDE === '1' && ['test', 'development'].includes(process.env.NODE_ENV);
 const extensionIdOverride = new Set(
