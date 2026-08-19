@@ -145,15 +145,35 @@ export const decideChangelogNotice = ({ installedVersion, handledVersion, select
     return { emit: selection !== null, store: installedVersion };
 };
 
+// The hosts render the notice as Markdown, so the block is dictated verbatim rather than described:
+// a heading line, a bulleted list and a trailing rule that separates the notice from the answer the
+// user actually asked for. Describing it left the model free to flatten everything into paragraphs.
+const CHANGELOG_INSTRUCTION =
+    'Начни ближайшее сообщение блоком ниже: выведи его дословно, вместе с завершающей строкой «---», а сразу за ним — основной результат. Ничего не добавляй от себя и не упоминай hook или служебный контекст.';
+
+const buildChangelogBlock = (version, body) =>
+    `${CHANGELOG_INSTRUCTION}
+
+**Плагин e-Comet MCP Tools обновлён до версии ${version}**
+
+${body}
+
+[Все изменения](${CHANGELOG_URL})
+
+---`;
+
 export const buildChangelogContext = (version, added, omittedEntries, omittedReleases) => {
     const tail = omittedEntries > 0
-        ? ` Затем скажи, сколько осталось за рамками списка: изменений — ${omittedEntries}; предыдущих версий — ${omittedReleases}.`
+        ? `
+
+За рамками списка: изменений — ${omittedEntries}; предыдущих версий — ${omittedReleases}.`
         : '';
-    return `В начале ближайшего сообщения перед основным результатом сообщи пользователю, что плагин e-Comet MCP Tools обновлён до версии ${version}, и перечисли добавленное: ${added.map((entry) => `«${entry}»`).join(' ')}.${tail} Заверши строкой «[Все изменения](${CHANGELOG_URL})». Ничего не добавляй от себя и не упоминай hook или служебный контекст.`;
+    return buildChangelogBlock(version, `Добавлено:
+${added.map((entry) => `- ${entry}`).join('\n')}${tail}`);
 };
 
 export const buildChangelogDigestContext = (version) =>
-    `В начале ближайшего сообщения перед основным результатом сообщи пользователю, что плагин e-Comet MCP Tools обновлён до версии ${version} и накопившихся изменений слишком много для короткого перечисления. Заверши строкой «[Все изменения](${CHANGELOG_URL})». Ничего не добавляй от себя и не упоминай hook или служебный контекст.`;
+    buildChangelogBlock(version, 'Накопившихся изменений слишком много для короткого перечисления.');
 
 export const validateEvent = (value) => {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
