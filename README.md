@@ -1,4 +1,4 @@
-# e-Comet Skills
+# <img src="plugins/e-comet-skills/assets/logo.png" alt="" width="45" height="45" align="absmiddle"> e-Comet Skills
 
 Инструменты e-Comet помогают селлерам работать с Wildberries: анализировать данные кабинета по API и через ЛК ВБ, а также получать актуальные данные напрямую с Wildberries.
 
@@ -13,23 +13,29 @@
 > [!IMPORTANT]
 > Если вы хотите Полную установку, то шаги, описанные в Базовой, делать не нужно.
 
-#### Claude
+<details>
+<summary>Claude</summary>
 
 1. В левом нижнем углу нажмите на `Имя` → `Settings` → `Connectors` → `Add` → `Add custom connector`.
 2. `Name`: e-Comet, `Remote MCP server URL`: https://mcp.e-comet.io/mcp → `Add`.
 3. У коннектора `e-comet` нажмите `Connect` и введите почту.
 
-#### ChatGPT
+</details>
+
+<details>
+<summary>ChatGPT</summary>
 
 1. В левом нижнем углу нажмите на `Имя` → `Settings` → `Security and login` → `Developer mode` → Включить.
 2. На панели слева `Plugins` → `+`.
 3. `Name`: e-Comet, `Connection`: https://mcp.e-comet.io/mcp, `Authentication`: OAuth, `I understand and want to continue`: Чек → `Create`.
 4. В окне `Add e-Comet to ChatGPT` нажмите `Sign in with e-Comet` и введите почту.
 
+</details>
+
 ### Полная
 
 > [!IMPORTANT]
-> Необходим установленный ИИ-агент (Claude или ChatGPT) в виде десктопного приложения с платной подпиской.
+> Необходим ИИ-агент с поддержкой плагинов: Claude Desktop (Cowork), Claude Code, ChatGPT Desktop (Codex) или Codex CLI с платной подпиской.
 
 #### Браузер и расширение
 
@@ -39,58 +45,46 @@
 3. Активируйте расширение API-ключом из [аккаунта e-Comet](https://app.e-comet.io/account).
 4. Войдите в свой аккаунт на [wildberries.ru](https://www.wildberries.ru/lk).
 
-#### Claude Desktop (Cowork)
+<details>
+<summary>Claude Desktop (Cowork)</summary>
 
 1. В левом нижнем углу нажмите на `Имя` → `Settings` → `Capabilities`, включите `Allow network egress` и выберите `All domains` в `Domain allowlist`.
 2. Оставаясь в окне настроек, откройте слева `Plugins` → `Add` → `Add marketplace` → `Add from repository`.
-3. Укажите `https://github.com/ShadyAV/ecomet-skills-local-mcp`, нажмите `Use`, установите `Sync automatically` и нажмите `Sync`.
+3. Укажите `https://github.com/e-comet/skills`, нажмите `Use`, установите `Sync automatically` и нажмите `Sync`.
 4. Нажмите `+` на карточке `e-Comet MCP Tools`. В окне-подтверждении нажмите `Continue`.
 5. Нажмите на ⚙️ на карточке `e-Comet MCP Tools`. В разделе `Connectors` у `e-comet` нажмите `Install`. Нажмите `Add`. Нажмите `Connect` и введите почту.
 
-#### ChatGPT Desktop (Codex)
+</details>
+
+<details>
+<summary>Claude Code</summary>
+
+```bash
+claude plugin marketplace add https://github.com/e-comet/skills
+claude plugin install e-comet-skills@e-comet-skills
+```
+
+</details>
+
+<details>
+<summary>ChatGPT Desktop (Codex)</summary>
 
 1. В левом нижнем углу нажмите на `Имя` → `Settings` → `Configuration` и включите `Allow network access`.
-2. Откройте `Plugins`, нажмите `+` → `Add marketplace`. Укажите `https://github.com/ShadyAV/ecomet-skills-local-mcp` в поле `Source` и нажмите `Add marketplace`.
+2. Откройте `Plugins`, нажмите `+` → `Add marketplace`. Укажите `https://github.com/e-comet/skills` в поле `Source` и нажмите `Add marketplace`.
 3. Там же, в `Plugins`, в разделе `Personal` нажмите `e-Comet MCP Tools` и в разделе `Hooks` выберите `Trust all`.
 4. Убедитесь, что оба MCP-сервера, `E-comet` и `E-comet-local`, готовы к работе (справа ⚙️), иначе нажмите `Install` / `Connect` и введите почту.
 
-<a id="plugin-update"></a>
+</details>
 
-## Обновление плагина
-
-Для базовой установки ручные обновления не требуются: удалённый MCP-сервер обновляется автоматически. В полной установке агент может сообщить, что доступна новая версия плагина e-Comet MCP Tools. Эта проверка выполняется один раз за задачу после первого использования локального инструмента e-Comet.
-
-Если локальные инструменты не появились или не запускаются, такая проверка не сработает. Обновите плагин вручную по инструкции для вашего клиента.
-
-#### ChatGPT Desktop (Codex)
-
-1. Откройте `Settings` → `Plugins` → `Marketplace` → `e-Comet MCP Tools` и нажмите `Upgrade`.
-2. Если появится запрос, доверьте изменённому определению `Hooks`.
-3. Начните новую задачу.
-
-#### Codex CLI
+<details>
+<summary>Codex CLI</summary>
 
 ```bash
-codex plugin marketplace upgrade e-comet-skills
+codex plugin marketplace add https://github.com/e-comet/skills
 codex plugin add e-comet-skills@e-comet-skills
 ```
 
-После обновления начните новую задачу.
-
-#### Claude Code
-
-```bash
-claude plugin marketplace update e-comet-skills
-claude plugin update e-comet-skills@e-comet-skills
-```
-
-Выполните `/reload-plugins` или перезапустите Claude Code, затем начните новую задачу.
-
-#### Claude Desktop (Cowork)
-
-1. Откройте `Customize` → `Plugins` и обновите marketplace `e-comet-skills` через `Check for updates`.
-2. Откройте карточку `e-Comet MCP Tools` и нажмите `Update`.
-3. Начните новую задачу.
+</details>
 
 ## Начало работы
 
@@ -140,40 +134,81 @@ claude plugin update e-comet-skills@e-comet-skills
 
 </details>
 
+<a id="plugin-update"></a>
+
+## Обновление
+
+### Базовая установка
+
+Ручные обновления не требуются, так как обновляется только удаленный MCP-сервер.
+
+### Полная установка
+
+Рекомендуем регулярно обновлять установку для добавления нового функционала и улучшения стабильности текущего. При использовании функций полной установки агент сообщит, если доступно обновление. Список последних изменений доступен в [CHANGELOG](CHANGELOG.md).
+
+<a id="update-cowork"></a>
+
+<details>
+<summary>Claude Desktop (Cowork)</summary>
+
+1. В левом нижнем углу нажмите на `Имя` → `Settings` → `Plugins` → `Browse` → `Personal` → `...` у `e-comet-skills` → `Check for updates`.
+2. Снова зайдите в `Settings` → `Plugins` → `e-Comet MCP Tools` → `Update`. Если `Update` неактивна и `Last updated` совпадает с последней датой в [CHANGELOG](CHANGELOG.md) — значит у вас уже установлена последняя версия.
+
+</details>
+
+<a id="update-claude-code"></a>
+
+<details>
+<summary>Claude Code</summary>
+
+```bash
+claude plugin marketplace update e-comet-skills
+claude plugin update e-comet-skills@e-comet-skills
+```
+
+Выполните `/reload-plugins` или перезапустите Claude Code, затем начните новую задачу.
+
+</details>
+
+<a id="update-codex"></a>
+
+<details>
+<summary>ChatGPT Desktop (Codex)</summary>
+
+1. В левом нижнем углу нажмите на `Имя` → `Settings` → `Plugins` → `Marketplace` → `e-Comet MCP Tools` → `Upgrade`.
+
+</details>
+
+<a id="update-codex-cli"></a>
+
+<details>
+<summary>Codex CLI</summary>
+
+```bash
+codex plugin marketplace upgrade e-comet-skills
+codex plugin add e-comet-skills@e-comet-skills
+```
+
+После обновления начните новую задачу.
+
+</details>
+
 ## FAQ
 
 ### Зачем нужно расширение?
 
 Для надёжного выполнения запросов к Wildberries через браузер. Без расширения Wildberries может блокировать запросы или возвращать неполную информацию.
 
-### Работает ли это в Claude Code / Codex CLI?
+## Устранение неполадок
 
-Да. В обоих клиентах достаточно добавить marketplace и установить плагин.
-
-Claude Code:
-
-```bash
-claude plugin marketplace add https://github.com/ShadyAV/ecomet-skills-local-mcp
-claude plugin install e-comet-skills@e-comet-skills
-```
-
-Codex CLI:
-
-```bash
-codex plugin marketplace add https://github.com/ShadyAV/ecomet-skills-local-mcp
-codex plugin add e-comet-skills@e-comet-skills
-```
-
-## Если живые данные Wildberries не загружаются
-
-Проверьте, что:
+Если живые данные Wildberries не загружаются, проверьте, что:
 
 - Chrome запущен
 - расширение e-Comet установлено и активировано
 - открыта вкладка Wildberries, залогиненная под вашим аккаунтом
 - Node.js 22 или новее доступен в `PATH`
 
-Если проблема повторяется — обратитесь в поддержку e-Comet (виджет на сайте) или [создайте тикет](https://github.com/ShadyAV/ecomet-skills-local-mcp/issues), указав:
+Если проблема повторяется — обратитесь в поддержку e-Comet (виджет на сайте) или [создайте тикет](https://github.com/e-comet/skills/issues), указав:
 - ИИ-агент с платформой
 - Промпт
 - Ожидаемый результат

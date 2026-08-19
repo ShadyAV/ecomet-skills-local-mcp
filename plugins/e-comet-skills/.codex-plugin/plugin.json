@@ -1,13 +1,13 @@
 {
   "name": "e-comet-skills",
-  "version": "2026.8.11+codex.20260816195548",
+  "version": "2026.8.12",
   "description": "MCP tools for e-Comet seller analytics, live Wildberries data, and seller review exports.",
   "author": {
     "name": "e-Comet",
     "url": "https://e-comet.io/"
   },
-  "homepage": "https://github.com/ShadyAV/ecomet-skills-local-mcp",
-  "repository": "https://github.com/ShadyAV/ecomet-skills-local-mcp",
+  "homepage": "https://github.com/e-comet/skills",
+  "repository": "https://github.com/e-comet/skills",
   "license": "Apache-2.0",
   "keywords": ["mcp", "wildberries", "wb", "e-comet"],
   "mcpServers": {
