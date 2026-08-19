@@ -139,8 +139,8 @@ export const decideChangelogNotice = ({ installedVersion, handledVersion, select
     if (handledVersion === null) return { emit: false, store: installedVersion };
     const order = compareCalVer(handledVersion, installedVersion);
     if (order === null) return { emit: false, store: installedVersion };
-    // A stored version at or above the installed one is never lowered: hosts share this file while
-    // loading different plugin roots, and lowering it would re-announce the newer version forever.
+    // A stored version at or above the installed one is never lowered: a rollback would otherwise
+    // re-announce the version the user has already seen every time the plugin moves forward again.
     if (order >= 0) return { emit: false, store: null };
     return { emit: selection !== null, store: installedVersion };
 };
@@ -154,7 +154,7 @@ const CHANGELOG_INSTRUCTION =
 const buildChangelogBlock = (version, body) =>
     `${CHANGELOG_INSTRUCTION}
 
-**Плагин e-Comet MCP Tools обновлён до версии ${version}**
+**Установлено обновление плагина e-Comet MCP Tools версии ${version}**
 
 ${body}
 
@@ -285,8 +285,8 @@ export const resolveChangelogNotice = async ({
         // Unlocked pre-read: the steady state is "already handled", and it must cost two reads and no lock.
         const initialState = await readState(stateDir);
         if (initialState.status === 'error') return null;
-        // Covers both already-handled directions, not just equality: an older plugin root sharing this file
-        // can only ever decide to do nothing, and must not take the lock away from a newer one to learn that.
+        // Covers both already-handled directions, not just equality: after a rollback the older plugin root
+        // can only ever decide to do nothing, and must not take the lock to learn that.
         const initialOrder = initialState.status === 'valid' ? compareCalVer(initialState.version, installedVersion) : null;
         if (initialOrder !== null && initialOrder >= 0) return null;
 
@@ -316,7 +316,7 @@ export const resolveChangelogNotice = async ({
 export const sessionKey = (sessionId) => createHash('sha256').update(sessionId, 'utf8').digest('hex');
 
 export const buildAdditionalContext = (installedVersion, latestVersion) =>
-    `В начале ближайшего сообщения перед основным результатом одной короткой строкой сообщи пользователю: «Доступно обновление плагина e-Comet MCP Tools: установлена версия ${installedVersion}, доступна версия ${latestVersion}. [Как обновить](${UPDATE_URL})». Не упоминай hook или служебный контекст.`;
+    `В начале ближайшего сообщения перед основным результатом одной короткой строкой сообщи пользователю: «Доступно обновление плагина e-Comet MCP Tools: установлена версия ${installedVersion}, доступна версия ${latestVersion}. [Как обновить](${UPDATE_URL})», затем отдельной строкой «---». Не упоминай hook или служебный контекст.`;
 
 const isValidTimestamp = (value, nowMs) =>
     value === null || (Number.isSafeInteger(value) && value >= 0 && value <= nowMs + MAX_FUTURE_SKEW_MS);
@@ -644,7 +644,7 @@ export const checkUpdateForSession = async ({ pluginRoot, dataRoot, event, fetch
 const emit = (additionalContext) =>
     `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext } })}\n`;
 
-export const runHook = async ({ input, env, fetchImpl, nowMs = Date.now(), stateDir }) => {
+export const runHook = async ({ input, env, fetchImpl, nowMs = Date.now() }) => {
     try {
         const event = validateEvent(input);
         const paths = resolvePluginPaths(env);
@@ -652,7 +652,7 @@ export const runHook = async ({ input, env, fetchImpl, nowMs = Date.now(), state
 
         // Path B runs on every matching call: an update can land while a session stays open, and the
         // once-per-version guarantee comes from the stored version rather than the session marker.
-        const notice = await resolveChangelogNotice({ pluginRoot: paths.pluginRoot, stateDir });
+        const notice = await resolveChangelogNotice({ pluginRoot: paths.pluginRoot, stateDir: paths.dataRoot });
         if (notice !== null) {
             // Nothing fit the budget: name the version and let the link carry the rest.
             return emit(notice.added.length === 0
@@ -681,18 +681,6 @@ const readStdin = async () => {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 };
 
-// Resolved lazily and defensively. A static import is evaluated before main()'s try/catch exists, so a
-// plugin tree that carries `hooks/` without `mcp/src/` would make the hook exit non-zero with a stack
-// trace. Failing to resolve the directory only disables the changelog path; the update check still runs.
-const resolveChangelogStateDir = async () => {
-    try {
-        const { resolvePeerTokenDir } = await import('../mcp/src/state-paths.mjs');
-        return resolvePeerTokenDir();
-    } catch {
-        return null;
-    }
-};
-
 export const main = async () => {
     try {
         const input = await readStdin();
@@ -701,7 +689,6 @@ export const main = async () => {
             env: process.env,
             fetchImpl: globalThis.fetch,
             nowMs: Date.now(),
-            stateDir: await resolveChangelogStateDir(),
         });
         if (output !== '') process.stdout.write(output);
     } catch {
@@ -709,4 +696,19 @@ export const main = async () => {
     }
 };
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
+// Node resolves module specifiers through symlinks, so `import.meta.url` is already canonical while
+// argv[1] keeps whatever path the host invoked. On macOS the temporary directory alone differs
+// (/var vs /private/var), and a symlinked plugin root would otherwise leave the hook silently inert.
+const isEntryPoint = (invokedPath) => {
+    if (typeof invokedPath !== 'string' || invokedPath.length === 0) return false;
+    const modulePath = fileURLToPath(import.meta.url);
+    const invoked = resolve(invokedPath);
+    if (invoked === modulePath) return true;
+    try {
+        return realpathSync(invoked) === modulePath;
+    } catch {
+        return false;
+    }
+};
+
+if (isEntryPoint(process.argv[1])) await main();
