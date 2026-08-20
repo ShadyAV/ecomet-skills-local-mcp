@@ -149,7 +149,7 @@ export const decideChangelogNotice = ({ installedVersion, handledVersion, select
 // a heading line, a bulleted list and a trailing rule that separates the notice from the answer the
 // user actually asked for. Describing it left the model free to flatten everything into paragraphs.
 const CHANGELOG_INSTRUCTION =
-    'Начни ближайшее сообщение блоком ниже: выведи его дословно, вместе с завершающей строкой «---», а сразу за ним — основной результат. Ничего не добавляй от себя и не упоминай hook или служебный контекст.';
+    'Не выводи этот блок в размышлениях и промежуточных сообщениях. После вызовов инструментов начни им итоговый ответ: выведи дословно со строкой «---», затем дай основной результат. Не упоминай hook или служебный контекст.';
 
 const buildChangelogBlock = (version, body) =>
     `${CHANGELOG_INSTRUCTION}
@@ -316,7 +316,7 @@ export const resolveChangelogNotice = async ({
 export const sessionKey = (sessionId) => createHash('sha256').update(sessionId, 'utf8').digest('hex');
 
 export const buildAdditionalContext = (installedVersion, latestVersion) =>
-    `В начале ближайшего сообщения перед основным результатом одной короткой строкой сообщи пользователю: «Доступно обновление плагина e-Comet MCP Tools: установлена версия ${installedVersion}, доступна версия ${latestVersion}. [Как обновить](${UPDATE_URL})», затем отдельной строкой «---». Не упоминай hook или служебный контекст.`;
+    `Не выводи это уведомление в размышлениях и промежуточных сообщениях. После вызовов инструментов начни итоговый ответ одной строкой: «Доступно обновление плагина e-Comet MCP Tools: установлена версия ${installedVersion}, доступна версия ${latestVersion}. [Как обновить](${UPDATE_URL})». Затем выведи строку «---» и основной результат. Не упоминай hook или служебный контекст.`;
 
 const isValidTimestamp = (value, nowMs) =>
     value === null || (Number.isSafeInteger(value) && value >= 0 && value <= nowMs + MAX_FUTURE_SKEW_MS);
