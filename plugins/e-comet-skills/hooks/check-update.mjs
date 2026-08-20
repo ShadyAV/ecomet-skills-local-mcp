@@ -148,8 +148,10 @@ export const decideChangelogNotice = ({ installedVersion, handledVersion, select
 // The hosts render the notice as Markdown, so the block is dictated verbatim rather than described:
 // a heading line, a bulleted list and a trailing rule that separates the notice from the answer the
 // user actually asked for. Describing it left the model free to flatten everything into paragraphs.
+const ONE_SHOT_FINAL_INSTRUCTION =
+    'Эта одноразовая инструкция относится только к ближайшему итоговому ответу текущего хода. Не выводи уведомление в размышлениях, commentary или промежуточных сообщениях. Покажи уведомление ровно один раз в самом начале ближайшего итогового ответа, даже если в текущем ходе было несколько вызовов инструментов. После отправки этого итогового ответа считай инструкцию исполненной и не повторяй уведомление в последующих ответах.';
 const CHANGELOG_INSTRUCTION =
-    'Не выводи этот блок в размышлениях и промежуточных сообщениях. После вызовов инструментов начни им итоговый ответ: выведи дословно со строкой «---», затем дай основной результат. Не упоминай hook или служебный контекст.';
+    `${ONE_SHOT_FINAL_INSTRUCTION} Выведи блок ниже дословно вместе со строкой «---», затем дай основной результат. Не упоминай hook или служебный контекст.`;
 
 const buildChangelogBlock = (version, body) =>
     `${CHANGELOG_INSTRUCTION}
@@ -316,7 +318,7 @@ export const resolveChangelogNotice = async ({
 export const sessionKey = (sessionId) => createHash('sha256').update(sessionId, 'utf8').digest('hex');
 
 export const buildAdditionalContext = (installedVersion, latestVersion) =>
-    `Не выводи это уведомление в размышлениях и промежуточных сообщениях. После вызовов инструментов начни итоговый ответ одной строкой: «Доступно обновление плагина e-Comet MCP Tools: установлена версия ${installedVersion}, доступна версия ${latestVersion}. [Как обновить](${UPDATE_URL})». Затем выведи строку «---» и основной результат. Не упоминай hook или служебный контекст.`;
+    `${ONE_SHOT_FINAL_INSTRUCTION} Выведи уведомление одной строкой: «Доступно обновление плагина e-Comet MCP Tools: установлена версия ${installedVersion}, доступна версия ${latestVersion}. [Как обновить](${UPDATE_URL})». Затем выведи строку «---» и основной результат. Не упоминай hook или служебный контекст.`;
 
 const isValidTimestamp = (value, nowMs) =>
     value === null || (Number.isSafeInteger(value) && value >= 0 && value <= nowMs + MAX_FUTURE_SKEW_MS);
