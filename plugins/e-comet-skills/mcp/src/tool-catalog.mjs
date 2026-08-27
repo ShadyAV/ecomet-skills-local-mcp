@@ -15,7 +15,7 @@ const authorizationWorkflow =
 const ozonAuthorizationWorkflow =
     'This typed local tool owns the Ozon workflow. First call the remote browser_job({job:{type:"ozon_seller_promotion_report",dateFrom,dateTo}}) exactly once, then immediately invoke this tool with the same dates. ' +
     'The trusted Claude or Codex host hook injects the opaque transport-only triggerUrl; model-authored arguments must omit both triggerUrl and trigger_url. Never decode, print, edit, copy, or expose that authorization. ' +
-    'local_bridge_status reports legacy WB browser context and must not be used to gate this Ozon tool; the Ozon capability and typed operation result are authoritative. ';
+    'local_bridge_status reports bridge-level readiness and must not be used to gate this Ozon tool; the Ozon capability and typed operation result are authoritative. ';
 
 const resultPathGuidance =
     'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request.';
@@ -37,15 +37,15 @@ export const tools = [
         name: 'local_bridge_status',
         description:
             'Reports extensionConnected, the stable state code, and actionable recommendedAction. Translate the stable state into a short user-facing explanation; keep structured protocol codes in English. ' +
-            'ready means only that the local bridge, extension protocol, and an observed WB or seller browser context are available; each typed tool still decides its own live WB or seller prerequisites. ' +
+            'ready means only bridge-level readiness: the local bridge, extension protocol, and an observed marketplace context are available; each typed tool still decides its own prerequisites. ' +
             'Use these Russian examples when speaking to a Russian-language user: ' +
             'waiting_for_extension: «Локальный bridge запущен и ждёт подключения расширения.» ' +
-            'extension_connected_no_wb_tab: «Расширение подключено; откройте авторизованную вкладку Wildberries.» ' +
-            'extension_contended + CLOSE_DUPLICATE_EXTENSIONS: «Похоже, расширение e-Comet работает в нескольких экземплярах — возможно, в разных профилях браузера, — и они отбирают соединение друг у друга. Оставьте включённым только тот профиль, где открыта авторизованная вкладка Wildberries.» ' +
-            'Do not assert the number of profiles or which one is at fault: the bridge observes repeated socket takeovers, not the browser layout. extensionTakeovers.count is a count within a recent window, and saturated true means it is a lower bound. Do not tell the user to open a WB tab for this state — a takeover clears the tab context, so the tab is usually already open. ' +
+            'extension_connected_no_marketplace_tab: «Расширение подключено; откройте авторизованную вкладку WB Buyer, WB Seller или Ozon Seller.» ' +
+            'extension_contended + CLOSE_DUPLICATE_EXTENSIONS: «Похоже, расширение e-Comet работает в нескольких экземплярах — возможно, в разных профилях браузера, — и они отбирают соединение друг у друга. Оставьте включённым только тот профиль, где открыта авторизованная вкладка WB Buyer, WB Seller или Ozon Seller.» ' +
+            'Do not assert the number of profiles or which one is at fault: the bridge observes repeated socket takeovers, not the browser layout. extensionTakeovers.count is a count within a recent window, and saturated true means it is a lower bound. Do not tell the user to open a marketplace tab for this state — a takeover clears the tab context, so the tab is usually already open. ' +
             'extension_context_unknown: «Расширение подключено, но эта версия не сообщает контекст вкладок; обновите расширение. Конкретный инструмент всё ещё проверит свои условия сам.» ' +
             'peer_context_unknown: «Расширение доступно через другой локальный процесс, но он не передаёт контекст вкладок; перезапустите или обновите desktop hosts. Не делайте вывод, что устарело само расширение.» ' +
-            'ready: «Локальный bridge и расширение подключены; найдена вкладка Wildberries. Готовность конкретного задания проверит выбранный инструмент.» ' +
+            'ready: «Локальный bridge и расширение подключены; найдена вкладка WB Buyer, WB Seller или Ozon Seller. Готовность конкретного задания проверит выбранный инструмент.» ' +
             'peer_unavailable + FIX_PEER_TOKEN_PERMISSIONS: «Другой локальный процесс уже владеет bridge, но этот агент не может подключиться из-за ограничений доступа к данным сопряжения в профиле пользователя. Разрешите desktop host доступ к профилю пользователя и повторите запрос.» Use this explanation only for the explicit FIX_PEER_TOKEN_PERMISSIONS action; do not expose raw filesystem paths or errors. ' +
             'peer_unavailable: «Мостом уже владеет другой агент, и связаться с ним не удалось — работайте в нём.»',
         inputSchema: toolInputSchemas.local_bridge_status,

@@ -1,3 +1,5 @@
+import { normalizeBrowserContext } from './extension-protocol.mjs';
+
 // Peer failures are reported to the agent, so the vocabulary is a closed set owned by this process. A reason
 // string received from the other side of the socket is never surfaced: anything listening on loopback could
 // otherwise write arbitrary text into a tool result and from there into the model's context.
@@ -46,6 +48,21 @@ const summarizeTakeovers = (takeoverAtMs, nowMs) => {
         // `count` тогда — нижняя оценка, а не точное число.
         saturated: recentCount >= EXTENSION_TAKEOVER_MAX_ENTRIES,
     };
+};
+
+const normalizePeerBrowserContext = (context, now) => {
+    if (
+        !context ||
+        typeof context !== 'object' ||
+        Array.isArray(context) ||
+        context.state !== 'known' ||
+        (context.changedAt !== undefined && typeof context.changedAt !== 'string')
+    ) {
+        return { state: 'unknown' };
+    }
+    const { state: _state, changedAt, ...transportContext } = context;
+    const normalized = normalizeBrowserContext(transportContext);
+    return normalized ? { state: 'known', ...normalized, changedAt: changedAt ?? new Date(now()).toISOString() } : { state: 'unknown' };
 };
 
 export class ConnectionState {
@@ -186,7 +203,14 @@ export class ConnectionState {
     updateBrowserContext(socket, context) {
         if (socket !== this.extensionSocket) return false;
         const previous = this.browserContext;
-        if (previous.state === 'known' && previous.wbTabConnected === context.wbTabConnected && previous.sellerTabConnected === context.sellerTabConnected) return false;
+        if (
+            previous.state === 'known' &&
+            previous.wbTabConnected === context.wbTabConnected &&
+            previous.wbSellerTabConnected === context.wbSellerTabConnected &&
+            previous.ozonSellerTabConnected === context.ozonSellerTabConnected
+        ) {
+            return false;
+        }
         this.browserContext = { state: 'known', ...context, changedAt: new Date(this.#now()).toISOString() };
         return true;
     }
@@ -204,7 +228,7 @@ export class ConnectionState {
         this.peerExtensionReady = extensionConnected === true;
         this.peerExtensionBrowserJobReady = browserJobSupported === true;
         this.peerExtensionOzonPromotionReady = message.ozonSellerPromotionReportSupported === true;
-        this.peerBrowserContext = message.browserContext?.state === 'known' ? { ...message.browserContext } : { state: 'unknown' };
+        this.peerBrowserContext = normalizePeerBrowserContext(message.browserContext, this.#now);
         this.peerExtensionLastConnectedAtMs = Number.isFinite(message.extensionLastConnectedAtMs) ? message.extensionLastConnectedAtMs : null;
         this.peerExtensionLastDisconnectedAtMs = Number.isFinite(message.extensionLastDisconnectedAtMs) ? message.extensionLastDisconnectedAtMs : null;
         // Приходит по loopback от соседнего процесса, поэтому форма проверяется целиком:

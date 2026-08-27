@@ -35,10 +35,16 @@ export const deriveBridgeDiagnostics = (raw, nowMs) => {
     else if (raw.extensionConnected && raw.browserContext?.state !== 'known') {
         const legacyPeer = raw.bridgeRole === 'secondary' && raw.peer?.browserContextPropagationSupported !== true;
         [state, recommendedAction] = legacyPeer ? ['peer_context_unknown', 'RESTART_DESKTOP_HOSTS'] : ['extension_context_unknown', 'UPDATE_EXTENSION'];
-    } else if (raw.extensionConnected && !raw.browserContext.wbTabConnected && !raw.browserContext.sellerTabConnected) [state, recommendedAction] = ['extension_connected_no_wb_tab', 'OPEN_AUTHENTICATED_WB'];
+    } else if (
+        raw.extensionConnected &&
+        !raw.browserContext.wbTabConnected &&
+        !raw.browserContext.wbSellerTabConnected &&
+        !raw.browserContext.ozonSellerTabConnected
+    )
+        [state, recommendedAction] = ['extension_connected_no_marketplace_tab', 'OPEN_AUTHENTICATED_MARKETPLACE'];
     else if (raw.extensionConnected) [state, recommendedAction] = ['ready', 'NONE'];
     else if (raw.extensionLastDisconnectedAtMs && nowMs - raw.extensionLastDisconnectedAtMs <= 5000) [state, recommendedAction] = ['waiting_for_extension', 'WAIT_FOR_EXTENSION'];
-    else [state, recommendedAction] = ['waiting_for_extension', 'OPEN_OR_REFRESH_WB'];
+    else [state, recommendedAction] = ['waiting_for_extension', 'OPEN_OR_REFRESH_MARKETPLACE'];
 
     const lastConnectedAt = iso(raw.extensionLastConnectedAtMs);
     const lastDisconnectedAt = iso(raw.extensionLastDisconnectedAtMs);

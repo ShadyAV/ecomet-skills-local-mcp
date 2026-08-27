@@ -27,6 +27,35 @@ const isRecord = (value) => Boolean(value) && typeof value === 'object' && !Arra
 const isNonNegativeSafeInteger = (value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const hasOnlyKeys = (value, keys) => Object.keys(value).every((key) => keys.includes(key));
 const isBoundedString = (value, maxLength) => typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+export const normalizeBrowserContext = (value) => {
+    if (!isRecord(value)) return null;
+    const legacyKeys = ['wbTabConnected', 'sellerTabConnected'];
+    const currentKeys = ['wbTabConnected', 'wbSellerTabConnected', 'ozonSellerTabConnected', 'sellerTabConnected'];
+    const normalizedKeys = ['wbTabConnected', 'wbSellerTabConnected', 'ozonSellerTabConnected'];
+    const hasBooleans = (keys) => keys.every((key) => typeof value[key] === 'boolean');
+    if (Object.keys(value).length === legacyKeys.length && hasOnlyKeys(value, legacyKeys) && hasBooleans(legacyKeys)) {
+        return {
+            wbTabConnected: value.wbTabConnected,
+            wbSellerTabConnected: value.sellerTabConnected,
+            ozonSellerTabConnected: false,
+        };
+    }
+    if (Object.keys(value).length === currentKeys.length && hasOnlyKeys(value, currentKeys) && hasBooleans(currentKeys)) {
+        return {
+            wbTabConnected: value.wbTabConnected,
+            wbSellerTabConnected: value.wbSellerTabConnected,
+            ozonSellerTabConnected: value.ozonSellerTabConnected,
+        };
+    }
+    if (Object.keys(value).length === normalizedKeys.length && hasOnlyKeys(value, normalizedKeys) && hasBooleans(normalizedKeys)) {
+        return {
+            wbTabConnected: value.wbTabConnected,
+            wbSellerTabConnected: value.wbSellerTabConnected,
+            ozonSellerTabConnected: value.ozonSellerTabConnected,
+        };
+    }
+    return null;
+};
 const isValidBase64Chunk = (value) => {
     if (
         typeof value !== 'string' ||
@@ -236,14 +265,8 @@ export const createExtensionProtocol = ({
         }
 
         if (type === MESSAGE_TYPES.ping) {
-            const context = payload.browserContext;
-            if (
-                context &&
-                Object.keys(context).length === 2 &&
-                typeof context.wbTabConnected === 'boolean' &&
-                typeof context.sellerTabConnected === 'boolean' &&
-                connections.updateBrowserContext(socket, context)
-            ) {
+            const context = normalizeBrowserContext(payload.browserContext);
+            if (context && connections.updateBrowserContext(socket, context)) {
                 broadcastStatus();
             }
             send(socket, localMessage(message.id, MESSAGE_TYPES.pong, { at: Date.now() }));
