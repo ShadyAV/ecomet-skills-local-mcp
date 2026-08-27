@@ -134,6 +134,22 @@ codex plugin add e-comet-skills@e-comet-skills
 
 </details>
 
+### Ozon Seller
+
+Для выгрузки отчёта `ozon_seller_promotion_report`:
+
+1. Войдите в Ozon Seller в Chrome.
+2. Откройте и дождитесь полной загрузки страницы по адресу
+   `https://seller.ozon.ru/app/advertisement/product/overview`. Можно держать несколько готовых вкладок; перед запросом
+   активируйте вкладку нужной компании.
+
+Пример запроса:
+
+- *Скачай отчёт по продвижению в Ozon Seller за 1–15 августа 2026.*
+
+Если агент вернул `OZON_ROUTE_NOT_READY`, нет готовой вкладки с точным адресом или открыта другая страница: войдите в
+Ozon Seller, откройте указанный адрес и дождитесь загрузки страницы.
+
 <a id="plugin-update"></a>
 
 ## Обновление

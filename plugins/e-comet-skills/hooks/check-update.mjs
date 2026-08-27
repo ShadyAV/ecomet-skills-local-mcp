@@ -20,8 +20,8 @@ const CACHE_REPLACE_RETRY_MS = 10;
 export const LOCK_RELEASE_RETRY_LIMIT = 20;
 export const LOCK_RELEASE_RETRY_MS = 5;
 const TRANSIENT_FILESYSTEM_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM']);
-const UPDATE_URL = 'https://github.com/ShadyAV/ecomet-skills-local-mcp#plugin-update';
-export const CHANGELOG_URL = 'https://github.com/ShadyAV/ecomet-skills-local-mcp/blob/main/CHANGELOG.md';
+const UPDATE_URL = 'https://github.com/e-comet/skills#plugin-update';
+export const CHANGELOG_URL = 'https://github.com/e-comet/skills/blob/main/CHANGELOG.md';
 // Claude Code caps hook output at 10,000 characters; Codex caps a model-visible hook message at
 // roughly 2,500 tokens, which for Cyrillic is pessimistically ~3,750 characters. This budget sits
 // under the tighter ceiling with margin and still holds far more than the changelog written to date.
@@ -31,14 +31,14 @@ const MAX_RELEASES = 200;
 const MAX_ADDED_ENTRIES = 20;
 const MAX_ADDED_ENTRY_BYTES = 2048;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-const REMOTE_MANIFEST_URL = 'https://raw.githubusercontent.com/ShadyAV/ecomet-skills-local-mcp/main/plugins/e-comet-skills/.codex-plugin/plugin.json';
+const REMOTE_MANIFEST_URL = 'https://raw.githubusercontent.com/e-comet/skills/main/plugins/e-comet-skills/.codex-plugin/plugin.json';
 const CACHE_NAME = 'plugin-update-latest-v1.json';
 const GLOBAL_LOCK_NAME = 'plugin-update-latest-v1.lock';
 const SESSION_DIRECTORY = 'plugin-update-sessions-v1';
 const CHANGELOG_STATE_NAME = 'changelog-state-v1.json';
 const CHANGELOG_LOCK_NAME = 'changelog-state-v1.lock';
 
-export const REMOTE_INTERVAL_MS = 120_000;
+export const REMOTE_INTERVAL_MS = 86_400_000;
 export const MAX_FUTURE_SKEW_MS = 300_000;
 export const FETCH_TIMEOUT_MS = 2_500;
 export const MAX_CALVER_BYTES = 256;
