@@ -1,6 +1,7 @@
 import {
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
+    FEEDBACK_KINDS,
     MAX_BROWSER_JOB_TOKEN_BYTES,
     MAX_IMAGE_ARTICLES,
     MAX_IMAGE_BASKET,
@@ -9,7 +10,12 @@ import {
     MAX_RETURNED_PRODUCTS,
 } from './config.mjs';
 import { PEER_REJECTION_CODES } from './connection-state.mjs';
-import { OZON_PROMOTION_TERMINAL_CODE_STAGES } from './tool-errors.mjs';
+import {
+    EXTENSION_UPDATE_URL,
+    OZON_PROMOTION_CAPABILITY,
+    OZON_PROMOTION_MIN_EXTENSION_VERSION,
+} from './extension-vocabulary.mjs';
+import { OZON_EXTENSION_OUTDATED_REASON, OZON_PROMOTION_TERMINAL_CODE_STAGES } from './tool-errors.mjs';
 
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
@@ -353,21 +359,21 @@ const bridgeStatusSchema = object({
     bridgeRole: { type: 'string', enum: ['primary', 'secondary', 'disconnected'] },
     bridgeTransitioning: boolean,
     listenerState: { type: 'string', enum: ['pending', 'listening', 'address_in_use', 'failed'] },
-    state: { type: 'string', enum: ['initializing', 'listen_failed', 'waiting_for_extension', 'extension_connected_no_wb_tab', 'extension_connected_no_marketplace_tab', 'extension_contended', 'extension_context_unknown', 'peer_context_unknown', 'ready', 'extension_update_required', 'peer_reconnecting', 'peer_unavailable'] },
-    recommendedAction: { type: 'string', enum: ['CLOSE_DUPLICATE_EXTENSIONS', 'FIX_PEER_TOKEN_PERMISSIONS', 'NONE', 'WAIT_FOR_EXTENSION', 'OPEN_OR_REFRESH_WB', 'OPEN_OR_REFRESH_MARKETPLACE', 'OPEN_AUTHENTICATED_WB', 'OPEN_AUTHENTICATED_MARKETPLACE', 'UPDATE_EXTENSION', 'RESTART_DESKTOP_HOSTS', 'USE_PRIMARY_AGENT'] },
+    state: { type: 'string', enum: ['initializing', 'listen_failed', 'waiting_for_extension', 'extension_connected_no_wb_tab', 'extension_contended', 'extension_context_unknown', 'peer_context_unknown', 'ready', 'extension_update_required', 'peer_reconnecting', 'peer_unavailable'] },
+    recommendedAction: { type: 'string', enum: ['CLOSE_DUPLICATE_EXTENSIONS', 'FIX_PEER_TOKEN_PERMISSIONS', 'NONE', 'WAIT_FOR_EXTENSION', 'OPEN_OR_REFRESH_WB', 'OPEN_AUTHENTICATED_WB', 'UPDATE_EXTENSION', 'RESTART_DESKTOP_HOSTS', 'USE_PRIMARY_AGENT'] },
     extension: object({
         state: { type: 'string', enum: ['never_connected', 'connected', 'disconnected'] },
         route: { type: 'string', enum: ['direct', 'peer', 'none'] },
         lastConnectedAt: string,
         lastDisconnectedAt: string,
         version: string,
+        ozonSellerPromotionReportSupported: boolean,
     }, ['state', 'route']),
     peer: object({ bridgeVersion: string, browserContextPropagationSupported: boolean }),
     browserContext: object({
         state: { type: 'string', enum: ['unknown', 'known'] },
         wbTabConnected: boolean,
-        wbSellerTabConnected: boolean,
-        ozonSellerTabConnected: boolean,
+        sellerTabConnected: boolean,
         changedAt: string,
     }, ['state']),
     extensionLastConnectedAtMs: { type: ['number', 'null'] },
@@ -378,6 +384,7 @@ const bridgeStatusSchema = object({
         saturated: boolean,
     }, ['count', 'lastAtMs', 'saturated']),
     extensionVersion: string,
+    ozonSellerPromotionReportSupported: boolean,
     peerRejection: peerRejectionSchema,
     bridgeVersion: string,
     bridgeGeneration: positiveInteger,
@@ -422,6 +429,20 @@ const ozonPromotionArtifactSchema = object(
     ['name', 'mimeType', 'size', 'sha256']
 );
 
+// Устаревшее расширение не получает собственный терминальный код: набор кодов зафиксирован в общем
+// с расширением контракте. Диагноз едет в message и в этих полях, поэтому его видно и агенту, и в
+// структурированном ответе, а обычный отказ маршрута остаётся без details.
+const ozonExtensionOutdatedDetailsSchema = object(
+    {
+        reason: { const: OZON_EXTENSION_OUTDATED_REASON },
+        requiredCapability: { const: OZON_PROMOTION_CAPABILITY },
+        requiredExtensionVersion: { const: OZON_PROMOTION_MIN_EXTENSION_VERSION },
+        updateUrl: { const: EXTENSION_UPDATE_URL },
+        installedExtensionVersion: string,
+    },
+    ['reason', 'requiredCapability', 'requiredExtensionVersion', 'updateUrl']
+);
+
 const ozonPromotionErrorSchema = objectUnion(
     ...Object.entries(OZON_PROMOTION_TERMINAL_CODE_STAGES).map(([code, stage]) =>
         object(
@@ -430,6 +451,7 @@ const ozonPromotionErrorSchema = objectUnion(
                 message: { type: 'string', minLength: 1, maxLength: 500 },
                 stage: { const: stage },
                 retryable: { const: false },
+                ...(code === 'OZON_ROUTE_NOT_READY' ? { details: ozonExtensionOutdatedDetailsSchema } : {}),
             },
             ['code', 'message', 'stage', 'retryable']
         )
@@ -502,6 +524,67 @@ const liveInputSchema = (limitName, scope) =>
         ...(limitName ? projectionProperties(limitName, scope) : {}),
     });
 
+const feedbackArtifactId = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' };
+const feedbackSha256 = { type: 'string', pattern: '^[a-f0-9]{64}$' };
+const feedbackClaim = { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' };
+const feedbackSession = { type: 'string', pattern: '^[a-f0-9]{64}$' };
+const hookOnlyFeedbackField = (description) => ({
+    ...description,
+    description:
+        `${description.description} Injected by the trusted Claude or Codex host hook immediately before this local tool call; ` +
+        'model-authored arguments must omit it and every snake_case alias.',
+});
+const feedbackPrepareSchema = object(
+    {
+        kind: { type: 'string', enum: FEEDBACK_KINDS },
+        summary: { type: 'string', minLength: 1, maxLength: 512 },
+        details: { type: 'string', minLength: 1, maxLength: 4096 },
+        includeTranscript: boolean,
+        transcriptPath: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 4096, description: 'Trusted local transcript path.' }),
+        feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'One-use local feedback handoff claim.' }),
+        feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
+    },
+    ['kind', 'summary', 'details', 'includeTranscript']
+);
+const feedbackSubmitSchema = object(
+    {
+        artifactId: feedbackArtifactId,
+        uploadUrl: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 8192, description: 'Signed HTTPS upload URL.' }),
+        requiredHeaders: hookOnlyFeedbackField({ type: 'object', properties: {}, additionalProperties: { type: 'string', maxLength: 8192 }, description: 'Signed required request headers.' }),
+        objectKey: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 1024, description: 'Storage object key.' }),
+        expiresAt: hookOnlyFeedbackField({ type: 'integer', minimum: 1, description: 'Upload grant expiry timestamp.' }),
+        expectedSize: hookOnlyFeedbackField({ type: 'integer', minimum: 1, maximum: 1024 * 1024, description: 'Expected archive size in bytes.' }),
+        expectedSha256: hookOnlyFeedbackField({ ...feedbackSha256, description: 'Expected archive SHA-256.' }),
+        feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'One-use local feedback handoff claim.' }),
+        feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
+    },
+    ['artifactId']
+);
+const feedbackErrorSchema = objectUnion(
+    object({ code: { const: 'FEEDBACK_PREPARATION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'prepare' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    object({ code: { const: 'TRANSCRIPT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: true } }, ['code', 'message', 'stage', 'retryable']),
+    object({ code: { const: 'ARTIFACT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'artifact' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    object({ code: { const: 'UPLOAD_GRANT_INVALID' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'grant' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    object({ code: { const: 'UPLOAD_REJECTED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    object({ code: { const: 'UPLOAD_UNCERTAIN' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable'])
+);
+const feedbackPrepareSuccessSchema = object(
+    { ok: { const: true }, status: { const: 'prepared' }, artifactId: feedbackArtifactId, kind: { type: 'string', enum: FEEDBACK_KINDS }, sizeBytes: positiveInteger, sha256: feedbackSha256, transcriptIncluded: boolean, summary: { type: 'string', minLength: 1, maxLength: 512 } },
+    ['ok', 'status', 'artifactId', 'kind', 'sizeBytes', 'sha256', 'transcriptIncluded', 'summary']
+);
+const feedbackPrepareFailureSchema = object(
+    { ok: { const: false }, status: { const: 'failed' }, error: feedbackErrorSchema },
+    ['ok', 'status', 'error']
+);
+const feedbackSubmitSuccessSchema = object(
+    { ok: { const: true }, status: { const: 'uploaded' }, artifactId: feedbackArtifactId, transcriptIncluded: boolean },
+    ['ok', 'status', 'artifactId', 'transcriptIncluded']
+);
+const feedbackSubmitFailureSchema = object(
+    { ok: { const: false }, status: { type: 'string', enum: ['failed', 'rejected', 'uncertain'] }, artifactId: feedbackArtifactId, error: feedbackErrorSchema },
+    ['ok', 'status', 'artifactId', 'error']
+);
+
 export const toolInputSchemas = {
     local_bridge_status: object({}),
     wb_product_card: liveInputSchema(),
@@ -509,6 +592,8 @@ export const toolInputSchemas = {
     wb_check_by_query: liveInputSchema(),
     wb_recommendations_by_product: liveInputSchema('productLimitPerSource', 'source product'),
     wb_seller_reviews: liveInputSchema(),
+    prepare_e_comet_feedback: feedbackPrepareSchema,
+    submit_e_comet_feedback: feedbackSubmitSchema,
     ozon_seller_promotion_report: object(
         {
             dateFrom: canonicalDateProperty,
@@ -552,6 +637,8 @@ export const toolOutputSchemas = {
     wb_check_by_query: objectUnion(...liveAggregateSchemas(checkSuccessSchema), toolErrorSchema),
     wb_recommendations_by_product: objectUnion(...liveAggregateSchemas(recommendationsSuccessSchema), toolErrorSchema),
     wb_seller_reviews: objectUnion(sellerReviewsSuccessSchema, toolErrorSchema),
+    prepare_e_comet_feedback: objectUnion(feedbackPrepareSuccessSchema, feedbackPrepareFailureSchema),
+    submit_e_comet_feedback: objectUnion(feedbackSubmitSuccessSchema, feedbackSubmitFailureSchema),
     wb_product_images: objectUnion(...liveAggregateSchemas(imagesSuccessSchema), toolErrorSchema),
     ozon_seller_promotion_report: objectUnion(ozonPromotionSuccessSchema, ozonPromotionFailureSchema, ozonPromotionPreflightFailureSchema),
 };

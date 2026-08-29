@@ -35,16 +35,10 @@ export const deriveBridgeDiagnostics = (raw, nowMs) => {
     else if (raw.extensionConnected && raw.browserContext?.state !== 'known') {
         const legacyPeer = raw.bridgeRole === 'secondary' && raw.peer?.browserContextPropagationSupported !== true;
         [state, recommendedAction] = legacyPeer ? ['peer_context_unknown', 'RESTART_DESKTOP_HOSTS'] : ['extension_context_unknown', 'UPDATE_EXTENSION'];
-    } else if (
-        raw.extensionConnected &&
-        !raw.browserContext.wbTabConnected &&
-        !raw.browserContext.wbSellerTabConnected &&
-        !raw.browserContext.ozonSellerTabConnected
-    )
-        [state, recommendedAction] = ['extension_connected_no_marketplace_tab', 'OPEN_AUTHENTICATED_MARKETPLACE'];
+    } else if (raw.extensionConnected && !raw.browserContext.wbTabConnected && !raw.browserContext.sellerTabConnected) [state, recommendedAction] = ['extension_connected_no_wb_tab', 'OPEN_AUTHENTICATED_WB'];
     else if (raw.extensionConnected) [state, recommendedAction] = ['ready', 'NONE'];
     else if (raw.extensionLastDisconnectedAtMs && nowMs - raw.extensionLastDisconnectedAtMs <= 5000) [state, recommendedAction] = ['waiting_for_extension', 'WAIT_FOR_EXTENSION'];
-    else [state, recommendedAction] = ['waiting_for_extension', 'OPEN_OR_REFRESH_MARKETPLACE'];
+    else [state, recommendedAction] = ['waiting_for_extension', 'OPEN_OR_REFRESH_WB'];
 
     const lastConnectedAt = iso(raw.extensionLastConnectedAtMs);
     const lastDisconnectedAt = iso(raw.extensionLastDisconnectedAtMs);
@@ -56,6 +50,11 @@ export const deriveBridgeDiagnostics = (raw, nowMs) => {
             ...(lastConnectedAt === undefined ? {} : { lastConnectedAt }),
             ...(lastDisconnectedAt === undefined ? {} : { lastDisconnectedAt }),
             ...(raw.extensionVersion ? { version: raw.extensionVersion } : {}),
+            // Справочное поле: типизированный инструмент Ozon по-прежнему решает сам, а отсутствие
+            // поля означает «наблюдать было не по чему», а не «не поддерживается».
+            ...(typeof raw.ozonSellerPromotionReportSupported === 'boolean'
+                ? { ozonSellerPromotionReportSupported: raw.ozonSellerPromotionReportSupported }
+                : {}),
         },
         ...(raw.peer ? { peer: raw.peer } : {}),
         browserContext: raw.browserContext ?? { state: 'unknown' },

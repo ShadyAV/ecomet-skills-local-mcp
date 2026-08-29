@@ -1,5 +1,3 @@
-import { normalizeBrowserContext } from './extension-protocol.mjs';
-
 // Peer failures are reported to the agent, so the vocabulary is a closed set owned by this process. A reason
 // string received from the other side of the socket is never surfaced: anything listening on loopback could
 // otherwise write arbitrary text into a tool result and from there into the model's context.
@@ -50,21 +48,6 @@ const summarizeTakeovers = (takeoverAtMs, nowMs) => {
     };
 };
 
-const normalizePeerBrowserContext = (context, now) => {
-    if (
-        !context ||
-        typeof context !== 'object' ||
-        Array.isArray(context) ||
-        context.state !== 'known' ||
-        (context.changedAt !== undefined && typeof context.changedAt !== 'string')
-    ) {
-        return { state: 'unknown' };
-    }
-    const { state: _state, changedAt, ...transportContext } = context;
-    const normalized = normalizeBrowserContext(transportContext);
-    return normalized ? { state: 'known', ...normalized, changedAt: changedAt ?? new Date(now()).toISOString() } : { state: 'unknown' };
-};
-
 export class ConnectionState {
     #extensionReadyWaiters = new Set();
     #closed = false;
@@ -80,6 +63,10 @@ export class ConnectionState {
     peerExtensionReady = false;
     peerExtensionBrowserJobReady = false;
     peerExtensionOzonPromotionReady = false;
+    // Старая первичная сборка поле про возможность Ozon в peer_status не присылает вовсе, и её
+    // молчание нельзя читать как «расширение не умеет»: иначе вторичный агент посоветует обновить
+    // расширение там, где на самом деле устарел соседний процесс.
+    peerOzonPromotionSupportReported = false;
     peerBrowserContext = { state: 'unknown' };
     peerExtensionLastConnectedAtMs = null;
     peerExtensionLastDisconnectedAtMs = null;
@@ -120,6 +107,14 @@ export class ConnectionState {
 
     get effectiveOzonPromotionReady() {
         return this.extensionOzonPromotionReady || (this.peerReady && this.peerExtensionOzonPromotionReady);
+    }
+
+    // Отличает «расширение возможность не объявило» от «спросить было не у кого»: известно только
+    // когда расширение действительно подключено и ответ про возможность получен. Первичный процесс
+    // без расширения тоже присылает поле, поэтому одного факта присылки мало.
+    get effectiveOzonPromotionSupportKnown() {
+        if (this.extensionReady) return true;
+        return this.peerReady && this.peerExtensionReady && this.peerOzonPromotionSupportReported;
     }
 
     get effectiveBrowserContext() {
@@ -203,14 +198,7 @@ export class ConnectionState {
     updateBrowserContext(socket, context) {
         if (socket !== this.extensionSocket) return false;
         const previous = this.browserContext;
-        if (
-            previous.state === 'known' &&
-            previous.wbTabConnected === context.wbTabConnected &&
-            previous.wbSellerTabConnected === context.wbSellerTabConnected &&
-            previous.ozonSellerTabConnected === context.ozonSellerTabConnected
-        ) {
-            return false;
-        }
+        if (previous.state === 'known' && previous.wbTabConnected === context.wbTabConnected && previous.sellerTabConnected === context.sellerTabConnected) return false;
         this.browserContext = { state: 'known', ...context, changedAt: new Date(this.#now()).toISOString() };
         return true;
     }
@@ -228,7 +216,8 @@ export class ConnectionState {
         this.peerExtensionReady = extensionConnected === true;
         this.peerExtensionBrowserJobReady = browserJobSupported === true;
         this.peerExtensionOzonPromotionReady = message.ozonSellerPromotionReportSupported === true;
-        this.peerBrowserContext = normalizePeerBrowserContext(message.browserContext, this.#now);
+        this.peerOzonPromotionSupportReported = typeof message.ozonSellerPromotionReportSupported === 'boolean';
+        this.peerBrowserContext = message.browserContext?.state === 'known' ? { ...message.browserContext } : { state: 'unknown' };
         this.peerExtensionLastConnectedAtMs = Number.isFinite(message.extensionLastConnectedAtMs) ? message.extensionLastConnectedAtMs : null;
         this.peerExtensionLastDisconnectedAtMs = Number.isFinite(message.extensionLastDisconnectedAtMs) ? message.extensionLastDisconnectedAtMs : null;
         // Приходит по loopback от соседнего процесса, поэтому форма проверяется целиком:
@@ -278,6 +267,7 @@ export class ConnectionState {
         this.peerExtensionReady = false;
         this.peerExtensionBrowserJobReady = false;
         this.peerExtensionOzonPromotionReady = false;
+        this.peerOzonPromotionSupportReported = false;
         this.peerBrowserContext = { state: 'unknown' };
         this.authenticatedPrimaryMetadata = undefined;
         return true;
@@ -290,6 +280,7 @@ export class ConnectionState {
         this.peerExtensionReady = false;
         this.peerExtensionBrowserJobReady = false;
         this.peerExtensionOzonPromotionReady = false;
+        this.peerOzonPromotionSupportReported = false;
         this.peerBrowserContext = { state: 'unknown' };
         this.authenticatedPrimaryMetadata = undefined;
         this.resetPeerReconnect();

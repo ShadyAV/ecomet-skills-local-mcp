@@ -191,17 +191,39 @@ export const resolveArtifactDir = (options = {}) => {
     return (options.platform || process.platform) === 'win32' ? win32.join(stateDirectory, 'artifacts') : posix.join(stateDirectory, 'artifacts');
 };
 
+export const resolveFeedbackArtifactDir = (options = {}) => {
+    const configuredDirectory = options.env?.ECOMET_FEEDBACK_ARTIFACT_DIR || (!options.env && process.env.ECOMET_FEEDBACK_ARTIFACT_DIR);
+    if (configuredDirectory) return configuredDirectory;
+    const stateDirectory = resolveLocalStateDir(options);
+    return (options.platform || process.platform) === 'win32' ? win32.join(stateDirectory, 'feedback-artifacts') : posix.join(stateDirectory, 'feedback-artifacts');
+};
+
 export const PEER_TOKEN_DIR = resolvePeerTokenDir();
 export const RESULT_DIR = resolveResultDir();
 export const ARTIFACT_DIR = resolveArtifactDir();
+export const FEEDBACK_ARTIFACT_DIR = resolveFeedbackArtifactDir();
 export const ARTIFACT_RETENTION_MS = positiveIntegerEnv('ECOMET_ARTIFACT_RETENTION_MS', 24 * 60 * 60 * 1000);
 export const ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_TOTAL_BYTES', 512 * 1024 * 1024);
 export const ARTIFACT_MAX_FILE_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_FILE_BYTES', 100 * 1024 * 1024);
 export const ARTIFACT_MAX_JOB_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_JOB_BYTES', 500 * 1024 * 1024);
 export const ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_FILES', 1000);
 export const ARTIFACT_MAX_CHUNK_BYTES = 256 * 1024;
+export const FEEDBACK_MAX_SUMMARY_LENGTH = 512;
+// This is the remote report_issue contract. Every local validator must consume this one list so a report that
+// prepares successfully cannot later be rejected while requesting its upload grant.
+export const FEEDBACK_KINDS = Object.freeze(['bug', 'wrong_data', 'missing_capability', 'unclear_contract']);
+export const FEEDBACK_MAX_DETAILS_LENGTH = 4096;
+export const FEEDBACK_MAX_REPORT_BYTES = 16 * 1024;
+// Stored ZIP worst case: 1 MiB - 16 KiB report - 224 bytes for two local/central headers,
+// both UTF-8 names, and EOCD. The exact cap guarantees every accepted maximum-sized pair archives.
+export const FEEDBACK_MAX_TRANSCRIPT_BYTES = 1_031_968;
+export const FEEDBACK_MAX_TOTAL_ENTRY_BYTES = 1024 * 1024;
+export const FEEDBACK_MAX_ARCHIVE_BYTES = 1024 * 1024;
+export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
+export const FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES', 64 * 1024 * 1024);
+export const FEEDBACK_ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_FILES', 100);
 export const SESSION_NONCE = randomUUID();
-export const OFFICIAL_EXTENSION_ID = 'kfdeggpflkbafbjdhbcmfgeibhdnmaio';
+export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
 export const EXTENSION_ID_OVERRIDE_ENABLED =
     process.env.ECOMET_ENABLE_EXTENSION_ID_OVERRIDE === '1' && ['test', 'development'].includes(process.env.NODE_ENV);
 const extensionIdOverride = new Set(

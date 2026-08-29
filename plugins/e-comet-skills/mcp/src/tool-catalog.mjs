@@ -15,10 +15,26 @@ const authorizationWorkflow =
 const ozonAuthorizationWorkflow =
     'This typed local tool owns the Ozon workflow. First call the remote browser_job({job:{type:"ozon_seller_promotion_report",dateFrom,dateTo}}) exactly once, then immediately invoke this tool with the same dates. ' +
     'The trusted Claude or Codex host hook injects the opaque transport-only triggerUrl; model-authored arguments must omit both triggerUrl and trigger_url. Never decode, print, edit, copy, or expose that authorization. ' +
-    'local_bridge_status reports bridge-level readiness and must not be used to gate this Ozon tool; the Ozon capability and typed operation result are authoritative. ';
+    'local_bridge_status reports legacy WB browser context and must not be used to gate this Ozon tool; the Ozon capability and typed operation result are authoritative. ' +
+    'Its extension version and Ozon capability fields are informational only: use them to explain a failure, never to skip or pre-approve this call. ';
 
 const resultPathGuidance =
     'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request.';
+
+const feedbackConsentWorkflow =
+    'Before any feedback tool call, disclose that the report will contain the user-provided kind, summary, and details plus current local status/version diagnostics. ' +
+    'An explicit current-message choice to send with the exact current transcript or send without the transcript satisfies consent; do not ask again. ' +
+    'Ask only when that choice is absent or ambiguous, and then require exactly one outcome: send without the transcript; send with the exact current transcript, warning that it may contain credentials, personal or commercial data, source code, file paths, and unrelated task content; or do not send. ' +
+    'Never ask for this choice using ambiguous yes/no wording. If the choice is ambiguous, ask exactly one concise clarification and call no feedback tools. ' +
+    'If the user declines, do not call prepare_e_comet_feedback, report_issue, or submit_e_comet_feedback. ';
+
+const feedbackExecutionWorkflow =
+    'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
+    'Do not call local_bridge_status, retry discovery, or perform a report resource reread in this flow. ' +
+    'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
+    'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet вместе с историей беседы.» or «Отчёт отправлен в e-Comet без истории беседы.» according to transcriptIncluded. ' +
+    'Do not mention local cleanup or expose storage or archive implementation details in the user-facing answer. Never claim downstream queueing, delivery, Slack delivery, Slack notification, processing, notification, or human review unless a separate backend receipt proves that specific outcome. ' +
+    'If submit returns UPLOAD_UNCERTAIN, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ';
 
 export const serverInstructions =
     'Для живых данных Wildberries сначала выберите локальный типизированный инструмент по намерению пользователя: ' +
@@ -30,24 +46,29 @@ export const serverInstructions =
     'скачать отчёт Ozon Seller по аналитике продвижения за период — ozon_seller_promotion_report; ' +
     'фото, фотографии, картинки, изображения или галерея — wb_product_images. ' +
     'Не начинайте с browser_job. После выбора подписанного локального инструмента следуйте его описанию: ' +
-    'browser_job используется только следующим шагом для получения подписанной авторизации выбранного задания.';
+    'browser_job используется только следующим шагом для получения подписанной авторизации выбранного задания. ' +
+    'To report an e-Comet problem, follow this consent contract: ' + feedbackConsentWorkflow +
+    'After an unambiguous send choice, use prepare_e_comet_feedback, remote report_issue, and submit_e_comet_feedback in that exact order. ' +
+    feedbackExecutionWorkflow;
 
 export const tools = [
     {
         name: 'local_bridge_status',
         description:
             'Reports extensionConnected, the stable state code, and actionable recommendedAction. Translate the stable state into a short user-facing explanation; keep structured protocol codes in English. ' +
-            'ready means only bridge-level readiness: the local bridge, extension protocol, and an observed marketplace context are available; each typed tool still decides its own prerequisites. ' +
+            'ready means only that the local bridge, extension protocol, and an observed WB or seller browser context are available; each typed tool still decides its own live WB or seller prerequisites. ' +
             'Use these Russian examples when speaking to a Russian-language user: ' +
             'waiting_for_extension: «Локальный bridge запущен и ждёт подключения расширения.» ' +
-            'extension_connected_no_marketplace_tab: «Расширение подключено; откройте авторизованную вкладку WB Buyer, WB Seller или Ozon Seller.» ' +
-            'extension_contended + CLOSE_DUPLICATE_EXTENSIONS: «Похоже, расширение e-Comet работает в нескольких экземплярах — возможно, в разных профилях браузера, — и они отбирают соединение друг у друга. Оставьте включённым только тот профиль, где открыта авторизованная вкладка WB Buyer, WB Seller или Ozon Seller.» ' +
-            'Do not assert the number of profiles or which one is at fault: the bridge observes repeated socket takeovers, not the browser layout. extensionTakeovers.count is a count within a recent window, and saturated true means it is a lower bound. Do not tell the user to open a marketplace tab for this state — a takeover clears the tab context, so the tab is usually already open. ' +
+            'extension_connected_no_wb_tab: «Расширение подключено; откройте авторизованную вкладку Wildberries.» ' +
+            'extension_contended + CLOSE_DUPLICATE_EXTENSIONS: «Похоже, расширение e-Comet работает в нескольких экземплярах — возможно, в разных профилях браузера, — и они отбирают соединение друг у друга. Оставьте включённым только тот профиль, где открыта авторизованная вкладка Wildberries.» ' +
+            'Do not assert the number of profiles or which one is at fault: the bridge observes repeated socket takeovers, not the browser layout. extensionTakeovers.count is a count within a recent window, and saturated true means it is a lower bound. Do not tell the user to open a WB tab for this state — a takeover clears the tab context, so the tab is usually already open. ' +
             'extension_context_unknown: «Расширение подключено, но эта версия не сообщает контекст вкладок; обновите расширение. Конкретный инструмент всё ещё проверит свои условия сам.» ' +
             'peer_context_unknown: «Расширение доступно через другой локальный процесс, но он не передаёт контекст вкладок; перезапустите или обновите desktop hosts. Не делайте вывод, что устарело само расширение.» ' +
-            'ready: «Локальный bridge и расширение подключены; найдена вкладка WB Buyer, WB Seller или Ozon Seller. Готовность конкретного задания проверит выбранный инструмент.» ' +
+            'ready: «Локальный bridge и расширение подключены; найдена вкладка Wildberries. Готовность конкретного задания проверит выбранный инструмент.» ' +
             'peer_unavailable + FIX_PEER_TOKEN_PERMISSIONS: «Другой локальный процесс уже владеет bridge, но этот агент не может подключиться из-за ограничений доступа к данным сопряжения в профиле пользователя. Разрешите desktop host доступ к профилю пользователя и повторите запрос.» Use this explanation only for the explicit FIX_PEER_TOKEN_PERMISSIONS action; do not expose raw filesystem paths or errors. ' +
-            'peer_unavailable: «Мостом уже владеет другой агент, и связаться с ним не удалось — работайте в нём.»',
+            'peer_unavailable: «Мостом уже владеет другой агент, и связаться с ним не удалось — работайте в нём.» ' +
+            'extension.version and extension.ozonSellerPromotionReportSupported are informational: false means the connected extension does not announce the Ozon promotion capability and has to be updated, ' +
+            'while an absent field means no connected extension reported it. Neither field gates a typed tool; each tool still decides for itself.',
         inputSchema: toolInputSchemas.local_bridge_status,
         outputSchema: toolOutputSchemas.local_bridge_status,
         annotations: {
@@ -137,6 +158,32 @@ export const tools = [
         annotations: liveToolAnnotations,
     },
     {
+        name: 'prepare_e_comet_feedback',
+        description:
+            'Prepare one local e-Comet feedback archive from a concise issue report. Use only after the user explicitly agrees to report an e-Comet problem. ' +
+            feedbackConsentWorkflow +
+            'Use exactly one remote report_issue kind: bug, wrong_data, missing_capability, or unclear_contract; pass that same kind unchanged to report_issue. ' +
+            'Use includeTranscript:false only for send without the transcript and includeTranscript:true only for send with the exact current transcript. ' +
+            'Never author transcriptPath, transcript_path, feedbackClaim, feedback_claim, feedbackSession, or feedback_session. The required order is prepare_e_comet_feedback, remote report_issue, then submit_e_comet_feedback. ' +
+            feedbackExecutionWorkflow +
+            'This returns compact metadata and one private report.md resource link; ZIP and transcript bytes never enter model content.',
+        inputSchema: toolInputSchemas.prepare_e_comet_feedback,
+        outputSchema: toolOutputSchemas.prepare_e_comet_feedback,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    {
+        name: 'submit_e_comet_feedback',
+        description:
+            'Upload the prepared e-Comet feedback archive only after remote report_issue returns the trusted upload grant. ' +
+            'Follow the exact order prepare_e_comet_feedback, remote report_issue, then submit_e_comet_feedback. ' +
+            'The host hook injects uploadUrl, requiredHeaders, objectKey, expiresAt, expectedSize, expectedSha256, feedbackClaim, and feedbackSession. Model-authored arguments must omit every transport/claim field and snake_case alias; provide only the prepared artifactId. ' +
+            feedbackExecutionWorkflow +
+            'This one-shot upload returns no resource, archive bytes, object key, URL, query, or headers.',
+        inputSchema: toolInputSchemas.submit_e_comet_feedback,
+        outputSchema: toolOutputSchemas.submit_e_comet_feedback,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    {
         name: 'wb_product_images',
         description:
             'Find public Wildberries product image URLs by article ID. Use for Russian requests about фото, фотографии, картинки, изображения, ссылки на фото, or галерея товара. ' +
@@ -159,6 +206,8 @@ export const tools = [
             'Use canonical inclusive dateFrom/dateTo dates with at most 89 inclusive days. One call produces one period and one workbook. ' +
             'Neighboring analytics are unavailable in this first tool: it does not provide product, traffic, finance, campaign, or other Ozon reports. ' +
             'The operation may create a saved report in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
+            'An OZON_ROUTE_NOT_READY failure carrying error.details.reason "extension_outdated" means the installed e-Comet extension is too old for this report: tell the user to update the extension to the version in error.details and retry, ' +
+            'and do not tell them to open the report page. The same code without those details means no ready Ozon promotion route was reachable: usually the exact promotion page is not open, but the extension may also be disconnected or reachable only through an older local process, so read local_bridge_status before naming a remedy. ' +
             'Returns compact metadata and exactly one private resource_link; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
         inputSchema: toolInputSchemas.ozon_seller_promotion_report,
         outputSchema: toolOutputSchemas.ozon_seller_promotion_report,

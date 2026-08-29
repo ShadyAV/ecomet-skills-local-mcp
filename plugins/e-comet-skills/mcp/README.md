@@ -4,10 +4,12 @@ Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` com
 dependencies; all required source modules are included in this directory. Node.js 22+ is required.
 
 `local_bridge_status` distinguishes bridge startup, extension waiting, Wildberries-tab readiness,
-update needs, and pairing failures, and returns a recommended next action. Peer-token storage affects
-pairing only; if a second agent reports `peer_unavailable`, continue in the agent that owns the bridge.
-Browser jobs may still return `LOCAL_STORAGE_FAILED` when result or artifact directories are
-unwritable; storage classification, fallback, and retry work is deferred.
+update needs, and pairing failures, and returns a recommended next action. It also reports the
+connected extension's version and whether that build announces the Ozon promotion capability; both
+are informational and never gate a typed tool. Peer-token storage affects pairing only; if a second
+agent reports `peer_unavailable`, continue in the agent that owns the bridge. Browser jobs may still
+return `LOCAL_STORAGE_FAILED` when result or artifact directories are unwritable; storage
+classification, fallback, and retry work is deferred.
 
 The canonical source and tests live under `e-comet-local-mcp/` in the private skills repository. This plugin contains a
 release snapshot of its `src/` directory.
@@ -41,6 +43,8 @@ Local tools:
 - `wb_check_by_query` — checks whether one article appears in search for up to 100 phrases, without reporting a position;
 - `wb_recommendations_by_product` — discovers and executes signed recommendation-shelf requests;
 - `wb_seller_reviews` — exports original WB seller-review XLSX reports through the authenticated seller portal;
+- `prepare_e_comet_feedback` — prepares one local e-Comet issue-report archive after explicit user consent;
+- `submit_e_comet_feedback` — uploads one prepared feedback archive with a trusted one-use grant;
 - `ozon_seller_promotion_report` — exports one Ozon Seller promotion analytics XLSX report for one inclusive period;
 - `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
   peer when it cannot;
@@ -63,6 +67,30 @@ one private local `resource_link` for each successful XLSX workbook. Workbook by
 context; opening or summarizing a workbook is a separate explicit action. Artifacts are retained locally for 24 hours. Each
 workbook is limited to 100 MiB and each job to 500 MiB; the shared artifact store is limited to 512 MiB and 1000 files, with
 oldest completed artifacts evicted first.
+
+`ozon_seller_promotion_report` needs an extension build that announces the Ozon promotion capability. An older
+build cannot run the report at all, so the tool answers with an explicit outdated-extension diagnosis naming the
+installed version, the minimum supported one, and the update page, instead of asking for the report route to be
+opened. The same code without that diagnosis says only that no ready Ozon route was reachable, which usually
+means the exact promotion page is not open.
+
+## Explicit-consent feedback reports
+
+`prepare_e_comet_feedback` prepares one local issue-report archive only after the user explicitly agrees to report an
+e-Comet problem. The user chooses one of three outcomes: send without the transcript,
+send with the exact current transcript after a sensitive-data warning, or do not send. Ambiguous replies cause no tool call. The agent never authors
+a transcript path or claim. The trusted hook publishes a private one-use claim for every preparation, and the local MCP
+consumes it before transcript or artifact access.
+
+The required order is `prepare_e_comet_feedback`, remote `report_issue`, then `submit_e_comet_feedback`. The preparation
+returns compact metadata and a temporary private `report.md` resource link; ZIP and transcript bytes do not enter model
+content and the resource must not be reread during the submission flow. The submit step accepts a one-use trusted upload
+grant, normalizes numeric or ISO expiry, and publishes a second private claim. The local MCP consumes it before archive or
+network access and reports storage acceptance only. A successful upload means the storage service accepted the archive; it
+does not confirm downstream delivery or processing. After acceptance, local retirement and tombstone maintenance run
+internally: both completed and deferred retirement return exactly `{ok,status,artifactId,transcriptIncluded}`, and cleanup
+state and warnings never enter model-visible or user-facing content. Rejected or uncertain uploads remain under the existing
+24-hour retention. Startup, operation-triggered, and periodic maintenance reconcile and expire feedback artifacts.
 
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
