@@ -2,6 +2,8 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { chmod, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
+import { resolvePeerTokenDir } from './state-paths.mjs';
+
 const CLAIM_DIRECTORY_NAME = 'feedback-local-claims-v1';
 const CLAIM_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CLAIM_FILE_PATTERN = /^[a-f0-9]{64}\.json$/;
@@ -81,14 +83,19 @@ const validateClock = (now) => {
     return nowMs;
 };
 
-const resolvePluginData = (env) => {
+export const resolveFeedbackClaimDirectory = (env = process.env) => {
+    const configuredHome = env?.USERPROFILE || env?.HOME;
+    const configuredStateRoot = env?.LOCALAPPDATA || env?.XDG_DATA_HOME || configuredHome;
     const pluginData = env?.CLAUDE_PLUGIN_DATA || env?.PLUGIN_DATA;
-    if (typeof pluginData !== 'string' || !pluginData.trim()) throw invalidClaim();
-    return resolve(pluginData);
+    if ((!configuredStateRoot || typeof configuredStateRoot !== 'string') && typeof pluginData === 'string' && pluginData.trim()) {
+        return join(resolve(pluginData), CLAIM_DIRECTORY_NAME);
+    }
+    const sharedStateDirectory = resolvePeerTokenDir({
+        env,
+        ...(typeof configuredHome === 'string' && configuredHome.trim() ? { home: resolve(configuredHome) } : {}),
+    });
+    return join(sharedStateDirectory, CLAIM_DIRECTORY_NAME);
 };
-
-export const resolveFeedbackClaimDirectory = (env = process.env) =>
-    join(resolvePluginData(env), CLAIM_DIRECTORY_NAME);
 
 const ensurePrivateDirectory = async (directory) => {
     await mkdir(directory, { recursive: true, mode: 0o700 });
