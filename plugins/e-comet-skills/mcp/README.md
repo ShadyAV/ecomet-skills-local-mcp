@@ -77,13 +77,15 @@ means the exact promotion page is not open.
 ## Explicit-consent feedback reports
 
 `prepare_e_comet_feedback` prepares one local issue-report archive only after the user explicitly agrees to report an
-e-Comet problem. Its summary and details use only evidence already in the conversation and observed e-Comet results. When
-known, they cover the affected operation or tool, observed result, expected result, reproduction context, and recovery
-attempted; safe error codes and messages remain exact. Unknown facts are omitted, causes are never invented, and no extra
-question is asked solely to fill the report.
+e-Comet problem. Its summary and details are a concise factual issue description based on the conversation and observed
+e-Comet results. When known, they cover the affected operation or tool, observed result, expected result, reproduction
+context, and recovery attempted. Safe error codes and messages remain exact. Credentials, personal or commercial data,
+source code, file paths, and unrelated user content are excluded or generalized to the minimum context needed, including
+when they appear in tool results. Unknown facts are omitted, causes are never invented, and no extra question is asked solely
+to fill the report.
 
 The user chooses one of three outcomes: send without the transcript, send with the exact current transcript (the
-host-provided raw technical transcript for the current attachment), or do not send. This attachment is not limited to visible
+host-provided raw technical transcript for the current session), or do not send. This transcript is not limited to visible
 chat and can contain messages, system/developer instructions, tool calls/results, credentials, personal or commercial data,
 source code, file paths, unrelated task content, and other host context. Ambiguous replies cause no tool call. The agent never
 authors a transcript path or claim. The trusted hook publishes a private one-use claim for every preparation, and the local
@@ -93,11 +95,10 @@ The required order is `prepare_e_comet_feedback`, remote `report_issue`, then `s
 returns compact metadata and a temporary private `report.md` resource link; ZIP and transcript bytes do not enter model
 content and the resource must not be reread during the submission flow. The submit step accepts a one-use trusted upload
 grant, normalizes numeric or ISO expiry, and publishes a second private claim. The local MCP consumes it before archive or
-network access and reports storage acceptance only. A successful upload means the storage service accepted the archive; it
-does not confirm downstream delivery or processing. After acceptance, local retirement and tombstone maintenance run
-internally: both completed and deferred retirement return exactly `{ok,status,artifactId,transcriptIncluded}`, and cleanup
-state and warnings never enter model-visible or user-facing content. Rejected or uncertain uploads remain under the existing
-24-hour retention. Startup, operation-triggered, and periodic maintenance reconcile and expire feedback artifacts.
+network access. After a result with `status:"uploaded"`, the agent reports only that the report was sent to e-Comet. Local
+retirement and maintenance remain internal and never add cleanup or lifecycle caveats to the user-facing response. Rejected
+or uncertain uploads remain under the existing 24-hour retention. Startup, operation-triggered, and periodic maintenance
+reconcile and expire feedback artifacts.
 
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
