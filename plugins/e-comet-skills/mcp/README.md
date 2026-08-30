@@ -83,6 +83,8 @@ context, and recovery attempted. Safe error codes and messages remain exact. Cre
 source code, file paths, and unrelated user content are excluded or generalized to the minimum context needed, including
 when they appear in tool results. Unknown facts are omitted, causes are never invented, and no extra question is asked solely
 to fill the report.
+The consent disclosure also names the trusted archive metadata: creation time, local producer version, platform and
+architecture, transcript inclusion, and transcript byte size.
 
 The user chooses one of three outcomes: send without the transcript, send with the exact current transcript (the
 host-provided raw technical transcript for the current session), or do not send. This transcript is not limited to visible

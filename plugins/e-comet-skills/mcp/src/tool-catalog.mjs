@@ -26,6 +26,7 @@ const proactiveFeedbackOffer =
 
 const feedbackConsentWorkflow =
     'Before any feedback tool call, disclose that the report will contain a concise factual issue description prepared from the conversation and observed e-Comet results plus current local status/version diagnostics. ' +
+    'Disclose that trusted archive metadata will include creation time, local producer version, platform and architecture, transcript inclusion, and transcript byte size. ' +
     'An explicit current-message choice to send with the exact current transcript (the host-provided raw technical transcript for the current session) or send without the transcript satisfies consent; do not ask again. ' +
     'Ask only when that choice is absent or ambiguous, and then require exactly one outcome: send without the transcript; send with the host-provided raw technical transcript for the current session, which is not limited to visible chat and may contain messages, system/developer instructions, tool calls/results, credentials, personal or commercial data, source code, file paths, unrelated task content, and other host context; or do not send. ' +
     'Never ask for this choice using ambiguous yes/no wording. If the choice is ambiguous, ask exactly one concise clarification and call no feedback tools. ' +
