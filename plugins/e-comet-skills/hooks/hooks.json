@@ -14,7 +14,7 @@
         ]
       },
       {
-        "matcher": "^mcp__(?:(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet[-_]local__prepare_e_comet_feedback|(?:e[-_]comet|e_comet_stage|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|2da262fd-fd1f-4636-90cb-75b02fd1f1f1)__report_issue)$",
+        "matcher": "^mcp__(?:(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet[-_]local__prepare_e_comet_feedback|(?:e[-_]comet|e_comet_stage|https_mcp_stage_int_e_comet_io_mcp|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|2da262fd-fd1f-4636-90cb-75b02fd1f1f1f1)__report_issue)$",
         "hooks": [
           {
             "type": "command",

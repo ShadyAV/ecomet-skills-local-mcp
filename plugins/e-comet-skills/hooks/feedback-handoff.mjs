@@ -49,7 +49,7 @@ const PROTOTYPE_SPECIAL_HEADER_NAMES = new Set(['__proto__', 'constructor', 'pro
 const LOCAL_FEEDBACK_TOOL =
     /^mcp__(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:prepare_e_comet_feedback|submit_e_comet_feedback)$/;
 const REMOTE_REPORT_ISSUE_TOOL = new RegExp(
-    `^mcp__(?:e[-_]comet|e_comet_stage|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|${COWORK_UUID_NAMESPACE})__report_issue$`
+    `^mcp__(?:e[-_]comet|e_comet_stage|https_mcp_stage_int_e_comet_io_mcp|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|${COWORK_UUID_NAMESPACE})__report_issue$`
 );
 
 class FeedbackHandoffError extends Error {
@@ -971,7 +971,7 @@ const preToolUseOutput = (updatedInput) =>
 const deniedPreToolUseOutput = (error) => {
     const recovery = error.code === 'FEEDBACK_GRANT_REFRESH_REQUIRED'
         ? 'Call report_issue again for the same prepared artifact.'
-        : 'Restart the feedback flow from preparation.';
+        : 'Do not retry automatically. Ask the user before starting a new feedback flow.';
     return JSON.stringify({
         hookSpecificOutput: {
             hookEventName: 'PreToolUse',
