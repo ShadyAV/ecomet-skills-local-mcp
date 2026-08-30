@@ -83,18 +83,19 @@ context, and recovery attempted. Safe error codes and messages remain exact. Cre
 source code, file paths, and unrelated user content are excluded or generalized to the minimum context needed, including
 when they appear in tool results. Unknown facts are omitted, causes are never invented, and no extra question is asked solely
 to fill the report.
-The consent disclosure also names the trusted archive metadata: creation time, local producer version, platform and
-architecture, transcript inclusion, and transcript byte size.
 
-The user chooses one of three outcomes: send without the transcript, send with the full history of the current session (the
-host-provided raw technical transcript), or do not send. This history includes more than messages and can contain
-system/service context, tool calls/results, credentials, personal or commercial data, source code, file paths, unrelated task
-content, and other host context. Ambiguous replies cause no tool call. The agent never
-authors a transcript path or claim. The trusted hook publishes a private one-use claim for every preparation, and the local
-MCP consumes it before transcript or artifact access.
+When the user has not already chosen, the agent explains once that the report contains the factual issue description plus
+current local diagnostics and basic environment information. The user then chooses exactly one outcome: send without the
+history of the current session, send with the full history of the current session, or do not send. The full history includes
+more than the visible chat and can contain system/service context, tool calls/results, credentials, personal or commercial
+data, source code, file paths, and unrelated context. An unambiguous choice in the initial request is
+already consent, so preparation starts without a repeated disclosure or acknowledgement. After a later unambiguous choice,
+preparation also starts immediately. An ambiguous reply receives one concise clarification without repeating the disclosure;
+a refusal causes no tool call. The agent never authors a history path or claim. The trusted hook publishes a private
+one-use claim for every preparation, and the local MCP consumes it before history or artifact access.
 
 The required order is `prepare_e_comet_feedback`, remote `report_issue`, then `submit_e_comet_feedback`. The preparation
-returns compact metadata and a temporary private `report.md` resource link; ZIP and transcript bytes do not enter model
+returns compact metadata and a temporary private `report.md` resource link; ZIP and history bytes do not enter model
 content and the resource must not be reread during the submission flow. The submit step accepts a one-use trusted upload
 grant, normalizes numeric or ISO expiry, and publishes a second private claim. The local MCP consumes it before archive or
 network access. After a result with `status:"uploaded"`, the agent reports only that the report was sent to e-Comet. Local

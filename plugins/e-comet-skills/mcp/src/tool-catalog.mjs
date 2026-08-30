@@ -22,14 +22,13 @@ const resultPathGuidance =
     'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request.';
 
 const proactiveFeedbackOffer =
-    "If an e-Comet tool fails unexpectedly, returns clearly incorrect data, or cannot provide its documented capability, briefly offer to report the problem using prepare_e_comet_feedback. If the user accepts, follow that tool's instructions. ";
+    "If an e-Comet tool fails unexpectedly, returns clearly incorrect data, or cannot provide its documented capability, briefly offer to report the problem. If the user accepts, use prepare_e_comet_feedback and follow that tool's instructions. ";
 
 const feedbackConsentWorkflow =
-    'Before any feedback tool call, disclose that the report will contain a concise factual issue description prepared from the conversation and observed e-Comet results plus current local status/version diagnostics. ' +
-    'Disclose that trusted archive metadata will include creation time, local producer version, platform and architecture, transcript inclusion, and transcript byte size. ' +
-    'An explicit current-message choice to send with the full history of the current session (the host-provided raw technical transcript) or send without the transcript satisfies consent; do not ask again. ' +
-    'Ask only when that choice is absent or ambiguous, and then require exactly one outcome: send without the transcript; send with the full history of the current session (the host-provided raw technical transcript), which includes more than messages and may contain system/service context, tool calls/results, credentials, personal or commercial data, source code, file paths, unrelated task content, and other host context; or do not send. ' +
-    'Never ask for this choice using ambiguous yes/no wording. If the choice is ambiguous, ask exactly one concise clarification and call no feedback tools. ' +
+    'An unambiguous choice in the current user message to send with the full history of the current session or without the history of the current session is consent. The first subsequent action must be prepare_e_comet_feedback; emit no assistant prose, disclosure, acknowledgement, restatement, or recap before that call. ' +
+    'When that choice is absent, send exactly one concise disclosure: the report contains a factual issue description plus current local diagnostics and basic environment information; offer exactly three outcomes: send without the history of the current session, send with the full history of the current session, or do not send; warn that the full history includes more than the visible chat and may contain system/service context, tool calls/results, credentials, personal or commercial data, source code, file paths, and unrelated context. Do not enumerate individual metadata fields. ' +
+    'When the user makes an unambiguous choice in a later reply, immediately call prepare_e_comet_feedback with no assistant acknowledgement, restatement, report recap, diagnostics recap, or metadata recap before the call. ' +
+    'Never ask for this choice using ambiguous yes/no wording. If the reply is ambiguous, ask exactly one concise clarification, do not repeat the disclosure, and call no feedback tools. ' +
     'If the user declines, do not call prepare_e_comet_feedback, report_issue, or submit_e_comet_feedback. ';
 
 const feedbackReportAuthoringGuidance =
@@ -42,7 +41,7 @@ const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
     'In Codex, execute the three feedback calls sequentially; await each result before starting the next; direct MCP and functions.exec are both allowed; never run dependent stages in parallel. ' +
     'Do not call local_bridge_status, retry discovery, or perform a report resource reread in this flow. ' +
-    'If prepare returns TRANSCRIPT_TOO_LARGE, explain that the requested transcript is too large to fit in the feedback archive. Do not retry or reprepare automatically, and never truncate or silently omit the transcript. Offer to start a fresh feedback flow without the transcript, and start it only after the user explicitly chooses to send without the transcript. ' +
+    'If prepare returns TRANSCRIPT_TOO_LARGE, explain that the requested history is too large to fit in the feedback archive. Do not retry or reprepare automatically, and never truncate or silently omit the history. Offer to start a fresh feedback flow without the history, and start it only after the user explicitly chooses to send without the history. ' +
     'If prepare or submit returns FEEDBACK_HOOK_HANDOFF_UNAVAILABLE, or a hook denies submit with FEEDBACK_GRANT_MISSING, explain that the trusted e-Comet hook handoff is unavailable. Disabled, untrusted, or modified hooks are possible causes, not a proven diagnosis. In Codex, tell the user to verify in the e-Comet plugin settings that its hooks are enabled and trusted. In Claude, direct the user to its hook permission settings. For a Russian-language user say: «Не сработала защищённая передача через хуки e-Comet. Проверьте в настройках клиента, что хуки e-Comet включены и им выдано доверие, затем начните отправку заново.» Do not claim that e-Comet itself is broken, do not retry automatically, and never attempt to trust hooks on the user’s behalf. ' +
     'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
     'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
@@ -59,10 +58,7 @@ export const serverInstructions =
     'фото, фотографии, картинки, изображения или галерея — wb_product_images. ' +
     'Не начинайте с browser_job. После выбора подписанного локального инструмента следуйте его описанию: ' +
     'browser_job используется только следующим шагом для получения подписанной авторизации выбранного задания. ' +
-    proactiveFeedbackOffer +
-    'To report an e-Comet problem, follow this consent contract: ' + feedbackConsentWorkflow +
-    'After an unambiguous send choice, use prepare_e_comet_feedback, remote report_issue, and submit_e_comet_feedback in that exact order. ' +
-    feedbackExecutionWorkflow;
+    proactiveFeedbackOffer;
 
 export const tools = [
     {
@@ -177,10 +173,10 @@ export const tools = [
             feedbackConsentWorkflow +
             feedbackReportAuthoringGuidance +
             'Use exactly one remote report_issue kind: bug, wrong_data, missing_capability, or unclear_contract; pass that same kind unchanged to report_issue. ' +
-            'Use includeTranscript:false only for send without the transcript and includeTranscript:true only for send with the full history of the current session. ' +
+            'Use includeTranscript:false only for send without the history of the current session and includeTranscript:true only for send with the full history of the current session. ' +
             'Never author transcriptPath, transcript_path, feedbackClaim, feedback_claim, feedbackSession, or feedback_session. The required order is prepare_e_comet_feedback, remote report_issue, then submit_e_comet_feedback. ' +
             feedbackExecutionWorkflow +
-            'This returns compact metadata and one private report.md resource link; ZIP and transcript bytes never enter model content.',
+            'This returns compact metadata and one private report.md resource link; ZIP and history bytes never enter model content.',
         inputSchema: toolInputSchemas.prepare_e_comet_feedback,
         outputSchema: toolOutputSchemas.prepare_e_comet_feedback,
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -189,9 +185,9 @@ export const tools = [
         name: 'submit_e_comet_feedback',
         description:
             'Upload the prepared e-Comet feedback archive only after remote report_issue returns the trusted upload grant. ' +
-            'Follow the exact order prepare_e_comet_feedback, remote report_issue, then submit_e_comet_feedback. ' +
             'The host hook injects uploadUrl, requiredHeaders, objectKey, expiresAt, expectedSize, expectedSha256, feedbackClaim, and feedbackSession. Model-authored arguments must omit every transport/claim field and snake_case alias; provide only the prepared artifactId. ' +
-            feedbackExecutionWorkflow +
+            'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
+            'If submit returns UPLOAD_UNCERTAIN, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ' +
             'This one-shot upload returns no resource, archive bytes, object key, URL, query, or headers.',
         inputSchema: toolInputSchemas.submit_e_comet_feedback,
         outputSchema: toolOutputSchemas.submit_e_comet_feedback,
