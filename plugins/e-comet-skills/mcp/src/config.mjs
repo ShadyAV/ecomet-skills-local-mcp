@@ -216,10 +216,10 @@ export const FEEDBACK_MAX_DETAILS_LENGTH = 4096;
 export const FEEDBACK_MAX_REPORT_BYTES = 16 * 1024;
 export const FEEDBACK_MAX_METADATA_BYTES = 2048;
 export const FEEDBACK_MAX_ARCHIVE_BYTES = 1024 * 1024;
-// Three STORED entries cost 326 bytes: local + central headers, both copies of the fixed UTF-8 names,
-// and EOCD. Reserving 16 KiB report + 2 KiB metadata guarantees every accepted maximum archives.
-export const FEEDBACK_MAX_TOTAL_ENTRY_BYTES = 1_048_250;
-export const FEEDBACK_MAX_TRANSCRIPT_BYTES = 1_029_818;
+export const FEEDBACK_MAX_TRANSCRIPT_BYTES = 1024 * 1024;
+// DEFLATE makes encoded size content-dependent. Bound the source bytes independently, then enforce the
+// one-MiB wire limit against the completed entry sizes before allocating the final ZIP container.
+export const FEEDBACK_MAX_TOTAL_ENTRY_BYTES = FEEDBACK_MAX_REPORT_BYTES + FEEDBACK_MAX_METADATA_BYTES + FEEDBACK_MAX_TRANSCRIPT_BYTES;
 export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES', 64 * 1024 * 1024);
 export const FEEDBACK_ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_FILES', 100);
