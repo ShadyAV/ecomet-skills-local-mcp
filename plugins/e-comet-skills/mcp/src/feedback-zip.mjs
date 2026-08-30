@@ -1,5 +1,6 @@
 import {
     FEEDBACK_MAX_ARCHIVE_BYTES,
+    FEEDBACK_MAX_METADATA_BYTES,
     FEEDBACK_MAX_REPORT_BYTES,
     FEEDBACK_MAX_TOTAL_ENTRY_BYTES,
     FEEDBACK_MAX_TRANSCRIPT_BYTES,
@@ -70,12 +71,14 @@ const writeCentralHeader = ({ nameBytes, bytes, crc, localOffset }) => {
     return header;
 };
 
-/** @param {{ reportBytes?: Buffer, transcriptBytes?: Buffer }} input */
-export const createFeedbackZip = ({ reportBytes, transcriptBytes } = {}) => {
+/** @param {{ reportBytes?: Buffer, metadataBytes?: Buffer, transcriptBytes?: Buffer }} input */
+export const createFeedbackZip = ({ reportBytes, metadataBytes, transcriptBytes } = {}) => {
     assertBytes(reportBytes, 'report', FEEDBACK_MAX_REPORT_BYTES, { allowEmpty: false });
+    assertBytes(metadataBytes, 'metadata', FEEDBACK_MAX_METADATA_BYTES, { allowEmpty: false });
     if (transcriptBytes !== undefined) assertBytes(transcriptBytes, 'transcript', FEEDBACK_MAX_TRANSCRIPT_BYTES);
     const entries = [
         { name: 'report.md', bytes: reportBytes },
+        { name: 'metadata.json', bytes: metadataBytes },
         ...(transcriptBytes === undefined ? [] : [{ name: 'transcript.jsonl', bytes: transcriptBytes }]),
     ];
     const totalEntryBytes = entries.reduce((total, entry) => total + entry.bytes.length, 0);

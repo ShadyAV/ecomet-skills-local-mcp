@@ -214,11 +214,12 @@ export const FEEDBACK_MAX_SUMMARY_LENGTH = 512;
 export const FEEDBACK_KINDS = Object.freeze(['bug', 'wrong_data', 'missing_capability', 'unclear_contract']);
 export const FEEDBACK_MAX_DETAILS_LENGTH = 4096;
 export const FEEDBACK_MAX_REPORT_BYTES = 16 * 1024;
-// Stored ZIP worst case: 1 MiB - 16 KiB report - 224 bytes for two local/central headers,
-// both UTF-8 names, and EOCD. The exact cap guarantees every accepted maximum-sized pair archives.
-export const FEEDBACK_MAX_TRANSCRIPT_BYTES = 1_031_968;
-export const FEEDBACK_MAX_TOTAL_ENTRY_BYTES = 1024 * 1024;
+export const FEEDBACK_MAX_METADATA_BYTES = 2048;
 export const FEEDBACK_MAX_ARCHIVE_BYTES = 1024 * 1024;
+// Three STORED entries cost 326 bytes: local + central headers, both copies of the fixed UTF-8 names,
+// and EOCD. Reserving 16 KiB report + 2 KiB metadata guarantees every accepted maximum archives.
+export const FEEDBACK_MAX_TOTAL_ENTRY_BYTES = 1_048_250;
+export const FEEDBACK_MAX_TRANSCRIPT_BYTES = 1_029_818;
 export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES', 64 * 1024 * 1024);
 export const FEEDBACK_ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_FILES', 100);

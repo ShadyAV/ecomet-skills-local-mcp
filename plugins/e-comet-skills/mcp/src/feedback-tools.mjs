@@ -1,9 +1,10 @@
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 
-import { FEEDBACK_MAX_SUMMARY_LENGTH, FEEDBACK_MAX_TRANSCRIPT_BYTES } from './config.mjs';
+import { BRIDGE_VERSION, FEEDBACK_MAX_SUMMARY_LENGTH, FEEDBACK_MAX_TRANSCRIPT_BYTES } from './config.mjs';
 import { consumeFeedbackClaim } from './feedback-claim.mjs';
 import { loadVerifiedFeedbackArtifact, registerFeedbackArtifact, retireFeedbackArtifact } from './feedback-artifact-store.mjs';
+import { serializeFeedbackMetadata } from './feedback-metadata.mjs';
 import { redactFeedbackText, renderFeedbackReport } from './feedback-report.mjs';
 import { createFeedbackZip } from './feedback-zip.mjs';
 import { putFeedbackArchive } from './feedback-upload.mjs';
@@ -75,11 +76,20 @@ const readTrustedTranscript = (path) => readTrustedFeedbackTranscript(path);
 /**
  * Creates and stores an immutable feedback archive. transcriptPath is injected by the trusted host hook.
  * @param {{ kind?: string, summary?: string, details?: string, includeTranscript?: boolean, transcriptPath?: string, feedbackClaim?: string, feedbackSession?: string }} input
- * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string) => Promise<Buffer>, consumeClaim?: typeof consumeFeedbackClaim }} dependencies
+ * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string) => Promise<Buffer>, consumeClaim?: typeof consumeFeedbackClaim, now?: () => number, platform?: string, arch?: string, version?: string }} dependencies
  */
 export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
-    const { getBridgeStatus, registerArtifact = registerFeedbackArtifact, readTranscript = readTrustedTranscript, consumeClaim = consumeFeedbackClaim } = dependencies;
-    if (typeof getBridgeStatus !== 'function' || typeof registerArtifact !== 'function' || typeof readTranscript !== 'function' || typeof consumeClaim !== 'function') {
+    const {
+        getBridgeStatus,
+        registerArtifact = registerFeedbackArtifact,
+        readTranscript = readTrustedTranscript,
+        consumeClaim = consumeFeedbackClaim,
+        now = Date.now,
+        platform = process.platform,
+        arch = process.arch,
+        version = BRIDGE_VERSION,
+    } = dependencies;
+    if (typeof getBridgeStatus !== 'function' || typeof registerArtifact !== 'function' || typeof readTranscript !== 'function' || typeof consumeClaim !== 'function' || typeof now !== 'function') {
         throw new TypeError('Feedback preparation dependencies are invalid');
     }
     const { kind, summary, details, includeTranscript, transcriptPath, feedbackClaim, feedbackSession } = input;
@@ -110,7 +120,16 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         // Diagnostics are optional; reporting must remain possible during bridge failures.
     }
     const reportBytes = renderFeedbackReport({ kind, summary, details, diagnostics, includeTranscript });
-    const archiveBytes = createFeedbackZip({ reportBytes, ...(transcriptBytes === undefined ? {} : { transcriptBytes }) });
+    const createdAt = new Date(now()).toISOString();
+    const metadataBytes = serializeFeedbackMetadata({
+        createdAt,
+        version,
+        platform,
+        arch,
+        transcriptIncluded: transcriptBytes !== undefined,
+        transcriptSizeBytes: transcriptBytes?.length ?? 0,
+    });
+    const archiveBytes = createFeedbackZip({ reportBytes, metadataBytes, ...(transcriptBytes === undefined ? {} : { transcriptBytes }) });
     const artifact = await registerArtifact({ kind, includeTranscript, reportBytes, archiveBytes });
     const prepared = {
         ok: true,
