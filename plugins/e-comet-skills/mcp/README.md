@@ -77,10 +77,17 @@ means the exact promotion page is not open.
 ## Explicit-consent feedback reports
 
 `prepare_e_comet_feedback` prepares one local issue-report archive only after the user explicitly agrees to report an
-e-Comet problem. The user chooses one of three outcomes: send without the transcript,
-send with the exact current transcript after a sensitive-data warning, or do not send. Ambiguous replies cause no tool call. The agent never authors
-a transcript path or claim. The trusted hook publishes a private one-use claim for every preparation, and the local MCP
-consumes it before transcript or artifact access.
+e-Comet problem. Its summary and details use only evidence already in the conversation and observed e-Comet results. When
+known, they cover the affected operation or tool, observed result, expected result, reproduction context, and recovery
+attempted; safe error codes and messages remain exact. Unknown facts are omitted, causes are never invented, and no extra
+question is asked solely to fill the report.
+
+The user chooses one of three outcomes: send without the transcript, send with the exact current transcript (the
+host-provided raw technical transcript for the current attachment), or do not send. This attachment is not limited to visible
+chat and can contain messages, system/developer instructions, tool calls/results, credentials, personal or commercial data,
+source code, file paths, unrelated task content, and other host context. Ambiguous replies cause no tool call. The agent never
+authors a transcript path or claim. The trusted hook publishes a private one-use claim for every preparation, and the local
+MCP consumes it before transcript or artifact access.
 
 The required order is `prepare_e_comet_feedback`, remote `report_issue`, then `submit_e_comet_feedback`. The preparation
 returns compact metadata and a temporary private `report.md` resource link; ZIP and transcript bytes do not enter model

@@ -26,10 +26,15 @@ const proactiveFeedbackOffer =
 
 const feedbackConsentWorkflow =
     'Before any feedback tool call, disclose that the report will contain the user-provided kind, summary, and details plus current local status/version diagnostics. ' +
-    'An explicit current-message choice to send with the exact current transcript or send without the transcript satisfies consent; do not ask again. ' +
-    'Ask only when that choice is absent or ambiguous, and then require exactly one outcome: send without the transcript; send with the exact current transcript, warning that it may contain credentials, personal or commercial data, source code, file paths, and unrelated task content; or do not send. ' +
+    'An explicit current-message choice to send with the exact current transcript (the host-provided raw technical transcript for the current attachment) or send without the transcript satisfies consent; do not ask again. ' +
+    'Ask only when that choice is absent or ambiguous, and then require exactly one outcome: send without the transcript; send with the host-provided raw technical transcript for the current attachment, which is not limited to visible chat and may contain messages, system/developer instructions, tool calls/results, credentials, personal or commercial data, source code, file paths, unrelated task content, and other host context; or do not send. ' +
     'Never ask for this choice using ambiguous yes/no wording. If the choice is ambiguous, ask exactly one concise clarification and call no feedback tools. ' +
     'If the user declines, do not call prepare_e_comet_feedback, report_issue, or submit_e_comet_feedback. ';
+
+const feedbackReportAuthoringGuidance =
+    'Build summary and details only from evidence already in the conversation and observed e-Comet results. ' +
+    'When known, cover the affected operation or tool, observed result, expected result, reproduction context, and recovery attempted; preserve the exact safe error code and message. ' +
+    'Omit unknown facts, never invent a cause, and do not ask extra questions solely to fill the report. ';
 
 const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
@@ -168,6 +173,7 @@ export const tools = [
         description:
             'Prepare one local e-Comet feedback archive from a concise issue report. Use only after the user explicitly agrees to report an e-Comet problem. ' +
             feedbackConsentWorkflow +
+            feedbackReportAuthoringGuidance +
             'Use exactly one remote report_issue kind: bug, wrong_data, missing_capability, or unclear_contract; pass that same kind unchanged to report_issue. ' +
             'Use includeTranscript:false only for send without the transcript and includeTranscript:true only for send with the exact current transcript. ' +
             'Never author transcriptPath, transcript_path, feedbackClaim, feedback_claim, feedbackSession, or feedback_session. The required order is prepare_e_comet_feedback, remote report_issue, then submit_e_comet_feedback. ' +
