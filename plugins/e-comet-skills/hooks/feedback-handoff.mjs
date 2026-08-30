@@ -971,7 +971,9 @@ const preToolUseOutput = (updatedInput) =>
 const deniedPreToolUseOutput = (error) => {
     const recovery = error.code === 'FEEDBACK_GRANT_REFRESH_REQUIRED'
         ? 'Call report_issue again for the same prepared artifact.'
-        : 'Do not retry automatically. Ask the user before starting a new feedback flow.';
+        : error.code === 'FEEDBACK_GRANT_MISSING'
+            ? 'The trusted e-Comet feedback handoff is unavailable. A disabled, untrusted, or modified hook is one possible cause. Check the client hook settings, then start a new feedback flow. Do not retry automatically.'
+            : 'Do not retry automatically. Ask the user before starting a new feedback flow.';
     return JSON.stringify({
         hookSpecificOutput: {
             hookEventName: 'PreToolUse',

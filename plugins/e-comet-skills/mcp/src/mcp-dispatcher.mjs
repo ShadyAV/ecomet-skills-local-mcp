@@ -221,6 +221,8 @@ export const createMcpMessageHandler = ({
         error:
             error?.code === 'TRANSCRIPT_UNAVAILABLE'
                 ? { code: 'TRANSCRIPT_UNAVAILABLE', message: 'The requested feedback transcript is unavailable.', stage: 'transcript', retryable: true }
+                : error?.code === 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE'
+                    ? { code: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', message: 'The trusted e-Comet hook handoff is unavailable.', stage: 'handoff', retryable: false }
                 : { code: 'FEEDBACK_PREPARATION_FAILED', message: 'The feedback archive could not be prepared.', stage: 'prepare', retryable: false },
     });
 

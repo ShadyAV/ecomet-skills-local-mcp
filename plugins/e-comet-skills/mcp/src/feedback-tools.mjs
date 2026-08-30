@@ -21,6 +21,7 @@ class FeedbackPreparationError extends Error {
 
 const transcriptUnavailable = () => new FeedbackPreparationError('TRANSCRIPT_UNAVAILABLE', 'The requested feedback transcript is unavailable.');
 const claimInvalid = () => new FeedbackPreparationError('FEEDBACK_CLAIM_INVALID', 'The trusted feedback handoff claim is invalid or has expired.');
+const hookHandoffUnavailable = () => new FeedbackPreparationError('FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', 'The trusted e-Comet hook handoff is unavailable.');
 const safeSummary = (summary) => redactFeedbackText(summary.replace(/\r\n?/g, '\n')).slice(0, FEEDBACK_MAX_SUMMARY_LENGTH);
 const safeArtifactId = (artifactId) => (typeof artifactId === 'string' && ARTIFACT_ID.test(artifactId) ? artifactId : undefined);
 
@@ -82,6 +83,9 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         throw new TypeError('Feedback preparation dependencies are invalid');
     }
     const { kind, summary, details, includeTranscript, transcriptPath, feedbackClaim, feedbackSession } = input;
+    if (feedbackClaim === undefined && feedbackSession === undefined && transcriptPath === undefined) {
+        throw hookHandoffUnavailable();
+    }
     const claimInput = { kind, summary, details, includeTranscript, ...(transcriptPath === undefined ? {} : { transcriptPath }) };
     try {
         // WHY: hook fields are only data until the local process consumes the matching private capability.
@@ -151,6 +155,19 @@ export const submitECometFeedback = async (input = {}, dependencies = {}) => {
     const artifactId = safeArtifactId(input.artifactId);
     if (typeof loadArtifact !== 'function' || typeof retireArtifact !== 'function' || typeof upload !== 'function' || typeof now !== 'function' || typeof consumeClaim !== 'function') {
         return uploadFailure(artifactId, 'UPLOAD_GRANT_INVALID');
+    }
+    if (
+        artifactId !== undefined &&
+        input.uploadUrl === undefined &&
+        input.requiredHeaders === undefined &&
+        input.objectKey === undefined &&
+        input.expiresAt === undefined &&
+        input.expectedSize === undefined &&
+        input.expectedSha256 === undefined &&
+        input.feedbackClaim === undefined &&
+        input.feedbackSession === undefined
+    ) {
+        return submitError(artifactId, 'failed', 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', 'The trusted e-Comet hook handoff is unavailable.', 'handoff', false);
     }
     const claimInput = {
         artifactId: input.artifactId,
