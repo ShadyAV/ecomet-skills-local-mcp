@@ -30,7 +30,7 @@ const feedbackConsentWorkflow =
 
 const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
-    'In Codex, use direct MCP tool calls for prepare_e_comet_feedback, remote report_issue, and submit_e_comet_feedback. These feedback tools must not run inside functions.exec because trusted PostToolUse state is required between calls. ' +
+    'In Codex, execute the three feedback calls sequentially; await each result before starting the next; direct MCP and functions.exec are both allowed; never run dependent stages in parallel. ' +
     'Do not call local_bridge_status, retry discovery, or perform a report resource reread in this flow. ' +
     'If prepare or submit returns FEEDBACK_HOOK_HANDOFF_UNAVAILABLE, or a hook denies submit with FEEDBACK_GRANT_MISSING, explain that the trusted e-Comet hook handoff is unavailable. Disabled, untrusted, or modified hooks are possible causes, not a proven diagnosis. In Codex, tell the user to verify in the e-Comet plugin settings that its hooks are enabled and trusted. In Claude, direct the user to its hook permission settings. For a Russian-language user say: «Не сработала защищённая передача через хуки e-Comet. Проверьте в настройках клиента, что хуки e-Comet включены и им выдано доверие, затем начните отправку заново.» Do not claim that e-Comet itself is broken, do not retry automatically, and never attempt to trust hooks on the user’s behalf. ' +
     'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
