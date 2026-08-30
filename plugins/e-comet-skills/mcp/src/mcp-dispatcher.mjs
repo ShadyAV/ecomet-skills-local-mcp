@@ -219,7 +219,9 @@ export const createMcpMessageHandler = ({
         ok: false,
         status: 'failed',
         error:
-            error?.code === 'TRANSCRIPT_UNAVAILABLE'
+            error?.code === 'TRANSCRIPT_TOO_LARGE'
+                ? { code: 'TRANSCRIPT_TOO_LARGE', message: 'The requested feedback transcript is too large to fit in the feedback archive.', stage: 'transcript', retryable: false }
+            : error?.code === 'TRANSCRIPT_UNAVAILABLE'
                 ? { code: 'TRANSCRIPT_UNAVAILABLE', message: 'The requested feedback transcript is unavailable.', stage: 'transcript', retryable: true }
                 : error?.code === 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE'
                     ? { code: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', message: 'The trusted e-Comet hook handoff is unavailable.', stage: 'handoff', retryable: false }

@@ -21,6 +21,7 @@ class FeedbackPreparationError extends Error {
 }
 
 const transcriptUnavailable = () => new FeedbackPreparationError('TRANSCRIPT_UNAVAILABLE', 'The requested feedback transcript is unavailable.');
+const transcriptTooLarge = () => new FeedbackPreparationError('TRANSCRIPT_TOO_LARGE', 'The requested feedback transcript is too large to fit in the feedback archive.');
 const claimInvalid = () => new FeedbackPreparationError('FEEDBACK_CLAIM_INVALID', 'The trusted feedback handoff claim is invalid or has expired.');
 const hookHandoffUnavailable = () => new FeedbackPreparationError('FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', 'The trusted e-Comet hook handoff is unavailable.');
 const safeSummary = (summary) => redactFeedbackText(summary.replace(/\r\n?/g, '\n')).slice(0, FEEDBACK_MAX_SUMMARY_LENGTH);
@@ -53,18 +54,20 @@ export const readTrustedFeedbackTranscript = async (path, options = {}) => {
     let handle;
     try {
         const before = await lstatImpl(path);
-        if (!before.isFile() || before.isSymbolicLink() || before.size > maxBytes) throw transcriptUnavailable();
+        if (!before.isFile() || before.isSymbolicLink()) throw transcriptUnavailable();
+        if (before.size > maxBytes) throw transcriptTooLarge();
         // O_NOFOLLOW blocks replacement by a link on supported platforms; the identity checks are required where
         // that flag is unavailable or ignored (notably Windows reparse points).
         handle = await openImpl(path, constants.O_RDONLY | constants.O_NOFOLLOW);
         const descriptor = await handle.stat();
         const after = await lstatImpl(path);
-        if (!descriptor.isFile() || descriptor.size > maxBytes || !after.isFile() || after.isSymbolicLink() || !sameFile(before, descriptor) || !sameFile(descriptor, after)) {
+        if (!descriptor.isFile() || !after.isFile() || after.isSymbolicLink() || !sameFile(before, descriptor) || !sameFile(descriptor, after)) {
             throw transcriptUnavailable();
         }
+        if (descriptor.size > maxBytes) throw transcriptTooLarge();
         return await readBoundedDescriptor(handle, descriptor.size);
     } catch (error) {
-        if (error?.code === 'TRANSCRIPT_UNAVAILABLE') throw error;
+        if (error?.code === 'TRANSCRIPT_UNAVAILABLE' || error?.code === 'TRANSCRIPT_TOO_LARGE') throw error;
         throw transcriptUnavailable();
     } finally {
         await handle?.close().catch(() => undefined);
@@ -108,8 +111,10 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     if (includeTranscript === true) {
         try {
             transcriptBytes = await readTranscript(transcriptPath);
-            if (!Buffer.isBuffer(transcriptBytes) || transcriptBytes.length > FEEDBACK_MAX_TRANSCRIPT_BYTES) throw transcriptUnavailable();
-        } catch {
+            if (!Buffer.isBuffer(transcriptBytes)) throw transcriptUnavailable();
+            if (transcriptBytes.length > FEEDBACK_MAX_TRANSCRIPT_BYTES) throw transcriptTooLarge();
+        } catch (error) {
+            if (error?.code === 'TRANSCRIPT_TOO_LARGE') throw error;
             throw transcriptUnavailable();
         }
     }
@@ -129,7 +134,13 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         transcriptIncluded: transcriptBytes !== undefined,
         transcriptSizeBytes: transcriptBytes?.length ?? 0,
     });
-    const archiveBytes = createFeedbackZip({ reportBytes, metadataBytes, ...(transcriptBytes === undefined ? {} : { transcriptBytes }) });
+    let archiveBytes;
+    try {
+        archiveBytes = createFeedbackZip({ reportBytes, metadataBytes, ...(transcriptBytes === undefined ? {} : { transcriptBytes }) });
+    } catch (error) {
+        if (transcriptBytes !== undefined && error?.code === 'FEEDBACK_ARCHIVE_TOO_LARGE') throw transcriptTooLarge();
+        throw error;
+    }
     const artifact = await registerArtifact({ kind, includeTranscript, reportBytes, archiveBytes });
     const prepared = {
         ok: true,

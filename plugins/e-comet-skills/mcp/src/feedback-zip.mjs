@@ -102,7 +102,9 @@ export const createFeedbackZip = ({ reportBytes, metadataBytes, transcriptBytes 
     const localBytes = preparedEntries.reduce((total, entry) => total + 30 + entry.nameBytes.length + entry.compressedBytes.length, 0);
     const centralBytes = preparedEntries.reduce((total, entry) => total + 46 + entry.nameBytes.length, 0);
     if (localBytes + centralBytes + 22 > FEEDBACK_MAX_ARCHIVE_BYTES) {
-        throw new RangeError(`Feedback archive exceeds the ${FEEDBACK_MAX_ARCHIVE_BYTES}-byte limit`);
+        throw Object.assign(new RangeError(`Feedback archive exceeds the ${FEEDBACK_MAX_ARCHIVE_BYTES}-byte limit`), {
+            code: 'FEEDBACK_ARCHIVE_TOO_LARGE',
+        });
     }
 
     let localOffset = 0;

@@ -563,6 +563,7 @@ const feedbackSubmitSchema = object(
 const feedbackErrorSchema = objectUnion(
     object({ code: { const: 'FEEDBACK_PREPARATION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'prepare' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     object({ code: { const: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'handoff' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    object({ code: { const: 'TRANSCRIPT_TOO_LARGE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     object({ code: { const: 'TRANSCRIPT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: true } }, ['code', 'message', 'stage', 'retryable']),
     object({ code: { const: 'ARTIFACT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'artifact' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     object({ code: { const: 'UPLOAD_GRANT_INVALID' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'grant' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
