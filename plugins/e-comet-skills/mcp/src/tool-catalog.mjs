@@ -21,6 +21,9 @@ const ozonAuthorizationWorkflow =
 const resultPathGuidance =
     'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request.';
 
+const proactiveFeedbackOffer =
+    "If an e-Comet tool fails unexpectedly, returns clearly incorrect data, or cannot provide its documented capability, briefly offer to report the problem using prepare_e_comet_feedback. If the user accepts, follow that tool's instructions. ";
+
 const feedbackConsentWorkflow =
     'Before any feedback tool call, disclose that the report will contain the user-provided kind, summary, and details plus current local status/version diagnostics. ' +
     'An explicit current-message choice to send with the exact current transcript or send without the transcript satisfies consent; do not ask again. ' +
@@ -49,6 +52,7 @@ export const serverInstructions =
     'фото, фотографии, картинки, изображения или галерея — wb_product_images. ' +
     'Не начинайте с browser_job. После выбора подписанного локального инструмента следуйте его описанию: ' +
     'browser_job используется только следующим шагом для получения подписанной авторизации выбранного задания. ' +
+    proactiveFeedbackOffer +
     'To report an e-Comet problem, follow this consent contract: ' + feedbackConsentWorkflow +
     'After an unambiguous send choice, use prepare_e_comet_feedback, remote report_issue, and submit_e_comet_feedback in that exact order. ' +
     feedbackExecutionWorkflow;
