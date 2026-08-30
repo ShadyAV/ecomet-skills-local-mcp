@@ -27,8 +27,8 @@ const proactiveFeedbackOffer =
 const feedbackConsentWorkflow =
     'Before any feedback tool call, disclose that the report will contain a concise factual issue description prepared from the conversation and observed e-Comet results plus current local status/version diagnostics. ' +
     'Disclose that trusted archive metadata will include creation time, local producer version, platform and architecture, transcript inclusion, and transcript byte size. ' +
-    'An explicit current-message choice to send with the exact current transcript (the host-provided raw technical transcript for the current session) or send without the transcript satisfies consent; do not ask again. ' +
-    'Ask only when that choice is absent or ambiguous, and then require exactly one outcome: send without the transcript; send with the host-provided raw technical transcript for the current session, which is not limited to visible chat and may contain messages, system/developer instructions, tool calls/results, credentials, personal or commercial data, source code, file paths, unrelated task content, and other host context; or do not send. ' +
+    'An explicit current-message choice to send with the full history of the current session (the host-provided raw technical transcript) or send without the transcript satisfies consent; do not ask again. ' +
+    'Ask only when that choice is absent or ambiguous, and then require exactly one outcome: send without the transcript; send with the full history of the current session (the host-provided raw technical transcript), which includes more than messages and may contain system/service context, tool calls/results, credentials, personal or commercial data, source code, file paths, unrelated task content, and other host context; or do not send. ' +
     'Never ask for this choice using ambiguous yes/no wording. If the choice is ambiguous, ask exactly one concise clarification and call no feedback tools. ' +
     'If the user declines, do not call prepare_e_comet_feedback, report_issue, or submit_e_comet_feedback. ';
 
@@ -45,7 +45,7 @@ const feedbackExecutionWorkflow =
     'If prepare returns TRANSCRIPT_TOO_LARGE, explain that the requested transcript is too large to fit in the feedback archive. Do not retry or reprepare automatically, and never truncate or silently omit the transcript. Offer to start a fresh feedback flow without the transcript, and start it only after the user explicitly chooses to send without the transcript. ' +
     'If prepare or submit returns FEEDBACK_HOOK_HANDOFF_UNAVAILABLE, or a hook denies submit with FEEDBACK_GRANT_MISSING, explain that the trusted e-Comet hook handoff is unavailable. Disabled, untrusted, or modified hooks are possible causes, not a proven diagnosis. In Codex, tell the user to verify in the e-Comet plugin settings that its hooks are enabled and trusted. In Claude, direct the user to its hook permission settings. For a Russian-language user say: «Не сработала защищённая передача через хуки e-Comet. Проверьте в настройках клиента, что хуки e-Comet включены и им выдано доверие, затем начните отправку заново.» Do not claim that e-Comet itself is broken, do not retry automatically, and never attempt to trust hooks on the user’s behalf. ' +
     'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
-    'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet вместе с техническим журналом.» or «Отчёт отправлен в e-Comet без технического журнала.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
+    'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
     'If submit returns UPLOAD_UNCERTAIN, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ';
 
 export const serverInstructions =
@@ -177,7 +177,7 @@ export const tools = [
             feedbackConsentWorkflow +
             feedbackReportAuthoringGuidance +
             'Use exactly one remote report_issue kind: bug, wrong_data, missing_capability, or unclear_contract; pass that same kind unchanged to report_issue. ' +
-            'Use includeTranscript:false only for send without the transcript and includeTranscript:true only for send with the exact current transcript. ' +
+            'Use includeTranscript:false only for send without the transcript and includeTranscript:true only for send with the full history of the current session. ' +
             'Never author transcriptPath, transcript_path, feedbackClaim, feedback_claim, feedbackSession, or feedback_session. The required order is prepare_e_comet_feedback, remote report_issue, then submit_e_comet_feedback. ' +
             feedbackExecutionWorkflow +
             'This returns compact metadata and one private report.md resource link; ZIP and transcript bytes never enter model content.',

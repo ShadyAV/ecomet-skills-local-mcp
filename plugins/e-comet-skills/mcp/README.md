@@ -86,10 +86,10 @@ to fill the report.
 The consent disclosure also names the trusted archive metadata: creation time, local producer version, platform and
 architecture, transcript inclusion, and transcript byte size.
 
-The user chooses one of three outcomes: send without the transcript, send with the exact current transcript (the
-host-provided raw technical transcript for the current session), or do not send. This transcript is not limited to visible
-chat and can contain messages, system/developer instructions, tool calls/results, credentials, personal or commercial data,
-source code, file paths, unrelated task content, and other host context. Ambiguous replies cause no tool call. The agent never
+The user chooses one of three outcomes: send without the transcript, send with the full history of the current session (the
+host-provided raw technical transcript), or do not send. This history includes more than messages and can contain
+system/service context, tool calls/results, credentials, personal or commercial data, source code, file paths, unrelated task
+content, and other host context. Ambiguous replies cause no tool call. The agent never
 authors a transcript path or claim. The trusted hook publishes a private one-use claim for every preparation, and the local
 MCP consumes it before transcript or artifact access.
 
