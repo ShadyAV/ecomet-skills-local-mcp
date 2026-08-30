@@ -30,7 +30,7 @@ const feedbackConsentWorkflow =
 
 const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
-    'In Codex, execute prepare_e_comet_feedback, remote report_issue, and submit_e_comet_feedback as three separate host tool executions. Never combine any two feedback calls in the same functions.exec or a single programmatic tool execution. Wait for the PostToolUse lifecycle after each call to finish before starting the next one. ' +
+    'In Codex, use direct MCP tool calls for prepare_e_comet_feedback, remote report_issue, and submit_e_comet_feedback. These feedback tools must not run inside functions.exec because trusted PostToolUse state is required between calls. ' +
     'Do not call local_bridge_status, retry discovery, or perform a report resource reread in this flow. ' +
     'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
     'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet вместе с историей беседы.» or «Отчёт отправлен в e-Comet без истории беседы.» according to transcriptIncluded. ' +
