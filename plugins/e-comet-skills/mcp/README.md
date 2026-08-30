@@ -74,16 +74,6 @@ installed version, the minimum supported one, and the update page, instead of as
 opened. The same code without that diagnosis says only that no ready Ozon route was reachable, which usually
 means the exact promotion page is not open.
 
-## Feedback reports
-
-The feedback tools' model-facing workflow is defined only in `src/tool-catalog.mjs`.
-
-`prepare_e_comet_feedback` creates an immutable local ZIP. Trusted host hooks bind one-use claims to the selected session,
-history input, prepared artifact, remote grant, and submit call. Model-authored input cannot supply paths, claims, or upload
-transport fields. The execution order is `prepare_e_comet_feedback`, remote `report_issue`, then
-`submit_e_comet_feedback`. Archive bytes remain outside model content. Feedback artifacts use the existing 24-hour
-retention and are reconciled by startup, operation-triggered, and periodic maintenance.
-
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
 their bounded WB fetches through that primary process. If the primary task closes, a remaining process retries the port
