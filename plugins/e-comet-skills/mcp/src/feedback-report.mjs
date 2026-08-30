@@ -81,7 +81,6 @@ export const selectFeedbackDiagnostics = (bridgeStatus) => {
         extension: extension && Object.keys(extension).length > 0 ? extension : undefined,
         peer: peer && Object.keys(peer).length > 0 ? peer : undefined,
         browserContext: browserContext && Object.keys(browserContext).length > 0 ? browserContext : undefined,
-        recommendedAction: copyString(bridgeStatus.recommendedAction),
     });
 };
 
