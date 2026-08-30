@@ -74,34 +74,15 @@ installed version, the minimum supported one, and the update page, instead of as
 opened. The same code without that diagnosis says only that no ready Ozon route was reachable, which usually
 means the exact promotion page is not open.
 
-## Explicit-consent feedback reports
+## Feedback reports
 
-`prepare_e_comet_feedback` prepares one local issue-report archive only after the user explicitly agrees to report an
-e-Comet problem. Its summary and details are a concise factual issue description based on the conversation and observed
-e-Comet results. When known, they cover the affected operation or tool, observed result, expected result, reproduction
-context, and recovery attempted. Safe error codes and messages remain exact. Credentials, personal or commercial data,
-source code, file paths, and unrelated user content are excluded or generalized to the minimum context needed, including
-when they appear in tool results. Unknown facts are omitted, causes are never invented, and no extra question is asked solely
-to fill the report.
+The feedback tools' model-facing workflow is defined only in `src/tool-catalog.mjs`.
 
-When the user has not already chosen, the agent explains once that the report contains the factual issue description plus
-current local diagnostics and basic environment information. The user then chooses exactly one outcome: send without the
-history of the current session, send with the full history of the current session, or do not send. The full history includes
-more than the visible chat and can contain system/service context, tool calls/results, credentials, personal or commercial
-data, source code, file paths, and unrelated context. An unambiguous choice in the initial request is
-already consent, so preparation starts without a repeated disclosure or acknowledgement. After a later unambiguous choice,
-preparation also starts immediately. An ambiguous reply receives one concise clarification without repeating the disclosure;
-a refusal causes no tool call. The agent never authors a history path or claim. The trusted hook publishes a private
-one-use claim for every preparation, and the local MCP consumes it before history or artifact access.
-
-The required order is `prepare_e_comet_feedback`, remote `report_issue`, then `submit_e_comet_feedback`. The preparation
-returns compact metadata and a temporary private `report.md` resource link; ZIP and history bytes do not enter model
-content and the resource must not be reread during the submission flow. The submit step accepts a one-use trusted upload
-grant, normalizes numeric or ISO expiry, and publishes a second private claim. The local MCP consumes it before archive or
-network access. After a result with `status:"uploaded"`, the agent reports only that the report was sent to e-Comet. Local
-retirement and maintenance remain internal and never add cleanup or lifecycle caveats to the user-facing response. Rejected
-or uncertain uploads remain under the existing 24-hour retention. Startup, operation-triggered, and periodic maintenance
-reconcile and expire feedback artifacts.
+`prepare_e_comet_feedback` creates an immutable local ZIP. Trusted host hooks bind one-use claims to the selected session,
+history input, prepared artifact, remote grant, and submit call. Model-authored input cannot supply paths, claims, or upload
+transport fields. The execution order is `prepare_e_comet_feedback`, remote `report_issue`, then
+`submit_e_comet_feedback`. Archive bytes remain outside model content. Feedback artifacts use the existing 24-hour
+retention and are reconciled by startup, operation-triggered, and periodic maintenance.
 
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy

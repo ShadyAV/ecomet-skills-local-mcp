@@ -25,17 +25,19 @@ const proactiveFeedbackOffer =
     "If an e-Comet tool fails unexpectedly, returns clearly incorrect data, or cannot provide its documented capability, briefly offer to report the problem. If the user accepts, use prepare_e_comet_feedback and follow that tool's instructions. ";
 
 const feedbackConsentWorkflow =
-    'An unambiguous choice in the current user message to send with the full history of the current session or without the history of the current session is consent. The first subsequent action must be prepare_e_comet_feedback; emit no assistant prose, disclosure, acknowledgement, restatement, or recap before that call. ' +
-    'When that choice is absent, send exactly one concise disclosure: the report contains a factual issue description plus current local diagnostics and basic environment information; offer exactly three outcomes: send without the history of the current session, send with the full history of the current session, or do not send; warn that the full history includes more than the visible chat and may contain system/service context, tool calls/results, credentials, personal or commercial data, source code, file paths, and unrelated context. Do not enumerate individual metadata fields. ' +
-    'When the user makes an unambiguous choice in a later reply, immediately call prepare_e_comet_feedback with no assistant acknowledgement, restatement, report recap, diagnostics recap, or metadata recap before the call. ' +
-    'Never ask for this choice using ambiguous yes/no wording. If the reply is ambiguous, ask exactly one concise clarification, do not repeat the disclosure, and call no feedback tools. ' +
+    'Before preparation, require both enough existing facts to identify what went wrong and an explicit user choice to send with the history of the current session or without it. Ask only for what is missing. ' +
+    'If the issue is absent or too vague to identify, ask one short plain-language question about what happened. If the history choice is also missing, combine that question naturally with the history choice in one or two sentences. If the issue is already identifiable but the choice is missing, ask naturally whether to send with the history of this session or without it. If the choice is known but the issue is not, ask only what happened. ' +
+    'Whenever asking for the history choice, warn at most once that the full session history includes more than the visible chat and may contain system context, tool calls/results, code, paths, and sensitive data. Do not repeat this warning when clarifying an ambiguous choice. ' +
+    'Do not describe report contents, diagnostics, environment metadata, version, platform, architecture, size, or file formats. Do not present a formal bullet list, checklist, or three-option menu unless the user asks for one. Cancellation is accepted, but it need not be offered as a menu option. ' +
+    'If the history choice is ambiguous, ask one short clarification, do not repeat the warning, and call no feedback tools. ' +
+    'When both an identifiable issue and an unambiguous history choice are known, the first subsequent action must be prepare_e_comet_feedback; emit no assistant prose, acknowledgement, restatement, or recap before that call. ' +
     'If the user declines, do not call prepare_e_comet_feedback, report_issue, or submit_e_comet_feedback. ';
 
 const feedbackReportAuthoringGuidance =
     'Build summary and details only from evidence already in the conversation and observed e-Comet results. ' +
     'When known, cover the affected operation or tool, observed result, expected result, reproduction context, and recovery attempted; preserve the exact safe error code and message. ' +
     'Exclude credentials, personal or commercial data, source code, file paths, and unrelated user content even when they appear in observed tool results; when such context matters, generalize it to only the minimum factual context needed to explain the failure. ' +
-    'Omit unknown facts, never invent a cause, and do not ask extra questions solely to fill the report. ';
+    'Omit unknown facts and never invent a cause. One question is allowed when there is no minimally identifiable issue; do not ask extra questions merely to fill optional expected-result or recovery fields. ';
 
 const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
