@@ -237,7 +237,7 @@ export const createMcpMessageHandler = ({
             const prepared = await prepareFeedback(args, { getBridgeStatus });
             const reportResource = prepared?.reportResource;
             if (!reportResource || reportResource.name !== 'report.md') throw new Error('missing report resource');
-            sendResult(id, resourceLinkResult(prepared, 'e-Comet feedback archive prepared.', [reportResource]));
+            sendResult(id, resourceLinkResult(prepared, JSON.stringify(prepared), [reportResource]));
         } catch (error) {
             sendResult(id, textResult(feedbackPrepareFailure(error), true));
         }

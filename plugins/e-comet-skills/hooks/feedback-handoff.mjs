@@ -528,80 +528,114 @@ const writeAtomicReplacement = async (path, value) => {
     }
 };
 
-export const extractPreparedMetadata = (toolResponse) => {
-    if (!isRecord(toolResponse) || toolResponse.isError === true) {
-        throw new FeedbackHandoffError('FEEDBACK_INVALID_PREPARED', 'The prepared feedback result is invalid.');
+const MAX_TOOL_RESULT_JSON_BYTES = 8 * 1024;
+const PREPARED_RESULT_KEYS = [
+    'artifactId',
+    'kind',
+    'ok',
+    'sha256',
+    'sizeBytes',
+    'status',
+    'summary',
+    'transcriptIncluded',
+];
+const GRANT_RESULT_KEYS = ['expires_at', 'object_key', 'required_headers', 'upload_url'];
+const exactKeys = (candidate, keys) =>
+    Object.keys(candidate).sort().join('\0') === [...keys].sort().join('\0');
+
+const parseWholeBoundedJson = (text) => {
+    if (typeof text !== 'string') return undefined;
+    const trimmed = text.trim();
+    if (!trimmed || byteLength(trimmed) > MAX_TOOL_RESULT_JSON_BYTES) return undefined;
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        return undefined;
     }
-    const candidates = [];
-    for (const key of ['structuredContent', 'structured_content']) {
-        if (!hasOwn(toolResponse, key)) continue;
-        const candidate = toolResponse[key];
-        if (
-            !isRecord(candidate) ||
-            Object.keys(candidate).sort().join('\0') !==
-                ['artifactId', 'kind', 'ok', 'sha256', 'sizeBytes', 'status', 'summary', 'transcriptIncluded']
-                    .sort()
-                    .join('\0') ||
-            candidate.ok !== true ||
-            candidate.status !== 'prepared' ||
-            typeof candidate.summary !== 'string' ||
-            byteLength(candidate.summary) < 1 ||
-            byteLength(candidate.summary) > 2048
-        ) {
-            throw new FeedbackHandoffError('FEEDBACK_INVALID_PREPARED', 'The prepared feedback result is invalid.');
-        }
-        candidates.push(
-            validatePreparedMetadata({
-                artifactId: candidate.artifactId,
-                kind: candidate.kind,
-                sizeBytes: candidate.sizeBytes,
-                sha256: candidate.sha256,
-                transcriptIncluded: candidate.transcriptIncluded,
-            })
-        );
-    }
-    if (candidates.length === 0) {
-        throw new FeedbackHandoffError('FEEDBACK_INVALID_PREPARED', 'The prepared feedback result is invalid.');
-    }
-    const canonical = JSON.stringify(candidates[0]);
-    if (candidates.some((candidate) => JSON.stringify(candidate) !== canonical)) {
-        throw new FeedbackHandoffError('FEEDBACK_AMBIGUOUS_PREPARED', 'The prepared feedback result is ambiguous.');
-    }
-    return candidates[0];
 };
 
-const rawGrantCandidates = (toolResponse) => {
-    let response = toolResponse;
-    if (typeof response === 'string') {
-        try {
-            response = JSON.parse(response);
-        } catch {
-            return [];
-        }
-        return isRecord(response) ? [response] : [];
+const contentJsonRecords = (content, discriminators) => {
+    if (!Array.isArray(content)) return [];
+    const candidates = [];
+    for (const item of content) {
+        if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string') continue;
+        const parsed = parseWholeBoundedJson(item.text);
+        if (!isRecord(parsed)) continue;
+        if (!discriminators.some((key) => hasOwn(parsed, key))) continue;
+        candidates.push(parsed);
     }
-    if (!isRecord(response) || response.isError === true) return [];
+    return candidates;
+};
+
+const invalidPrepared = () =>
+    new FeedbackHandoffError('FEEDBACK_INVALID_PREPARED', 'The prepared feedback result is invalid.');
+
+const validatePreparedResult = (candidate) => {
+    if (
+        !isRecord(candidate) ||
+        !exactKeys(candidate, PREPARED_RESULT_KEYS) ||
+        candidate.ok !== true ||
+        candidate.status !== 'prepared' ||
+        typeof candidate.summary !== 'string' ||
+        byteLength(candidate.summary) < 1 ||
+        byteLength(candidate.summary) > 2048
+    ) {
+        throw invalidPrepared();
+    }
+    const metadata = validatePreparedMetadata({
+        artifactId: candidate.artifactId,
+        kind: candidate.kind,
+        sizeBytes: candidate.sizeBytes,
+        sha256: candidate.sha256,
+        transcriptIncluded: candidate.transcriptIncluded,
+    });
+    return { ...metadata, summary: candidate.summary };
+};
+
+export const extractPreparedMetadata = (toolResponse) => {
+    let envelope;
+    let candidates = [];
+    if (Array.isArray(toolResponse)) {
+        envelope = toolResponse;
+    } else if (isRecord(toolResponse)) {
+        if (hasOwn(toolResponse, 'isError') && typeof toolResponse.isError !== 'boolean') throw invalidPrepared();
+        if (toolResponse.isError === true) throw invalidPrepared();
+        for (const key of ['structuredContent', 'structured_content']) {
+            if (hasOwn(toolResponse, key)) candidates.push(toolResponse[key]);
+        }
+        if (hasOwn(toolResponse, 'content') && !Array.isArray(toolResponse.content)) throw invalidPrepared();
+        envelope = toolResponse.content;
+    } else {
+        throw invalidPrepared();
+    }
+    candidates.push(...contentJsonRecords(envelope, PREPARED_RESULT_KEYS));
+    if (candidates.length === 0) throw invalidPrepared();
+    const validated = candidates.map(validatePreparedResult);
+    const canonical = JSON.stringify(validated[0]);
+    if (validated.some((candidate) => JSON.stringify(candidate) !== canonical)) {
+        throw new FeedbackHandoffError('FEEDBACK_AMBIGUOUS_PREPARED', 'The prepared feedback result is ambiguous.');
+    }
+    const { summary: _summary, ...metadata } = validated[0];
+    return metadata;
+};
+
+const invalidGrant = () =>
+    new FeedbackHandoffError('FEEDBACK_INVALID_GRANT', 'The feedback upload grant is invalid.');
+
+const rawGrantCandidates = (toolResponse) => {
+    if (typeof toolResponse === 'string') {
+        const parsed = parseWholeBoundedJson(toolResponse);
+        return parsed === undefined ? [] : [parsed];
+    }
+    if (!isRecord(toolResponse)) return [];
+    if (hasOwn(toolResponse, 'isError') && typeof toolResponse.isError !== 'boolean') throw invalidGrant();
+    if (toolResponse.isError === true) throw invalidGrant();
     const candidates = [];
     for (const key of ['structuredContent', 'structured_content']) {
-        if (hasOwn(response, key)) candidates.push(response[key]);
+        if (hasOwn(toolResponse, key)) candidates.push(toolResponse[key]);
     }
-    if (Array.isArray(response.content)) {
-        for (const item of response.content) {
-            if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string') continue;
-            let parsed;
-            try {
-                parsed = JSON.parse(item.text);
-            } catch {
-                continue;
-            }
-            if (
-                isRecord(parsed) &&
-                ['upload_url', 'object_key', 'required_headers', 'expires_at'].some((key) => hasOwn(parsed, key))
-            ) {
-                candidates.push(parsed);
-            }
-        }
-    }
+    if (hasOwn(toolResponse, 'content') && !Array.isArray(toolResponse.content)) throw invalidGrant();
+    candidates.push(...contentJsonRecords(toolResponse.content, GRANT_RESULT_KEYS));
     return candidates;
 };
 
@@ -613,10 +647,9 @@ export const extractUploadGrant = (toolResponse, { nowMs = Date.now(), expectedS
     const validated = candidates.map((candidate) => {
         if (
             !isRecord(candidate) ||
-            Object.keys(candidate).sort().join('\0') !==
-                ['expires_at', 'object_key', 'required_headers', 'upload_url'].sort().join('\0')
+            !exactKeys(candidate, GRANT_RESULT_KEYS)
         ) {
-            throw new FeedbackHandoffError('FEEDBACK_INVALID_GRANT', 'The feedback upload grant is invalid.');
+            throw invalidGrant();
         }
         return validateUploadGrant(
             {
