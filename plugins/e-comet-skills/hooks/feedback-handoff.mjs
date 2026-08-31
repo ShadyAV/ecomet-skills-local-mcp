@@ -543,26 +543,36 @@ const GRANT_RESULT_KEYS = ['expires_at', 'object_key', 'required_headers', 'uplo
 const exactKeys = (candidate, keys) =>
     Object.keys(candidate).sort().join('\0') === [...keys].sort().join('\0');
 
-const parseWholeBoundedJson = (text) => {
-    if (typeof text !== 'string') return undefined;
+const parseWholeBoundedJson = (text, invalid) => {
+    if (typeof text !== 'string' || byteLength(text) > MAX_TOOL_RESULT_JSON_BYTES) throw invalid();
     const trimmed = text.trim();
-    if (!trimmed || byteLength(trimmed) > MAX_TOOL_RESULT_JSON_BYTES) return undefined;
+    if (!trimmed) throw invalid();
     try {
         return JSON.parse(trimmed);
     } catch {
-        return undefined;
+        throw invalid();
     }
 };
 
-const contentJsonRecords = (content, discriminators) => {
+const looksLikeJsonCandidate = (text) => {
+    if (typeof text !== 'string') return false;
+    const leading = text.trimStart();
+    return (
+        leading.startsWith('{') ||
+        /^\[\s*(?:$|[\[\]{"\d\-tfn])/.test(leading) ||
+        leading.startsWith('"') ||
+        /^(?:true|false|null)\s*$/.test(leading) ||
+        /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\s*$/.test(leading)
+    );
+};
+
+const contentJsonRecords = (content, invalid) => {
     if (!Array.isArray(content)) return [];
     const candidates = [];
     for (const item of content) {
         if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string') continue;
-        const parsed = parseWholeBoundedJson(item.text);
-        if (!isRecord(parsed)) continue;
-        if (!discriminators.some((key) => hasOwn(parsed, key))) continue;
-        candidates.push(parsed);
+        if (!looksLikeJsonCandidate(item.text)) continue;
+        candidates.push(parseWholeBoundedJson(item.text, invalid));
     }
     return candidates;
 };
@@ -608,7 +618,7 @@ export const extractPreparedMetadata = (toolResponse) => {
     } else {
         throw invalidPrepared();
     }
-    candidates.push(...contentJsonRecords(envelope, PREPARED_RESULT_KEYS));
+    candidates.push(...contentJsonRecords(envelope, invalidPrepared));
     if (candidates.length === 0) throw invalidPrepared();
     const validated = candidates.map(validatePreparedResult);
     const canonical = JSON.stringify(validated[0]);
@@ -624,8 +634,7 @@ const invalidGrant = () =>
 
 const rawGrantCandidates = (toolResponse) => {
     if (typeof toolResponse === 'string') {
-        const parsed = parseWholeBoundedJson(toolResponse);
-        return parsed === undefined ? [] : [parsed];
+        return [parseWholeBoundedJson(toolResponse, invalidGrant)];
     }
     if (!isRecord(toolResponse)) return [];
     if (hasOwn(toolResponse, 'isError') && typeof toolResponse.isError !== 'boolean') throw invalidGrant();
@@ -635,7 +644,7 @@ const rawGrantCandidates = (toolResponse) => {
         if (hasOwn(toolResponse, key)) candidates.push(toolResponse[key]);
     }
     if (hasOwn(toolResponse, 'content') && !Array.isArray(toolResponse.content)) throw invalidGrant();
-    candidates.push(...contentJsonRecords(toolResponse.content, GRANT_RESULT_KEYS));
+    candidates.push(...contentJsonRecords(toolResponse.content, invalidGrant));
     return candidates;
 };
 
