@@ -556,14 +556,7 @@ const parseWholeBoundedJson = (text, invalid) => {
 
 const looksLikeJsonCandidate = (text) => {
     if (typeof text !== 'string') return false;
-    const leading = text.trimStart();
-    return (
-        leading.startsWith('{') ||
-        /^\[\s*(?:$|[\[\]{"\d\-tfn])/.test(leading) ||
-        leading.startsWith('"') ||
-        /^(?:true|false|null)\s*$/.test(leading) ||
-        /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\s*$/.test(leading)
-    );
+    return text.trimStart().startsWith('{');
 };
 
 const contentJsonRecords = (content, invalid) => {
