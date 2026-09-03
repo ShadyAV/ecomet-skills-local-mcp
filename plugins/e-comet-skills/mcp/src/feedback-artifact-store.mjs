@@ -9,9 +9,9 @@ import {
     FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES,
     FEEDBACK_ARTIFACT_RETENTION_MS,
     FEEDBACK_KINDS,
-    FEEDBACK_MAX_ARCHIVE_BYTES,
-    FEEDBACK_MAX_REPORT_BYTES,
+    FEEDBACK_MAX_BYTES,
 } from './config.mjs';
+import { FeedbackPreparationError } from './feedback-errors.mjs';
 
 const MANIFEST_SCHEMA_VERSION = 1;
 const MAX_MANIFEST_BYTES = 64 * 1024;
@@ -25,6 +25,17 @@ const FEEDBACK_STORE_LOCK_OWNER_PATTERN = /^([1-9]\d{0,9})-[0-9a-f]{8}-[0-9a-f]{
 const PENDING_ARTIFACT_PATTERN = /^\.pending-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 const PENDING_MANIFEST_PATTERN = /^\.pending-manifest-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 const FEEDBACK_MAINTENANCE_INTERVAL_MS = 15 * 60 * 1000;
+
+class FeedbackCrashCleanupError extends Error {
+    constructor(cause) {
+        super('Feedback crash leftover cleanup is incomplete', { cause });
+        this.feedbackReason = 'storage_cleanup_incomplete';
+    }
+}
+const storageError = (message, reason) => Object.assign(new Error(message), { feedbackReason: reason });
+
+// Registration keeps filesystem diagnostics private; the preparation boundary maps them to this stable public outcome.
+export const feedbackArtifactStorageUnavailable = (cause) => new FeedbackPreparationError('FEEDBACK_STORAGE_UNAVAILABLE', cause);
 
 const assertPositiveInteger = (value, name) => {
     if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`Feedback ${name} must be a positive safe integer`);
@@ -168,15 +179,13 @@ const acquireFeedbackStoreLock = async (artifactDirectory) => {
         }
         try {
             const metadata = await stat(lockPath);
-            if (Date.now() - metadata.mtimeMs > FEEDBACK_STORE_LOCK_STALE_MS) {
-                const owners = (await readdir(lockPath, { withFileTypes: true }))
-                    .filter((entry) => entry.isFile())
-                    .map((entry) => lockOwnerPid(entry.name))
-                    .filter((pid) => pid !== null);
-                if (owners.some((pid) => isProcessAlive(pid) !== false)) {
-                    await delay(FEEDBACK_STORE_LOCK_RETRY_DELAY_MS);
-                    continue;
-                }
+            const owners = (await readdir(lockPath, { withFileTypes: true }))
+                .filter((entry) => entry.isFile())
+                .map((entry) => lockOwnerPid(entry.name))
+                .filter((pid) => pid !== null);
+            // Identifiable dead owners need no age grace. Live/unknown processes remain protected.
+            if (!owners.some((pid) => isProcessAlive(pid) !== false) &&
+                (owners.length > 0 || Date.now() - metadata.mtimeMs > FEEDBACK_STORE_LOCK_STALE_MS)) {
                 const current = await stat(lockPath);
                 if (current.dev === metadata.dev && current.ino === metadata.ino && current.mtimeMs === metadata.mtimeMs) {
                     const stalePath = join(artifactDirectory, `.feedback-artifact-store-stale-lock-${process.pid}-${randomUUID()}`);
@@ -190,7 +199,7 @@ const acquireFeedbackStoreLock = async (artifactDirectory) => {
         }
         await delay(FEEDBACK_STORE_LOCK_RETRY_DELAY_MS);
     }
-    throw new Error('Feedback artifact storage is busy');
+    throw storageError('Feedback artifact storage is busy', 'storage_busy');
 };
 
 const withFeedbackStoreLock = async (artifactDirectory, operation) => {
@@ -216,22 +225,38 @@ const reportResource = (artifactDirectory, artifactId) => ({
     mimeType: 'text/markdown',
 });
 
-const pruneEntries = (entries, { maxArtifacts, maxTotalBytes, retentionMs, nowMs }) => {
+const pruneEntries = (entries, { maxArtifacts, maxTotalBytes, retentionMs, nowMs, physicalBytes }) => {
     const ordered = [...entries].sort((left, right) => left.createdAtMs - right.createdAtMs || left.artifactId.localeCompare(right.artifactId));
     const expired = ordered.filter((entry) => nowMs - entry.createdAtMs > retentionMs);
     const retained = ordered.filter((entry) => !expired.includes(entry));
-    let total = retained.reduce((sum, entry) => sum + entry.sizeBytes, 0);
+    let total = totalEntryBytes(retained, physicalBytes);
     const removed = [...expired];
     while (retained.length > maxArtifacts || total > maxTotalBytes) {
         const entry = retained.shift();
         if (!entry) break;
-        total -= entry.sizeBytes;
+        total -= physicalBytes.get(entry.artifactId);
         removed.push(entry);
     }
     return { retained, removed };
 };
 
-const totalEntryBytes = (entries) => entries.reduce((sum, entry) => sum + entry.sizeBytes, 0);
+const totalEntryBytes = (entries, physicalBytes) => entries.reduce((sum, entry) => sum + physicalBytes.get(entry.artifactId), 0);
+
+const measureArtifactBytes = async (artifactDirectory, entries) => {
+    const physicalBytes = new Map();
+    for (const entry of entries) {
+        let total = 0;
+        for (const name of ['report.md', 'feedback.zip']) {
+            try {
+                total += (await lstat(join(artifactPath(artifactDirectory, entry.artifactId), name))).size;
+            } catch (error) {
+                if (!isNotFound(error)) throw error;
+            }
+        }
+        physicalBytes.set(entry.artifactId, total);
+    }
+    return physicalBytes;
+};
 
 const retryPendingCleanup = async (artifactDirectory, entries, removeArtifactImpl) => {
     const remaining = [];
@@ -250,20 +275,20 @@ const manifestEquals = (left, right) => JSON.stringify(left) === JSON.stringify(
 const removeCrashLeftovers = async (artifactDirectory, manifest, removeArtifactImpl) => {
     const indexed = new Set([...manifest.artifacts, ...manifest.pendingCleanup].map((entry) => entry.artifactId));
     const entries = await readdir(artifactDirectory, { withFileTypes: true });
-    let cleanupFailed = false;
+    let cleanupError;
     for (const entry of entries) {
         const isPending = PENDING_ARTIFACT_PATTERN.test(entry.name) || PENDING_MANIFEST_PATTERN.test(entry.name);
         const isUnindexedArtifact = ARTIFACT_ID_PATTERN.test(entry.name) && !indexed.has(entry.name);
         if (!isPending && !isUnindexedArtifact) continue;
         try {
             await removeArtifactImpl(join(artifactDirectory, entry.name), { recursive: true, force: true });
-        } catch {
-            cleanupFailed = true;
+        } catch (error) {
+            cleanupError ??= new FeedbackCrashCleanupError(error);
         }
     }
     // WHY: unindexed crash survivors have no trustworthy manifest accounting. Reconciliation must fail closed
     // before pruning or admission rather than silently exceeding the physical count or byte quota.
-    if (cleanupFailed) throw new Error('Feedback crash leftover cleanup is incomplete');
+    if (cleanupError) throw cleanupError;
 };
 
 const retainExistingArtifactDirectories = async (artifactDirectory, entries, removeArtifactImpl) => {
@@ -299,24 +324,28 @@ const reconcileStoreUnlocked = async ({
     const withPendingRetried = { ...manifest, pendingCleanup };
     await removeCrashLeftovers(artifactDirectory, withPendingRetried, removeArtifactImpl);
     const existing = await retainExistingArtifactDirectories(artifactDirectory, manifest.artifacts, removeArtifactImpl);
-    const pendingCleanupBytes = totalEntryBytes(pendingCleanup);
+    // WHY: sizeBytes is the upload's ZIP size, not disk usage. Measuring both stored files also accounts
+    // for legacy manifests and reports left behind by a partially successful directory removal.
+    const physicalBytes = await measureArtifactBytes(artifactDirectory, [...existing, ...pendingCleanup]);
+    const pendingCleanupBytes = totalEntryBytes(pendingCleanup, physicalBytes);
     // WHY: registration passes candidate-reserved limits here. If surviving tombstones alone exceed either
     // limit, admission is impossible and must fail before pruning otherwise-valid active artifacts.
     if (pendingCleanup.length > maxArtifacts) {
-        throw new Error('Feedback artifact directory capacity is exhausted by pending cleanup');
+        throw storageError('Feedback artifact directory capacity is exhausted by pending cleanup', 'storage_capacity');
     }
     if (pendingCleanupBytes > maxTotalBytes) {
-        throw new Error('Feedback artifact byte capacity is exhausted by pending cleanup');
+        throw storageError('Feedback artifact byte capacity is exhausted by pending cleanup', 'storage_capacity');
     }
     const { retained, removed } = pruneEntries(existing, {
         maxArtifacts: Math.max(0, maxArtifacts - pendingCleanup.length),
         maxTotalBytes: Math.max(0, maxTotalBytes - pendingCleanupBytes),
         retentionMs,
         nowMs,
+        physicalBytes,
     });
     const nextPendingCleanup = [...pendingCleanup, ...removed];
     if (retained.length + nextPendingCleanup.length > FEEDBACK_ARTIFACT_MAX_FILES) {
-        throw new Error('Feedback artifact cleanup backlog is full');
+        throw storageError('Feedback artifact cleanup backlog is full', 'storage_capacity');
     }
     const tombstonedManifest = {
         schemaVersion: MANIFEST_SCHEMA_VERSION,
@@ -335,10 +364,10 @@ const reconcileStoreUnlocked = async ({
         await writeManifestImpl(artifactDirectory, nextManifest, platform);
     }
     if (nextManifest.artifacts.length + nextManifest.pendingCleanup.length > maxArtifacts) {
-        throw new Error('Feedback artifact directory capacity is exhausted by pending cleanup');
+        throw storageError('Feedback artifact directory capacity is exhausted by pending cleanup', 'storage_capacity');
     }
-    if (totalEntryBytes([...nextManifest.artifacts, ...nextManifest.pendingCleanup]) > maxTotalBytes) {
-        throw new Error('Feedback artifact byte capacity is exhausted by pending cleanup');
+    if (totalEntryBytes([...nextManifest.artifacts, ...nextManifest.pendingCleanup], physicalBytes) > maxTotalBytes) {
+        throw storageError('Feedback artifact byte capacity is exhausted by pending cleanup', 'storage_capacity');
     }
     return nextManifest;
 };
@@ -361,8 +390,8 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
     } = options;
     if (!artifact || typeof artifact !== 'object' || !FEEDBACK_KIND_SET.has(artifact.kind)) throw new RangeError('Feedback kind is invalid');
     if (typeof artifact.includeTranscript !== 'boolean') throw new TypeError('Feedback transcript inclusion must be a boolean');
-    assertBytes(artifact.reportBytes, 'report', FEEDBACK_MAX_REPORT_BYTES);
-    assertBytes(artifact.archiveBytes, 'archive', FEEDBACK_MAX_ARCHIVE_BYTES);
+    assertBytes(artifact.reportBytes, 'report', FEEDBACK_MAX_BYTES);
+    assertBytes(artifact.archiveBytes, 'archive', FEEDBACK_MAX_BYTES);
     assertPositiveInteger(maxArtifacts, 'artifact count limit');
     assertPositiveInteger(maxTotalBytes, 'artifact total byte limit');
     assertPositiveInteger(retentionMs, 'artifact retention');
@@ -371,7 +400,8 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
     if (typeof createArtifactId !== 'function') throw new TypeError('Feedback artifact ID factory must be a function');
     const nowMs = now();
     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new RangeError('Feedback artifact clock must return a non-negative safe integer');
-    if (artifact.archiveBytes.length > maxTotalBytes) throw new RangeError(`Feedback archive exceeds the ${maxTotalBytes}-byte storage limit`);
+    const candidateBytes = artifact.reportBytes.length + artifact.archiveBytes.length;
+    if (candidateBytes > maxTotalBytes) throw new RangeError(`Feedback artifact exceeds the ${maxTotalBytes}-byte storage limit`);
 
     await ensurePrivateDirectory(artifactDirectory, platform);
     return withFeedbackStoreLock(artifactDirectory, async () => {
@@ -388,7 +418,7 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
             manifest: initialManifest,
             // Reserve the candidate's physical directory slot and bytes before any candidate files exist.
             maxArtifacts: maxArtifacts - 1,
-            maxTotalBytes: maxTotalBytes - artifact.archiveBytes.length,
+            maxTotalBytes: maxTotalBytes - candidateBytes,
             retentionMs,
             nowMs,
             platform,
@@ -468,19 +498,29 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new RangeError('Feedback artifact clock must return a non-negative safe integer');
     await ensurePrivateDirectory(artifactDirectory, platform);
     return withFeedbackStoreLock(artifactDirectory, async () => {
-        const manifest = await reconcileStoreUnlocked({
-            artifactDirectory,
-            manifest: await readManifest(artifactDirectory),
-            maxArtifacts: FEEDBACK_ARTIFACT_MAX_FILES,
-            maxTotalBytes: FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES,
-            retentionMs,
-            nowMs,
-            platform,
-            writeManifestImpl,
-            removeArtifactImpl,
-        });
+        const originalManifest = await readManifest(artifactDirectory);
+        let manifest;
+        try {
+            manifest = await reconcileStoreUnlocked({
+                artifactDirectory,
+                manifest: originalManifest,
+                maxArtifacts: FEEDBACK_ARTIFACT_MAX_FILES,
+                maxTotalBytes: FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES,
+                retentionMs,
+                nowMs,
+                platform,
+                writeManifestImpl,
+                removeArtifactImpl,
+            });
+        } catch (error) {
+            // Only this owned cleanup failure precedes pruning/publication and leaves active entries intact.
+            // Loading grants no admission; exact target validation below remains mandatory.
+            if (!(error instanceof FeedbackCrashCleanupError)) throw error;
+            manifest = originalManifest;
+        }
         const entry = manifest.artifacts.find((candidate) => candidate.artifactId === request.artifactId);
-        if (!entry) throw new Error('Feedback artifact is missing or expired');
+        if (!entry) throw storageError('Feedback artifact is missing or expired', 'artifact_missing');
+        if (nowMs - entry.createdAtMs > retentionMs) throw storageError('Feedback artifact is expired', 'artifact_expired');
         if (request.expectedSize !== entry.sizeBytes) throw new Error('Feedback expected size does not match the artifact');
         if (request.expectedSha256 !== entry.sha256) throw new Error('Feedback expected SHA-256 does not match the artifact');
 
@@ -498,11 +538,11 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
         if (archiveMetadata.isSymbolicLink()) throw new Error('Feedback archive symlink is rejected');
         if (!archiveMetadata.isFile()) throw new Error('Feedback archive is invalid');
         const size = (await stat(archivePath)).size;
-        if (size <= 0 || size > FEEDBACK_MAX_ARCHIVE_BYTES) throw new Error('Feedback archive is invalid');
+        if (size <= 0 || size > FEEDBACK_MAX_BYTES) throw new Error('Feedback archive is invalid');
         const bytes = await readFile(archivePath);
         const actualSha256 = sha256(bytes);
         if (bytes.length !== entry.sizeBytes || bytes.length !== request.expectedSize || actualSha256 !== entry.sha256 || actualSha256 !== request.expectedSha256) {
-            throw new Error('Feedback archive integrity verification failed');
+            throw storageError('Feedback archive integrity verification failed', 'artifact_integrity');
         }
         return { bytes, kind: entry.kind, sizeBytes: entry.sizeBytes, sha256: entry.sha256, transcriptIncluded: entry.transcriptIncluded };
     });
@@ -568,7 +608,7 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
             pendingCleanup,
         };
         if (tombstoned.artifacts.length + tombstoned.pendingCleanup.length > maxArtifacts) {
-            throw new Error('Feedback artifact cleanup backlog is full');
+            throw storageError('Feedback artifact cleanup backlog is full', 'storage_capacity');
         }
         // WHY: publish and verify the tombstone before deleting either report.md or feedback.zip. A failed
         // directory removal then remains discoverable across process death and is retried by maintenance.

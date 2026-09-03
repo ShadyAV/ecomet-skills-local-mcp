@@ -212,14 +212,7 @@ export const FEEDBACK_MAX_SUMMARY_LENGTH = 512;
 // This is the remote report_issue contract. Every local validator must consume this one list so a report that
 // prepares successfully cannot later be rejected while requesting its upload grant.
 export const FEEDBACK_KINDS = Object.freeze(['bug', 'wrong_data', 'missing_capability', 'unclear_contract']);
-export const FEEDBACK_MAX_DETAILS_LENGTH = 4096;
-export const FEEDBACK_MAX_REPORT_BYTES = 16 * 1024;
-export const FEEDBACK_MAX_METADATA_BYTES = 2048;
-export const FEEDBACK_MAX_ARCHIVE_BYTES = 1024 * 1024;
-export const FEEDBACK_MAX_TRANSCRIPT_BYTES = 1024 * 1024;
-// DEFLATE makes encoded size content-dependent. Bound the source bytes independently, then enforce the
-// one-MiB wire limit against the completed entry sizes before allocating the final ZIP container.
-export const FEEDBACK_MAX_TOTAL_ENTRY_BYTES = FEEDBACK_MAX_REPORT_BYTES + FEEDBACK_MAX_METADATA_BYTES + FEEDBACK_MAX_TRANSCRIPT_BYTES;
+export const FEEDBACK_MAX_BYTES = 32 * 1024 * 1024;
 export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES', 64 * 1024 * 1024);
 export const FEEDBACK_ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_FILES', 100);

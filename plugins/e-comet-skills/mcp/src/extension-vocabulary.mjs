@@ -93,7 +93,7 @@ export const OZON_PROMOTION_CAPABILITY = 'ozon_seller_promotion_report@1';
 // Первая сборка расширения, которая объявляет OZON_PROMOTION_CAPABILITY в hello_ack и умеет
 // исполнять типизированную операцию отчёта Ozon. Всё, что старше, отвергает подписанное задание
 // как неизвестное ещё на авторизации, поэтому пользователю нужно обновление, а не открытая страница.
-export const OZON_PROMOTION_MIN_EXTENSION_VERSION = '1.5.5';
+export const OZON_PROMOTION_MIN_EXTENSION_VERSION = '1.5.6';
 // Единственный поддерживаемый канал обновления расширения.
 export const EXTENSION_UPDATE_URL = 'https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh';
 export const OZON_PROMOTION_CLIENT_MESSAGE_TYPES = Object.freeze([

@@ -2,6 +2,7 @@ import {
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
     FEEDBACK_KINDS,
+    FEEDBACK_MAX_BYTES,
     MAX_BROWSER_JOB_TOKEN_BYTES,
     MAX_IMAGE_ARTICLES,
     MAX_IMAGE_BASKET,
@@ -10,6 +11,7 @@ import {
     MAX_RETURNED_PRODUCTS,
 } from './config.mjs';
 import { PEER_REJECTION_CODES } from './connection-state.mjs';
+import { FEEDBACK_DIAGNOSTIC_OPERATIONS, FEEDBACK_DIAGNOSTIC_ERROR_TYPES, FEEDBACK_DIAGNOSTIC_SYSTEM_CODES, FEEDBACK_DIAGNOSTIC_MODULES, FEEDBACK_DIAGNOSTIC_REASONS } from './feedback-diagnostics.mjs';
 import {
     EXTENSION_UPDATE_URL,
     OZON_PROMOTION_CAPABILITY,
@@ -537,8 +539,8 @@ const hookOnlyFeedbackField = (description) => ({
 const feedbackPrepareSchema = object(
     {
         kind: { type: 'string', enum: FEEDBACK_KINDS },
-        summary: { type: 'string', minLength: 1, maxLength: 512 },
-        details: { type: 'string', minLength: 1, maxLength: 4096 },
+        summary: { type: 'string', minLength: 1 },
+        details: { type: 'string', minLength: 1 },
         includeTranscript: boolean,
         transcriptPath: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 4096, description: 'Trusted local transcript path.' }),
         feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'One-use local feedback handoff claim.' }),
@@ -553,29 +555,48 @@ const feedbackSubmitSchema = object(
         requiredHeaders: hookOnlyFeedbackField({ type: 'object', properties: {}, additionalProperties: { type: 'string', maxLength: 8192 }, description: 'Signed required request headers.' }),
         objectKey: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 1024, description: 'Storage object key.' }),
         expiresAt: hookOnlyFeedbackField({ type: 'integer', minimum: 1, description: 'Upload grant expiry timestamp.' }),
-        expectedSize: hookOnlyFeedbackField({ type: 'integer', minimum: 1, maximum: 1024 * 1024, description: 'Expected archive size in bytes.' }),
+        expectedSize: hookOnlyFeedbackField({ type: 'integer', minimum: 1, maximum: FEEDBACK_MAX_BYTES, description: 'Expected archive size in bytes.' }),
         expectedSha256: hookOnlyFeedbackField({ ...feedbackSha256, description: 'Expected archive SHA-256.' }),
         feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'One-use local feedback handoff claim.' }),
         feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
     },
     ['artifactId']
 );
+export const feedbackDiagnosticsSchema = object({
+    operation: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_OPERATIONS },
+    errorType: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_ERROR_TYPES },
+    systemCode: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_SYSTEM_CODES },
+    reason: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_REASONS },
+    httpStatus: { type: 'integer', minimum: 100, maximum: 599 },
+    source: object({ module: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_MODULES }, line: { type: 'integer', minimum: 1, maximum: 9999999 }, column: { type: 'integer', minimum: 1, maximum: 9999999 } }, ['module', 'line', 'column']),
+}, ['operation']);
+const feedbackErrorObject = (properties, required) => object({ ...properties, details: feedbackDiagnosticsSchema }, required);
 const feedbackErrorSchema = objectUnion(
-    object({ code: { const: 'FEEDBACK_PREPARATION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'prepare' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    object({ code: { const: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'handoff' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    object({ code: { const: 'TRANSCRIPT_TOO_LARGE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    object({ code: { const: 'TRANSCRIPT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: true } }, ['code', 'message', 'stage', 'retryable']),
-    object({ code: { const: 'ARTIFACT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'artifact' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    object({ code: { const: 'UPLOAD_GRANT_INVALID' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'grant' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    object({ code: { const: 'UPLOAD_REJECTED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    object({ code: { const: 'UPLOAD_UNCERTAIN' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable'])
+    feedbackErrorObject({ code: { const: 'FEEDBACK_SUBMISSION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'submit' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'FEEDBACK_PREPARATION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'prepare' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'handoff' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'TRANSCRIPT_TOO_LARGE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'TRANSCRIPT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: true } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'ARTIFACT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'artifact' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'UPLOAD_GRANT_INVALID' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'grant' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'UPLOAD_REJECTED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'UPLOAD_UNCERTAIN' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable'])
+);
+const feedbackPreparationErrorSchema = objectUnion(
+    feedbackErrorObject({ code: { const: 'FEEDBACK_INPUT_INVALID' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'prepare' }, retryable: { const: false }, recommendedAction: { const: 'RETRY_WITH_VALID_REPORT' } }, ['code', 'message', 'stage', 'retryable', 'recommendedAction']),
+    feedbackErrorObject({ code: { const: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'handoff' }, retryable: { const: false }, recommendedAction: { const: 'CHECK_FEEDBACK_HOOKS' } }, ['code', 'message', 'stage', 'retryable', 'recommendedAction']),
+    feedbackErrorObject({ code: { const: 'FEEDBACK_CLAIM_INVALID' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'handoff' }, retryable: { const: false }, recommendedAction: { const: 'RESTART_FEEDBACK_FLOW' } }, ['code', 'message', 'stage', 'retryable', 'recommendedAction']),
+    feedbackErrorObject({ code: { const: 'TRANSCRIPT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: true }, recommendedAction: { const: 'RETRY_FEEDBACK_ONCE' } }, ['code', 'message', 'stage', 'retryable', 'recommendedAction']),
+    feedbackErrorObject({ code: { const: 'FEEDBACK_ARCHIVE_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'archive' }, retryable: { const: true }, recommendedAction: { const: 'RETRY_FEEDBACK_ONCE' } }, ['code', 'message', 'stage', 'retryable', 'recommendedAction']),
+    feedbackErrorObject({ code: { const: 'FEEDBACK_STORAGE_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'storage' }, retryable: { const: true }, recommendedAction: { const: 'CHECK_LOCAL_STORAGE' } }, ['code', 'message', 'stage', 'retryable', 'recommendedAction']),
+    feedbackErrorObject({ code: { const: 'FEEDBACK_PREPARATION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'prepare' }, retryable: { const: true }, recommendedAction: { const: 'RETRY_FEEDBACK_ONCE' } }, ['code', 'message', 'stage', 'retryable', 'recommendedAction'])
 );
 const feedbackPrepareSuccessSchema = object(
     { ok: { const: true }, status: { const: 'prepared' }, artifactId: feedbackArtifactId, kind: { type: 'string', enum: FEEDBACK_KINDS }, sizeBytes: positiveInteger, sha256: feedbackSha256, transcriptIncluded: boolean, summary: { type: 'string', minLength: 1, maxLength: 512 } },
     ['ok', 'status', 'artifactId', 'kind', 'sizeBytes', 'sha256', 'transcriptIncluded', 'summary']
 );
 const feedbackPrepareFailureSchema = object(
-    { ok: { const: false }, status: { const: 'failed' }, error: feedbackErrorSchema },
+    { ok: { const: false }, status: { const: 'failed' }, error: feedbackPreparationErrorSchema },
     ['ok', 'status', 'error']
 );
 const feedbackSubmitSuccessSchema = object(
@@ -584,7 +605,7 @@ const feedbackSubmitSuccessSchema = object(
 );
 const feedbackSubmitFailureSchema = object(
     { ok: { const: false }, status: { type: 'string', enum: ['failed', 'rejected', 'uncertain'] }, artifactId: feedbackArtifactId, error: feedbackErrorSchema },
-    ['ok', 'status', 'artifactId', 'error']
+    ['ok', 'status', 'error']
 );
 
 export const toolInputSchemas = {

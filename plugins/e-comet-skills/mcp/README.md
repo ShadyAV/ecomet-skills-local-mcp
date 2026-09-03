@@ -3,6 +3,23 @@
 Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` command. The server has no npm runtime
 dependencies; all required source modules are included in this directory. Node.js 22+ is required.
 
+The `secondary` bridge role is a normal proxy role. `peer.bridgeVersion` and `extension.version`
+identify different components; version skew alone does not establish a failure cause.
+`extensionConnected:false` means there is no effective extension route, not why it is absent.
+Ozon reports require e-Comet extension 1.5.6+ and any authenticated Ozon Seller `/app` page,
+not a Wildberries tab or a specific promotion-overview page. Feedback is independent of bridge
+and extension readiness; its optional history is bounded current-session history supplied by
+the trusted host hook. The explicit history choice and protected handoff remain required.
+
+Feedback failures provide only closed diagnostic evidence in `error.details`: the operation, reason,
+system code, HTTP status, and optional public module/line context. No raw paths, messages, stacks,
+upload secrets, or history are exposed there. A source location helps investigation; it does not prove
+the root cause. Explain the supplied safe evidence and next action without guessing missing causes.
+`UPLOAD_UNCERTAIN` and `FEEDBACK_SUBMISSION_FAILED` mean delivery cannot be confirmed; ask for user
+direction and never automatically repeat submission or restart the flow. On success, say only that
+the report was sent to e-Comet. The archive has a 32 MiB aggregate limit; the chosen history option
+is never silently changed and truncation markers are not inserted.
+
 `local_bridge_status` distinguishes bridge startup, extension waiting, Wildberries-tab readiness,
 update needs, and pairing failures, and returns a recommended next action. It also reports the
 connected extension's version and whether that build announces the Ozon promotion capability; both
@@ -71,8 +88,8 @@ oldest completed artifacts evicted first.
 `ozon_seller_promotion_report` needs an extension build that announces the Ozon promotion capability. An older
 build cannot run the report at all, so the tool answers with an explicit outdated-extension diagnosis naming the
 installed version, the minimum supported one, and the update page, instead of asking for the report route to be
-opened. The same code without that diagnosis says only that no ready Ozon route was reachable, which usually
-means the exact promotion page is not open.
+opened. The same code without that diagnosis says only that no ready Ozon route was reachable; it does not
+establish why. Extension 1.5.6+ can use any authenticated Ozon Seller `/app` page, not only the promotion page.
 
 Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
 extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy

@@ -1,8 +1,10 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
+import { MAX_MCP_MESSAGE_BYTES } from './config.mjs';
 import { resolvePeerTokenDir } from './state-paths.mjs';
+import { safeFeedbackProperty, withFeedbackOperation } from './feedback-diagnostics.mjs';
 
 const CLAIM_DIRECTORY_NAME = 'feedback-local-claims-v1';
 const CLAIM_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -12,10 +14,10 @@ const CLAIM_HASH_PATTERN = /^[a-f0-9]{64}$/;
 const CLAIM_CONTEXT = 'e-comet-feedback-local-claim-v1';
 const CLAIM_VERSION = 1;
 const MAX_CLAIM_BYTES = 4 * 1024;
-// WHY: a valid 48 KiB grant gains at most 159 bytes when the hook adds the fixed UUID,
-// seven-digit archive size, and SHA-256 submit envelope. Keep bounded headroom so every
+// WHY: a valid 48 KiB grant gains at most 160 bytes when the hook adds the fixed UUID,
+// eight-digit archive size, and SHA-256 submit envelope. Keep bounded headroom so every
 // accepted grant can be claimed without increasing the persisted 4 KiB hash-only record.
-const MAX_BINDING_BYTES = 48 * 1024 + 256;
+const MAX_SUBMIT_BINDING_BYTES = 48 * 1024 + 256;
 const MAX_SESSION_BYTES = 512;
 const MAX_ACTIVE_CLAIMS = 128;
 const MAX_CLAIM_TTL_MS = 60_000;
@@ -24,17 +26,22 @@ const STALE_TEMPORARY_MS = 5 * 60_000;
 const CLAIM_LOCK_STALE_MS = 30_000;
 const CLAIM_LOCK_RETRY_LIMIT = 200;
 const CLAIM_LOCK_RETRY_MS = 10;
+const CLAIM_LOCK_RESIDUE_PATTERN = /^\.(?:claim-store-lock|stale-lock)-([1-9]\d{0,9})-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TARGET_TOOLS = new Set(['prepare_e_comet_feedback', 'submit_e_comet_feedback']);
 
 class FeedbackClaimError extends Error {
-    constructor() {
-        super('The trusted feedback handoff claim is invalid or has expired.');
+    constructor(reason = 'claim_record_invalid', cause) {
+        super('The trusted feedback handoff claim could not be verified.', { cause });
         this.name = 'FeedbackClaimError';
         this.code = 'FEEDBACK_CLAIM_INVALID';
+        this.feedbackReason = reason;
     }
 }
 
-const invalidClaim = () => new FeedbackClaimError();
+const invalidClaim = (reason, cause) => new FeedbackClaimError(reason, cause);
+const claimFailure = (error, operation) => withFeedbackOperation(
+    error instanceof FeedbackClaimError ? error : invalidClaim(null, error), operation,
+);
 const byteLength = (value) => Buffer.byteLength(value, 'utf8');
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -59,7 +66,7 @@ const canonicalize = (value, depth = 0) => {
     );
 };
 
-const inputBinding = (input) => {
+const inputBinding = (input, maximumBytes) => {
     if (!isRecord(input)) throw invalidClaim();
     let serialized;
     try {
@@ -68,7 +75,7 @@ const inputBinding = (input) => {
         if (error?.code === 'FEEDBACK_CLAIM_INVALID') throw error;
         throw invalidClaim();
     }
-    if (byteLength(serialized) > MAX_BINDING_BYTES) throw invalidClaim();
+    if (byteLength(serialized) > maximumBytes) throw invalidClaim();
     return sha256(serialized);
 };
 
@@ -76,6 +83,9 @@ const validateTargetTool = (targetTool) => {
     if (!TARGET_TOOLS.has(targetTool)) throw invalidClaim();
     return targetTool;
 };
+
+const maximumBindingBytes = (targetTool) =>
+    targetTool === 'prepare_e_comet_feedback' ? MAX_MCP_MESSAGE_BYTES : MAX_SUBMIT_BINDING_BYTES;
 
 const validateClock = (now) => {
     const nowMs = typeof now === 'function' ? now() : Number.NaN;
@@ -106,16 +116,35 @@ const ensurePrivateDirectory = async (directory) => {
 
 const acquireClaimStoreLock = async (directory) => {
     const lockPath = join(directory, '.feedback-claim-store.lock');
-    for (let attempt = 0; attempt < CLAIM_LOCK_RETRY_LIMIT; attempt += 1) {
+    const deadline = performance.now() + CLAIM_LOCK_RETRY_LIMIT * CLAIM_LOCK_RETRY_MS;
+    for (let attempt = 0; attempt < CLAIM_LOCK_RETRY_LIMIT && performance.now() < deadline; attempt += 1) {
+        const ownerId = `${process.pid}-${randomUUID()}`;
+        const candidatePath = join(directory, `.claim-store-lock-${ownerId}`);
+        await mkdir(candidatePath, { mode: 0o700 });
         try {
-            await mkdir(lockPath, { mode: 0o700 });
-            return async () => rm(lockPath, { recursive: true, force: true });
+            await writeFile(join(candidatePath, ownerId), '', { mode: 0o600, flag: 'wx' });
+            await rename(candidatePath, lockPath);
+            return async () => {
+                // An old owner can remove only its own marker, never a successor's directory contents.
+                await rm(join(lockPath, ownerId), { force: true });
+                try { await rmdir(lockPath); }
+                catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(safeFeedbackProperty(error, 'code'))) throw error; }
+            };
         } catch (error) {
-            if (error?.code !== 'EEXIST') throw error;
+            await rm(candidatePath, { recursive: true, force: true });
+            if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(safeFeedbackProperty(error, 'code'))) throw error;
         }
         try {
             const before = await stat(lockPath);
             if (Date.now() - before.mtimeMs > CLAIM_LOCK_STALE_MS) {
+                const owners = await readdir(lockPath, { withFileTypes: true });
+                const protectedOwner = owners.some(entry => {
+                    const match = entry.isFile() && /^([1-9]\d{0,9})-[0-9a-f-]{36}$/.exec(entry.name);
+                    if (!match) return false;
+                    try { process.kill(Number(match[1]), 0); return true; }
+                    catch (error) { return safeFeedbackProperty(error, 'code') !== 'ESRCH'; }
+                });
+                if (protectedOwner) { await delay(CLAIM_LOCK_RETRY_MS); continue; }
                 const stalePath = join(directory, `.stale-lock-${process.pid}-${randomUUID()}`);
                 try {
                     const current = await stat(lockPath);
@@ -133,7 +162,7 @@ const acquireClaimStoreLock = async (directory) => {
         }
         await delay(CLAIM_LOCK_RETRY_MS);
     }
-    throw invalidClaim();
+    throw invalidClaim('claim_store_busy');
 };
 
 const withClaimStoreLock = async (directory, operation) => {
@@ -193,8 +222,8 @@ const readClaimRecord = async (path) => {
     let record;
     try {
         record = JSON.parse(bytes.toString('utf8'));
-    } catch {
-        throw invalidClaim();
+    } catch (error) {
+        throw invalidClaim('claim_record_invalid', error);
     }
     if (
         !isRecord(record) ||
@@ -213,28 +242,53 @@ const cleanupClaimDirectory = async (directory, nowMs) => {
     let active = 0;
     for (const entry of entries) {
         const path = join(directory, entry.name);
+        const lockResidue = CLAIM_LOCK_RESIDUE_PATTERN.exec(entry.name);
+        if (lockResidue) {
+            let removed = false;
+            // Candidate/quarantine names carry their creator PID even if it died before writing a marker.
+            // Only positively dead owners may be reclaimed; age cannot displace a stalled live hook.
+            if (entry.isDirectory()) {
+                let dead = false;
+                try { process.kill(Number(lockResidue[1]), 0); }
+                catch (error) { dead = safeFeedbackProperty(error, 'code') === 'ESRCH'; }
+                if (dead) {
+                    try { await rm(path, { recursive: true, force: true }); removed = true; }
+                    catch (error) { removed = safeFeedbackProperty(error, 'code') === 'ENOENT'; }
+                }
+            }
+            // Unreadable, unremovable, live, and unknown-owner residues never bypass admission accounting.
+            if (!removed) active += 1;
+            continue;
+        }
         if (entry.isFile() && CLAIM_FILE_PATTERN.test(entry.name)) {
             let expired = false;
             try {
                 const record = await readClaimRecord(path);
                 expired = record.payload.expiresAtMs <= nowMs;
-            } catch {
-                expired = true;
+            } catch (error) {
+                // A failed filesystem read proves neither corruption nor expiry. Retain and count it.
+                expired = error instanceof FeedbackClaimError;
             }
             if (expired) await rm(path, { force: true });
             else active += 1;
             continue;
         }
         if (entry.isFile() && /^\.(?:stage|claimed)-/.test(entry.name)) {
+            let removed = false;
             try {
                 const metadata = await stat(path);
-                if (metadata.mtimeMs <= nowMs - STALE_TEMPORARY_MS) await rm(path, { force: true });
+                if (metadata.mtimeMs <= nowMs - STALE_TEMPORARY_MS) {
+                    await rm(path, { force: true });
+                    removed = true;
+                }
             } catch (error) {
-                if (error?.code !== 'ENOENT') throw error;
+                removed = safeFeedbackProperty(error, 'code') === 'ENOENT';
             }
+            // Guards/residues never grant authority but retain a bounded physical slot until removed.
+            if (!removed) active += 1;
         }
     }
-    if (active >= MAX_ACTIVE_CLAIMS) throw invalidClaim();
+    if (active >= MAX_ACTIVE_CLAIMS) throw invalidClaim('claim_capacity');
 };
 
 /**
@@ -252,10 +306,10 @@ export const issueFeedbackClaim = async (claim, options = {}) => {
             throw invalidClaim();
         }
         const targetTool = validateTargetTool(claim.targetTool);
-        const inputHash = inputBinding(claim.input);
+        const inputHash = inputBinding(claim.input, maximumBindingBytes(targetTool));
         const claimDirectory = options.claimDirectory ?? resolveFeedbackClaimDirectory(options.env ?? process.env);
         await ensurePrivateDirectory(claimDirectory);
-        return withClaimStoreLock(claimDirectory, async () => {
+        return await withClaimStoreLock(claimDirectory, async () => {
             await cleanupClaimDirectory(claimDirectory, nowMs);
 
             const claimToken = randomBytes(32).toString('base64url');
@@ -284,8 +338,7 @@ export const issueFeedbackClaim = async (claim, options = {}) => {
             return { claimToken, sessionBinding: payload.sessionHash };
         });
     } catch (error) {
-        if (error?.code === 'FEEDBACK_CLAIM_INVALID') throw error;
-        throw invalidClaim();
+        throw claimFailure(error, 'claim_issue');
     }
 };
 
@@ -297,7 +350,7 @@ export const issueFeedbackClaim = async (claim, options = {}) => {
 export const consumeFeedbackClaim = async (claim, options = {}) => {
     let claimedPath;
     try {
-        const nowMs = validateClock(options.now ?? Date.now);
+        validateClock(options.now ?? Date.now);
         if (
             !isRecord(claim) ||
             typeof claim.claimToken !== 'string' ||
@@ -306,10 +359,30 @@ export const consumeFeedbackClaim = async (claim, options = {}) => {
             !CLAIM_HASH_PATTERN.test(claim.sessionBinding)
         ) throw invalidClaim();
         const targetTool = validateTargetTool(claim.targetTool);
-        const inputHash = inputBinding(claim.input);
+        const inputHash = inputBinding(claim.input, maximumBindingBytes(targetTool));
         const tokenHash = sha256(claim.claimToken);
         const claimDirectory = options.claimDirectory ?? resolveFeedbackClaimDirectory(options.env ?? process.env);
         const pendingPath = join(claimDirectory, `${tokenHash}.json`);
+        // WHY: a nonexistent token must not accumulate tombstones; metadata access grants no authority.
+        try {
+            await lstat(pendingPath);
+        } catch (error) {
+            if (safeFeedbackProperty(error, 'code') !== 'ENOENT') throw error;
+            const consumed = await lstat(join(claimDirectory, `.claimed-guard-${tokenHash}`)).then(() => true, error => {
+                if (safeFeedbackProperty(error, 'code') !== 'ENOENT') throw error;
+                return false;
+            });
+            throw invalidClaim(consumed ? 'claim_already_consumed' : 'claim_missing', error);
+        }
+        // WHY: native Windows rename can succeed for multiple consumers. CREATE_NEW elects the sole owner first.
+        // Never unlink this guard from a consumer: a stalled owner must not remove a later guard after housekeeping.
+        // Existing .claimed-* housekeeping reclaims it after five minutes, beyond the one-minute claim lifetime.
+        try {
+            await writeFile(join(claimDirectory, `.claimed-guard-${tokenHash}`), '', { flag: 'wx', mode: 0o600 });
+        } catch (error) {
+            if (safeFeedbackProperty(error, 'code') === 'EEXIST') throw invalidClaim('claim_already_consumed', error);
+            throw error;
+        }
         claimedPath = join(claimDirectory, `.claimed-${process.pid}-${randomUUID()}`);
         await rename(pendingPath, claimedPath);
         const record = await readClaimRecord(claimedPath);
@@ -317,14 +390,17 @@ export const consumeFeedbackClaim = async (claim, options = {}) => {
             safeEqual(record.payload.tokenHash, tokenHash) &&
             safeEqual(record.payload.sessionHash, claim.sessionBinding) &&
             safeEqual(record.payload.inputHash, inputHash) &&
-            record.payload.targetTool === targetTool &&
-            record.payload.createdAtMs <= nowMs + CLAIM_CLOCK_SKEW_MS &&
-            record.payload.expiresAtMs > nowMs &&
-            safeEqual(record.signature, signPayload(claim.claimToken, record.payload));
-        if (!valid) throw invalidClaim();
+            record.payload.targetTool === targetTool;
+        if (!valid) throw invalidClaim('claim_binding_mismatch');
+        if (!safeEqual(record.signature, signPayload(claim.claimToken, record.payload))) throw invalidClaim('claim_signature_invalid');
+        await rm(claimedPath, { force: true }).catch(() => undefined);
+        claimedPath = undefined;
+        // WHY: even owned-record cleanup can stall beyond expiry; no awaited work may follow the final time check.
+        const nowMs = validateClock(options.now ?? Date.now);
+        if (record.payload.createdAtMs > nowMs + CLAIM_CLOCK_SKEW_MS) throw invalidClaim('claim_not_yet_valid');
+        if (record.payload.expiresAtMs <= nowMs) throw invalidClaim('claim_expired');
     } catch (error) {
-        if (error?.code === 'FEEDBACK_CLAIM_INVALID') throw error;
-        throw invalidClaim();
+        throw claimFailure(error, 'claim_consume');
     } finally {
         if (claimedPath) await rm(claimedPath, { force: true }).catch(() => undefined);
     }

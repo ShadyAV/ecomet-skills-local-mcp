@@ -6,12 +6,13 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { issueFeedbackClaim } from '../mcp/src/feedback-claim.mjs';
+import { feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from '../mcp/src/feedback-diagnostics.mjs';
 
 const MAX_HOOK_EVENT_BYTES = 1024 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
 const MAX_TRANSCRIPT_PATH_BYTES = 4096;
 const MAX_STATE_FILE_BYTES = 64 * 1024;
-const MAX_FEEDBACK_ARCHIVE_BYTES = 1024 * 1024;
+const MAX_FEEDBACK_ARCHIVE_BYTES = 32 * 1024 * 1024;
 const MAX_PENDING_ENTRIES = 128;
 const STATE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const CLOCK_SKEW_MS = 5000;
@@ -52,11 +53,15 @@ const REMOTE_REPORT_ISSUE_TOOL = new RegExp(
     `^mcp__(?:e[-_]comet|e_comet_stage|https_mcp_stage_int_e_comet_io_mcp|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|${COWORK_UUID_NAMESPACE})__report_issue$`
 );
 
+const ownedErrors = new WeakMap();
 class FeedbackHandoffError extends Error {
-    constructor(code, message) {
-        super(message);
+    constructor(code, message, cause) {
+        super(message, { cause });
         this.name = 'FeedbackHandoffError';
         this.code = code;
+        ownedErrors.set(this, { code, message });
+        if (code === 'FEEDBACK_BUSY') this.feedbackReason = 'storage_busy';
+        if (code === 'FEEDBACK_CAPACITY') this.feedbackReason = 'storage_capacity';
     }
 }
 
@@ -64,6 +69,15 @@ const byteLength = (value) => Buffer.byteLength(value, 'utf8');
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const wait = (delayMs) => new Promise((resolveWait) => setTimeout(resolveWait, delayMs));
+const hasProtectedOwner = async (lockPath) => {
+    for (const entry of await readdir(lockPath, { withFileTypes: true })) {
+        const match = entry.isFile() && /^([1-9]\d{0,9})-[0-9a-f-]{36}$/.exec(entry.name);
+        if (!match) continue;
+        try { process.kill(Number(match[1]), 0); return true; }
+        catch (error) { if (safeFeedbackProperty(error, 'code') !== 'ESRCH') return true; }
+    }
+    return false;
+};
 
 const validateSessionId = (sessionId) => {
     if (
@@ -156,6 +170,10 @@ const acquireStoreLock = async (dataDirectory, fileNow) => {
         try {
             const lockStat = await stat(lockPath);
             if (fileNow() - lockStat.mtimeMs > STORE_LOCK_STALE_MS) {
+                if (await hasProtectedOwner(lockPath)) {
+                    await wait(LOCK_RETRY_DELAY_MS);
+                    continue;
+                }
                 const stalePath = join(dataDirectory, `.stale-lock-${process.pid}-${randomUUID()}`);
                 try {
                     const currentStat = await stat(lockPath);
@@ -474,20 +492,26 @@ const cleanupStore = async (dataDirectory, nowMs, retentionMs) => {
                     parseGrantEntry(state, { nowMs, retentionMs, allowExpired: true });
                     fresh = true;
                 }
-            } catch {
-                fresh = false;
+            } catch (error) {
+                // Unreadable records retain their physical capacity slot, never authority.
+                fresh = !(error instanceof FeedbackHandoffError);
             }
             if (fresh) active += 1;
             else await removeFile(path);
             continue;
         }
         if (/^\.(?:stage|claim|backup)-/.test(entry.name)) {
+            let removed = false;
             try {
                 const fileStat = await stat(path);
-                if (fileStat.mtimeMs <= Date.now() - retentionMs) await removeFile(path);
+                if (fileStat.mtimeMs <= Date.now() - retentionMs) {
+                    await removeFile(path);
+                    removed = true;
+                }
             } catch (error) {
-                if (error?.code !== 'ENOENT') throw error;
+                removed = safeFeedbackProperty(error, 'code') === 'ENOENT';
             }
+            if (!removed) active += 1;
         }
     }
     return active;
@@ -503,6 +527,7 @@ const writeAtomicReplacement = async (path, value) => {
     }
     await writeFile(stagePath, serialized, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     let displaced = false;
+    let published = false;
     try {
         try {
             await rename(stagePath, path);
@@ -513,7 +538,10 @@ const writeAtomicReplacement = async (path, value) => {
             await rename(stagePath, path);
         }
         if (process.platform !== 'win32') await chmod(path, 0o600);
-        if (displaced) await removeFile(backupPath);
+        // Successful rename publishes the validated bytes. A fallible readback must not restore
+        // prepared authority beside an already committed grant or undo a completed replacement.
+        published = true;
+        if (displaced) await removeFile(backupPath).catch(() => undefined);
     } catch (error) {
         if (displaced) {
             try {
@@ -524,7 +552,8 @@ const writeAtomicReplacement = async (path, value) => {
         }
         throw error;
     } finally {
-        await removeFile(stagePath);
+        if (published) await removeFile(stagePath).catch(() => undefined);
+        else await removeFile(stagePath);
     }
 };
 
@@ -720,8 +749,8 @@ export const stagePreparedArtifact = async ({
         const preparedPath = preparedPathForSession(dataDirectory, sessionId);
         const grantPath = grantPathForSession(dataDirectory, sessionId);
         const active = await cleanupStore(dataDirectory, nowMs, retentionMs);
-        const ownsEntry = await stat(preparedPath).then(() => true, () => false) || await stat(grantPath).then(() => true, () => false);
-        if (active >= maxEntries && !ownsEntry) {
+        // Reserve publication headroom, including a possible unclaimable replacement backup.
+        if (active >= maxEntries) {
             throw new FeedbackHandoffError('FEEDBACK_CAPACITY', 'Too many feedback handoffs are waiting locally.');
         }
         await removeFile(grantPath);
@@ -758,7 +787,10 @@ export const stageUploadGrant = async ({
     }
     await ensurePrivateStoreDirectory(dataDirectory);
     await withStoreLock(dataDirectory, fileNow, async () => {
-        await cleanupStore(dataDirectory, nowMs, retentionMs);
+        const active = await cleanupStore(dataDirectory, nowMs, retentionMs);
+        if (active >= MAX_PENDING_ENTRIES) {
+            throw new FeedbackHandoffError('FEEDBACK_CAPACITY', 'Too many feedback handoffs are waiting locally.');
+        }
         const preparedPath = preparedPathForSession(dataDirectory, sessionId);
         const grantPath = grantPathForSession(dataDirectory, sessionId);
         if (await stat(grantPath).then(() => true, () => false)) {
@@ -826,7 +858,7 @@ export const stageUploadGrant = async ({
             published = true;
         } finally {
             if (published) {
-                await removeFile(claimPath);
+                await removeFile(claimPath).catch(() => undefined);
             } else {
                 try {
                     await rename(claimPath, preparedPath);
@@ -859,7 +891,7 @@ const retireGrantAndRestorePrepared = async ({ dataDirectory, sessionId, grantPa
         restored = true;
     } finally {
         if (restored) {
-            await removeFile(retirementPath);
+            await removeFile(retirementPath).catch(() => undefined);
         } else {
             try {
                 await rename(retirementPath, grantPath);
@@ -914,10 +946,12 @@ export const claimUploadGrant = async ({
                 allowExpired: true,
             });
         } catch (error) {
-            if (error?.code !== 'ENOENT') await removeFile(grantPath);
+            if (!(error instanceof FeedbackHandoffError) && safeFeedbackProperty(error, 'code') !== 'ENOENT') throw error;
+            if (error instanceof FeedbackHandoffError) await removeFile(grantPath);
             throw new FeedbackHandoffError(
                 'FEEDBACK_GRANT_MISSING',
-                'No valid feedback upload grant is waiting for this session.'
+                'No valid feedback upload grant is waiting for this session.',
+                error,
             );
         }
         if (entry.targetTool !== targetTool) {
@@ -962,7 +996,7 @@ export const claimUploadGrant = async ({
             }
             throw error;
         }
-        await removeFile(claimPath);
+        await removeFile(claimPath).catch(() => undefined);
         return publication === undefined ? transport : { ...transport, publication };
     });
 };
@@ -1014,15 +1048,21 @@ const deniedPreToolUseOutput = (error) => {
             hookEventName: 'PreToolUse',
             permissionDecision: 'deny',
             permissionDecisionReason:
-                `${error.code}: e-Comet could not safely complete the trusted feedback handoff. ` +
-                recovery,
+                `${error.code}: ${error.message} ${JSON.stringify(error.details)} ` + recovery,
         },
     });
 };
 
-const safeHookError = (error) => {
-    if (error instanceof FeedbackHandoffError) return error;
-    return new FeedbackHandoffError('FEEDBACK_STORAGE_ERROR', 'The local feedback handoff failed.');
+const safeHookError = (error, operation) => {
+    const details = feedbackDiagnostics(error, operation);
+    const owned = ownedErrors.get(error);
+    if (owned) return { ...owned, details };
+    const filesystemBlocked = ['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EDQUOT', 'EROFS', 'EMFILE', 'ENFILE', 'EIO', 'EEXIST', 'ENOTDIR', 'EISDIR', 'ENOTEMPTY', 'EBUSY', 'EINVAL', 'ELOOP', 'EXDEV', 'ENAMETOOLONG'].includes(details.systemCode);
+    if (filesystemBlocked) return { code: 'FEEDBACK_STORAGE_ERROR', message: 'A local feedback filesystem operation could not complete.', details };
+    if (safeFeedbackProperty(error, 'code') === 'FEEDBACK_CLAIM_INVALID') {
+        return { code: 'FEEDBACK_CLAIM_INVALID', message: 'The trusted feedback handoff claim could not be verified.', details };
+    }
+    return { code: 'FEEDBACK_INTERNAL_ERROR', message: 'The local feedback handoff failed internally.', details: { ...details, reason: 'internal_error' } };
 };
 
 const prepareInputWithTrustedTranscript = (event) => {
@@ -1070,8 +1110,8 @@ const issueLocalClaim = async ({ event, effectiveInput, targetTool, env, nowMs, 
             },
             { env, now: () => nowMs, ttlMs },
         );
-    } catch {
-        throw new FeedbackHandoffError('FEEDBACK_STORAGE_ERROR', 'The local feedback handoff failed.');
+    } catch (error) {
+        throw withFeedbackOperation(error, 'claim_issue');
     }
 };
 
@@ -1107,8 +1147,8 @@ export const processHookEvent = async (event, _options = {}) => {
             });
             return { exitCode: 0, stdout: '', stderr: '' };
         } catch (error) {
-            const safeError = safeHookError(error);
-            return { exitCode: 2, stdout: '', stderr: `${safeError.code}: ${safeError.message}` };
+            const safeError = safeHookError(error, 'handoff_authorize');
+            return { exitCode: 2, stdout: '', stderr: `${safeError.code}: ${safeError.message} ${JSON.stringify(safeError.details)}` };
         }
     }
     if (
@@ -1150,8 +1190,8 @@ export const processHookEvent = async (event, _options = {}) => {
             });
             return { exitCode: 0, stdout: '', stderr: '' };
         } catch (error) {
-            const safeError = safeHookError(error);
-            return { exitCode: 2, stdout: '', stderr: `${safeError.code}: ${safeError.message}` };
+            const safeError = safeHookError(error, 'handoff_prepare');
+            return { exitCode: 2, stdout: '', stderr: `${safeError.code}: ${safeError.message} ${JSON.stringify(safeError.details)}` };
         }
     }
     if (
@@ -1181,7 +1221,7 @@ export const processHookEvent = async (event, _options = {}) => {
                 stderr: '',
             };
         } catch (error) {
-            const safeError = safeHookError(error);
+            const safeError = safeHookError(error, 'handoff_prepare');
             return { exitCode: 0, stdout: deniedPreToolUseOutput(safeError), stderr: '' };
         }
     }
@@ -1239,7 +1279,7 @@ export const processHookEvent = async (event, _options = {}) => {
                 stderr: '',
             };
         } catch (error) {
-            const safeError = safeHookError(error);
+            const safeError = safeHookError(error, 'handoff_submit');
             return { exitCode: 0, stdout: deniedPreToolUseOutput(safeError), stderr: '' };
         }
     }

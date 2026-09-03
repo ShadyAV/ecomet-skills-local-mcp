@@ -127,6 +127,19 @@ export const ozonExtensionOutdatedError = (installedExtensionVersion) => {
     return error;
 };
 
+export const ozonRouteUnavailableError = (reason = 'unavailable') =>
+    new ToolExecutionError(
+        'OZON_ROUTE_NOT_READY',
+        (reason === 'disconnected'
+            ? 'The e-Comet extension is not connected to the local bridge. '
+            : reason === 'timeout'
+              ? 'The Ozon report authorization response timed out; this does not establish why the route was unavailable. '
+              : 'The Ozon extension route is unavailable; its cause is not established. ') +
+            'Ensure e-Comet extension 1.5.6 or newer is enabled in the same browser profile, refresh any authenticated Ozon Seller page under https://seller.ozon.ru/app, then request a new report authorization and retry.',
+        'route',
+        false
+    );
+
 // Форма ответа фиксирована и на проводе: peer_ozon_promotion_result принимает у toolError ровно
 // ok/code/message/stage/retryable, поэтому лишний ключ отсюда сделал бы кадр невалидным и вторичный
 // процесс ждал бы дедлайна вместо отказа. Диагноз устаревшего расширения добавляет к терминальному

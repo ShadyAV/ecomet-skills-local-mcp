@@ -171,7 +171,7 @@ const requestBroker = new RequestBroker({
                     }),
             };
         }
-        if (connections.peerReady && !connections.peerExtensionBrowserJobReady) {
+        if (connections.peerReady && connections.peerExtensionReady && !connections.peerExtensionBrowserJobReady) {
             throw new ToolExecutionError(
                 'EXTENSION_UPDATE_REQUIRED',
                 'The e-Comet Chrome extension must be updated to support signed browser jobs.',

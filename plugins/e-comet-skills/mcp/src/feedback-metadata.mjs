@@ -1,4 +1,4 @@
-import { FEEDBACK_MAX_METADATA_BYTES, FEEDBACK_MAX_TRANSCRIPT_BYTES } from './config.mjs';
+import { FEEDBACK_MAX_BYTES } from './config.mjs';
 
 /**
  * Serializes the bounded, closed metadata document stored in every feedback archive.
@@ -14,7 +14,7 @@ export const serializeFeedbackMetadata = ({ createdAt, version, platform, arch, 
     if (
         !Number.isSafeInteger(transcriptSizeBytes) ||
         transcriptSizeBytes < 0 ||
-        transcriptSizeBytes > FEEDBACK_MAX_TRANSCRIPT_BYTES ||
+        transcriptSizeBytes > FEEDBACK_MAX_BYTES ||
         !transcriptIncluded && transcriptSizeBytes !== 0
     ) {
         throw new TypeError('Feedback metadata transcript size is invalid');
@@ -29,8 +29,5 @@ export const serializeFeedbackMetadata = ({ createdAt, version, platform, arch, 
             sizeBytes: transcriptSizeBytes,
         },
     })}\n`;
-    if (Buffer.byteLength(serialized, 'utf8') > FEEDBACK_MAX_METADATA_BYTES) {
-        throw new RangeError(`Feedback metadata exceeds the ${FEEDBACK_MAX_METADATA_BYTES}-byte limit`);
-    }
     return Buffer.from(serialized, 'utf8');
 };

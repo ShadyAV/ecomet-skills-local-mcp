@@ -27,7 +27,7 @@ const proactiveFeedbackOffer =
 const feedbackConsentWorkflow =
     'Before preparation, require both enough existing facts to identify what went wrong and an explicit user choice to send with the history of the current session or without it. Ask only for what is missing. ' +
     'If the issue is absent or too vague to identify, ask one short plain-language question about what happened. If the history choice is also missing, combine that question naturally with the history choice in one or two sentences. If the issue is already identifiable but the choice is missing, ask naturally whether to send with the history of this session or without it. If the choice is known but the issue is not, ask only what happened. ' +
-    'Whenever asking for the history choice, warn at most once that the full session history includes more than the visible chat and may contain system context, tool calls/results, code, paths, and sensitive data. Do not repeat this warning when clarifying an ambiguous choice. ' +
+    'Whenever asking for the history choice, warn at most once that the bounded current-session history includes more than the visible chat and may contain system context, tool calls/results, code, paths, and sensitive data. Do not repeat this warning when clarifying an ambiguous choice. ' +
     'Do not describe report contents, diagnostics, environment metadata, version, platform, architecture, size, or file formats. Do not present a formal bullet list, checklist, or three-option menu unless the user asks for one. Cancellation is accepted, but it need not be offered as a menu option. ' +
     'If the history choice is ambiguous, ask one short clarification, do not repeat the warning, and call no feedback tools. ' +
     'When both an identifiable issue and an unambiguous history choice are known, the first subsequent action must be prepare_e_comet_feedback; emit no assistant prose, acknowledgement, restatement, or recap before that call. ' +
@@ -39,15 +39,22 @@ const feedbackReportAuthoringGuidance =
     'Exclude credentials, personal or commercial data, source code, file paths, and unrelated user content even when they appear in observed tool results; when such context matters, generalize it to only the minimum factual context needed to explain the failure. ' +
     'Omit unknown facts and never invent a cause. One question is allowed when there is no minimally identifiable issue; do not ask extra questions merely to fill optional expected-result or recovery fields. ';
 
+const feedbackFailureGuidance =
+    'Explain feedback failures using only the fixed safe error message and supplied closed error.details.operation, reason, systemCode, and httpStatus evidence. Do not echo raw error messages from other sources. ' +
+    'An optional error.details.source module and line identify public-code investigation context, not a user filesystem path or proof of root cause. Unknown internal errors remain unknown: never guess an invalid grant, missing artifact, or secondary bridge failure. ' +
+    'For a trusted-hook denial, explain its fixed safe cause and next action without overriding consent, changing the history choice, or changing hook trust. ';
+
 const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
     'In Codex, execute the three feedback calls sequentially; await each result before starting the next; direct MCP and functions.exec are both allowed; never run dependent stages in parallel. ' +
     'Do not call local_bridge_status, retry discovery, or perform a report resource reread in this flow. ' +
-    'If prepare returns TRANSCRIPT_TOO_LARGE, explain that the requested history is too large to fit in the feedback archive. Do not retry or reprepare automatically, and never truncate or silently omit the history. Offer to start a fresh feedback flow without the history, and start it only after the user explicitly chooses to send without the history. ' +
+    'Feedback is independent of bridge role, extension readiness, browser_job, and marketplace tabs. Explain the observed error, what it does not establish, and one next action from error.recommendedAction. ' +
+    feedbackFailureGuidance +
+    'CHECK_FEEDBACK_HOOKS: ask the user to check enabled and trusted e-Comet hooks; never change trust on their behalf. RESTART_FEEDBACK_FLOW: explain only the supplied handoff evidence and ask to start a fresh flow; do not infer invalidity or expiry from the action alone. RETRY_WITH_VALID_REPORT: correct only identified invalid report fields while preserving the chosen history option. RETRY_FEEDBACK_ONCE: offer one retry, never loop. CHECK_LOCAL_STORAGE: ask the user to check local storage access without exposing paths. These actions never waive consent or permit a silent change of history choice. ' +
     'If prepare or submit returns FEEDBACK_HOOK_HANDOFF_UNAVAILABLE, or a hook denies submit with FEEDBACK_GRANT_MISSING, explain that the trusted e-Comet hook handoff is unavailable. Disabled, untrusted, or modified hooks are possible causes, not a proven diagnosis. In Codex, tell the user to verify in the e-Comet plugin settings that its hooks are enabled and trusted. In Claude, direct the user to its hook permission settings. For a Russian-language user say: «Не сработала защищённая передача через хуки e-Comet. Проверьте в настройках клиента, что хуки e-Comet включены и им выдано доверие, затем начните отправку заново.» Do not claim that e-Comet itself is broken, do not retry automatically, and never attempt to trust hooks on the user’s behalf. ' +
     'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
     'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
-    'If submit returns UPLOAD_UNCERTAIN, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ';
+    'If submit returns UPLOAD_UNCERTAIN or FEEDBACK_SUBMISSION_FAILED, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ';
 
 export const serverInstructions =
     'Для живых данных Wildberries сначала выберите локальный типизированный инструмент по намерению пользователя: ' +
@@ -67,6 +74,9 @@ export const tools = [
         name: 'local_bridge_status',
         description:
             'Reports extensionConnected, the stable state code, and actionable recommendedAction. Translate the stable state into a short user-facing explanation; keep structured protocol codes in English. ' +
+            'secondary is a normal role that proxies through the primary, not a failure; version skew alone is not a cause. peer.bridgeVersion identifies the local peer process, while extension.version identifies the browser extension. ' +
+            'extensionConnected:false means there is no effective extension route and does not establish why: never claim attachment to an old primary, a disabled extension, or the wrong profile without matching typed evidence. Explain the observed fact, the inference limit, and one typed next action. ' +
+            'The state and recommendedAction describe legacy WB context, not Ozon readiness. Never apply OPEN_OR_REFRESH_WB or WB-tab recovery to an Ozon request; use its typed result. Feedback does not depend on this status. ' +
             'ready means only that the local bridge, extension protocol, and an observed WB or seller browser context are available; each typed tool still decides its own live WB or seller prerequisites. ' +
             'Use these Russian examples when speaking to a Russian-language user: ' +
             'waiting_for_extension: «Локальный bridge запущен и ждёт подключения расширения.» ' +
@@ -175,7 +185,7 @@ export const tools = [
             feedbackConsentWorkflow +
             feedbackReportAuthoringGuidance +
             'Use exactly one remote report_issue kind: bug, wrong_data, missing_capability, or unclear_contract; pass that same kind unchanged to report_issue. ' +
-            'Use includeTranscript:false only for send without the history of the current session and includeTranscript:true only for send with the full history of the current session. ' +
+            'Use includeTranscript:false only for send without the history of the current session and includeTranscript:true only for send with the bounded current-session history supplied by the trusted host hook. ' +
             'Never author transcriptPath, transcript_path, feedbackClaim, feedback_claim, feedbackSession, or feedback_session. The required order is prepare_e_comet_feedback, remote report_issue, then submit_e_comet_feedback. ' +
             feedbackExecutionWorkflow +
             'This returns compact metadata and one private report.md resource link; ZIP and history bytes never enter model content.',
@@ -188,8 +198,9 @@ export const tools = [
         description:
             'Upload the prepared e-Comet feedback archive only after remote report_issue returns the trusted upload grant. ' +
             'The host hook injects uploadUrl, requiredHeaders, objectKey, expiresAt, expectedSize, expectedSha256, feedbackClaim, and feedbackSession. Model-authored arguments must omit every transport/claim field and snake_case alias; provide only the prepared artifactId. ' +
+            feedbackFailureGuidance +
             'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
-            'If submit returns UPLOAD_UNCERTAIN, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ' +
+            'If submit returns UPLOAD_UNCERTAIN or FEEDBACK_SUBMISSION_FAILED, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ' +
             'This one-shot upload returns no resource, archive bytes, object key, URL, query, or headers.',
         inputSchema: toolInputSchemas.submit_e_comet_feedback,
         outputSchema: toolOutputSchemas.submit_e_comet_feedback,
@@ -219,7 +230,9 @@ export const tools = [
             'Neighboring analytics are unavailable in this first tool: it does not provide product, traffic, finance, campaign, or other Ozon reports. ' +
             'The operation may create a saved report in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
             'An OZON_ROUTE_NOT_READY failure carrying error.details.reason "extension_outdated" means the installed e-Comet extension is too old for this report: tell the user to update the extension to the version in error.details and retry, ' +
-            'and do not tell them to open the report page. The same code without those details means no ready Ozon promotion route was reachable: usually the exact promotion page is not open, but the extension may also be disconnected or reachable only through an older local process, so read local_bridge_status before naming a remedy. ' +
+            'and do not tell them to open the report page. This operation requires extension 1.5.6 or newer and any authenticated Ozon Seller page under https://seller.ozon.ru/app, not an exact promotion-overview route and never a Wildberries tab. ' +
+            'The same code without those details means no ready Ozon route was reachable; it does not establish a cause. A timeout is not proof of disconnection. If status reports extensionConnected:false, explain that there is no effective extension route, without claiming attachment to an old primary. ' +
+            'For an unready route, ask the user to check the extension in the same browser profile and refresh any authenticated Ozon /app page, then obtain a new authorization before retrying. Never reuse the consumed one-use authorization, automatically loop, or follow OPEN_OR_REFRESH_WB for Ozon. ' +
             'Returns compact metadata and exactly one private resource_link; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
         inputSchema: toolInputSchemas.ozon_seller_promotion_report,
         outputSchema: toolOutputSchemas.ozon_seller_promotion_report,

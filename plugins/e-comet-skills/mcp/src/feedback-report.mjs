@@ -1,13 +1,13 @@
-import { FEEDBACK_KINDS, FEEDBACK_MAX_DETAILS_LENGTH, FEEDBACK_MAX_REPORT_BYTES, FEEDBACK_MAX_SUMMARY_LENGTH } from './config.mjs';
+import { FEEDBACK_KINDS } from './config.mjs';
+import { FeedbackPreparationError } from './feedback-errors.mjs';
 
 const FEEDBACK_KIND_SET = new Set(FEEDBACK_KINDS);
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
-const normalizeText = (value, name, maximumLength) => {
-    if (typeof value !== 'string') throw new TypeError(`Feedback ${name} must be a string`);
+const normalizeText = (value) => {
+    if (typeof value !== 'string') throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');
     const normalized = value.replace(/\r\n?/g, '\n');
-    if (CONTROL_CHARACTERS.test(normalized)) throw new TypeError(`Feedback ${name} contains a control character`);
-    if (normalized.length > maximumLength) throw new RangeError(`Feedback ${name} exceeds the ${maximumLength}-character limit`);
+    if (CONTROL_CHARACTERS.test(normalized)) throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');
     return normalized;
 };
 
@@ -86,10 +86,11 @@ export const selectFeedbackDiagnostics = (bridgeStatus) => {
 
 /** @param {{ kind?: string, summary?: string, details?: string, diagnostics?: unknown, includeTranscript?: boolean }} input */
 export const renderFeedbackReport = ({ kind, summary, details, diagnostics, includeTranscript } = {}) => {
-    if (!FEEDBACK_KIND_SET.has(kind)) throw new RangeError('Feedback kind is invalid');
-    if (typeof includeTranscript !== 'boolean') throw new TypeError('Feedback includeTranscript must be a boolean');
-    const normalizedSummary = redactFeedbackText(normalizeText(summary, 'summary', FEEDBACK_MAX_SUMMARY_LENGTH));
-    const normalizedDetails = redactFeedbackText(normalizeText(details, 'details', FEEDBACK_MAX_DETAILS_LENGTH));
+    // WHY: report validation owns this safe category before transcript or artifact I/O can begin.
+    if (!FEEDBACK_KIND_SET.has(kind)) throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');
+    if (typeof includeTranscript !== 'boolean') throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');
+    const normalizedSummary = redactFeedbackText(normalizeText(summary));
+    const normalizedDetails = redactFeedbackText(normalizeText(details));
     const selectedDiagnostics = selectFeedbackDiagnostics(diagnostics);
     const report = [
         '<!-- e-comet-feedback:v1 -->',
@@ -113,7 +114,5 @@ export const renderFeedbackReport = ({ kind, summary, details, diagnostics, incl
         `Transcript: ${includeTranscript ? 'included' : 'not included'}`,
         '',
     ].join('\n');
-    const bytes = Buffer.from(report, 'utf8');
-    if (bytes.length > FEEDBACK_MAX_REPORT_BYTES) throw new RangeError(`Feedback report exceeds the ${FEEDBACK_MAX_REPORT_BYTES}-byte limit`);
-    return bytes;
+    return Buffer.from(report, 'utf8');
 };

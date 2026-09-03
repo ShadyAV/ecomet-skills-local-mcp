@@ -11,14 +11,46 @@ import {
 } from './config.mjs';
 import { createArtifactWriter, releaseArtifactJob } from './artifact-store.mjs';
 import { prepareECometFeedback, submitECometFeedback } from './feedback-tools.mjs';
+import { FeedbackPreparationError, feedbackPreparationFailure, feedbackSubmissionFailure } from './feedback-errors.mjs';
+import { feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from './feedback-diagnostics.mjs';
+import { feedbackDiagnosticsSchema, validateSchemaValue } from './tool-schemas.mjs';
 import { executeAuthorizedBrowserJob, executeSellerReviewsJob, extractBrowserJobToken, validateAuthorizedJobLimits } from './browser-job.mjs';
 import { mcpError, mcpResult, resourceLinkResult, textResult } from './mcp-protocol.mjs';
 import { createJobWriter } from './result-store.mjs';
 import { executeOzonPromotionJob, getOzonPromotionArtifactResource } from './ozon-promotion-job.mjs';
 import { parseOzonPromotionPeriod } from './ozon-promotion-domain.mjs';
 import { serverInstructions, tools, validateToolArguments } from './tool-catalog.mjs';
-import { ozonExtensionOutdatedError, safeOzonPromotionToolError, ToolExecutionError, toolFailure } from './tool-errors.mjs';
+import {
+    ozonExtensionOutdatedError,
+    ozonRouteUnavailableError,
+    safeOzonPromotionToolError,
+    ToolExecutionError,
+    toolFailure,
+} from './tool-errors.mjs';
 import { createConcurrencyLimiter, discoverImageBasket, imageExists, normalizeStatus, runWithConcurrency } from './wb-domain.mjs';
+
+const OZON_AUTHORIZATION_ROUTE_CODES = new Set([
+    'EXTENSION_DISCONNECTED',
+    'BROWSER_JOB_AUTHORIZATION_TIMEOUT',
+    'EXTENSION_UPDATE_REQUIRED',
+]);
+
+export const classifyOzonAuthorizationFailure = (error, status) => {
+    if (error instanceof ToolExecutionError && OZON_AUTHORIZATION_ROUTE_CODES.has(error.code)) {
+        if (status?.extensionConnected === true && status.ozonSellerPromotionReportSupported === false) {
+            return ozonExtensionOutdatedError(status.extensionVersion);
+        }
+        return ozonRouteUnavailableError(error.code === 'EXTENSION_DISCONNECTED' ? 'disconnected'
+            : error.code === 'BROWSER_JOB_AUTHORIZATION_TIMEOUT' ? 'timeout' : 'unavailable');
+    }
+    return new ToolExecutionError(
+        'OZON_AUTHORIZATION_REJECTED',
+        'The Ozon promotion report authorization was rejected.',
+        'authorization',
+        false,
+        { cause: error }
+    );
+};
 
 export const createMcpMessageHandler = ({
     getBridgeStatus,
@@ -215,31 +247,26 @@ export const createMcpMessageHandler = ({
         }
     };
 
-    const feedbackPrepareFailure = (error) => ({
-        ok: false,
-        status: 'failed',
-        error:
-            error?.code === 'TRANSCRIPT_TOO_LARGE'
-                ? { code: 'TRANSCRIPT_TOO_LARGE', message: 'The requested feedback transcript is too large to fit in the feedback archive.', stage: 'transcript', retryable: false }
-            : error?.code === 'TRANSCRIPT_UNAVAILABLE'
-                ? { code: 'TRANSCRIPT_UNAVAILABLE', message: 'The requested feedback transcript is unavailable.', stage: 'transcript', retryable: true }
-                : error?.code === 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE'
-                    ? { code: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', message: 'The trusted e-Comet hook handoff is unavailable.', stage: 'handoff', retryable: false }
-                : { code: 'FEEDBACK_PREPARATION_FAILED', message: 'The feedback archive could not be prepared.', stage: 'prepare', retryable: false },
-    });
+    const feedbackPrepareFailure = (error) => {
+        const failure = feedbackPreparationFailure(error);
+        console.error('[McpDispatcher] Feedback preparation failed:', JSON.stringify(failure.error));
+        return failure;
+    };
 
     const handleFeedbackPrepare = async (id, args = {}) => {
         if (!validateToolArguments('prepare_e_comet_feedback', args)) {
-            sendResult(id, textResult(feedbackPrepareFailure(), true));
+            sendResult(id, textResult(feedbackPrepareFailure(new FeedbackPreparationError('FEEDBACK_INPUT_INVALID')), true));
             return;
         }
+        let operation = 'prepare';
         try {
             const prepared = await prepareFeedback(args, { getBridgeStatus });
+            operation = 'prepare_result';
             const reportResource = prepared?.reportResource;
             if (!reportResource || reportResource.name !== 'report.md') throw new Error('missing report resource');
             sendResult(id, resourceLinkResult(prepared, JSON.stringify(prepared), [reportResource]));
         } catch (error) {
-            sendResult(id, textResult(feedbackPrepareFailure(error), true));
+            sendResult(id, textResult(feedbackPrepareFailure(operation === 'prepare_result' ? withFeedbackOperation(error, operation) : error), true));
         }
     };
 
@@ -248,7 +275,7 @@ export const createMcpMessageHandler = ({
             sendResult(
                 id,
                 textResult(
-                    { ok: false, status: 'failed', artifactId: '00000000-0000-4000-8000-000000000000', error: { code: 'UPLOAD_GRANT_INVALID', message: 'The feedback upload grant is invalid or has expired.', stage: 'grant', retryable: false } },
+                    { ok: false, status: 'failed', artifactId: '00000000-0000-4000-8000-000000000000', error: { code: 'UPLOAD_GRANT_INVALID', message: 'The feedback upload grant is invalid or has expired.', stage: 'grant', retryable: false, details: feedbackDiagnostics(undefined, 'input_validation') } },
                     true
                 )
             );
@@ -256,9 +283,15 @@ export const createMcpMessageHandler = ({
         }
         try {
             const submitted = await submitFeedback(args);
+            if (!submitted.ok) {
+                const details = safeFeedbackProperty(safeFeedbackProperty(submitted, 'error'), 'details');
+                if (validateSchemaValue(details, feedbackDiagnosticsSchema)) console.error('[McpDispatcher] Feedback submission failed:', JSON.stringify(details));
+            }
             sendResult(id, textResult(submitted, !submitted.ok));
-        } catch {
-            sendResult(id, textResult({ ok: false, status: 'failed', artifactId: args.artifactId, error: { code: 'ARTIFACT_UNAVAILABLE', message: 'The prepared feedback archive is unavailable.', stage: 'artifact', retryable: false } }, true));
+        } catch (error) {
+            const failure = feedbackSubmissionFailure(error, args.artifactId);
+            console.error('[McpDispatcher] Feedback submission failed:', JSON.stringify(failure.error));
+            sendResult(id, textResult(failure, true));
         }
     };
 
@@ -497,13 +530,15 @@ export const createMcpMessageHandler = ({
 
     // Диагноз строится только по статусу, который явно сообщил про возможность. Статус без этого
     // поля (нет расширения, старый соседний процесс, тестовая заглушка) оставляет прежнее поведение.
-    const ozonExtensionOutdated = () => {
-        let status;
+    const currentOzonStatus = () => {
         try {
-            status = getBridgeStatus();
+            return getBridgeStatus();
         } catch {
             return undefined;
         }
+    };
+
+    const ozonExtensionOutdated = (status) => {
         if (status?.extensionConnected !== true || status.ozonSellerPromotionReportSupported !== false) return undefined;
         return ozonExtensionOutdatedError(status.extensionVersion);
     };
@@ -565,18 +600,16 @@ export const createMcpMessageHandler = ({
             // browser_job_authorize, поэтому до маршрута дело не доходит и пользователь получил бы
             // отказ авторизации вместо диагноза. Заодно не тратится одноразовая подписанная
             // авторизация на заведомо неисполнимую операцию.
-            const outdatedExtension = ozonExtensionOutdated();
+            const outdatedExtension = ozonExtensionOutdated(currentOzonStatus());
             if (outdatedExtension) throw outdatedExtension;
+            if (!(await waitForExtensionReady())) throw ozonRouteUnavailableError('disconnected');
+            // WHY: readiness can attach an older extension after the first snapshot; do not spend its signed authorization.
+            const readyExtensionOutdated = ozonExtensionOutdated(currentOzonStatus());
+            if (readyExtensionOutdated) throw readyExtensionOutdated;
             try {
                 authorizationLease = await requestBrowserJobAuthorization(extractBrowserJobToken(args.triggerUrl));
             } catch (error) {
-                throw new ToolExecutionError(
-                    'OZON_AUTHORIZATION_REJECTED',
-                    'The Ozon promotion report authorization was rejected.',
-                    'authorization',
-                    false,
-                    { cause: error }
-                );
+                throw classifyOzonAuthorizationFailure(error, currentOzonStatus());
             }
             if (
                 !authorizationLease ||
