@@ -21,10 +21,11 @@ the report was sent to e-Comet. The archive has a 32 MiB aggregate limit; the ch
 is never silently changed and truncation markers are not inserted.
 
 `local_bridge_status` distinguishes bridge startup, extension waiting, Wildberries-tab readiness,
-update needs, and pairing failures, and returns a recommended next action. It also reports the
+update needs, and pairing failures. It reports facts, not a global next action: recovery depends on
+the user's task and the selected typed tool's result. It also reports the
 connected extension's version and whether that build announces the Ozon promotion capability; both
-are informational and never gate a typed tool. Peer-token storage affects pairing only; if a second
-agent reports `peer_unavailable`, continue in the agent that owns the bridge. Browser jobs may still
+are informational and never gate a typed tool. Peer-token storage affects pairing only;
+`peerRejection.code` identifies the observed pairing failure. Browser jobs may still
 return `LOCAL_STORAGE_FAILED` when result or artifact directories are unwritable; storage
 classification, fallback, and retry work is deferred.
 

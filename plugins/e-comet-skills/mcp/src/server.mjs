@@ -257,7 +257,7 @@ const handleMcpMessage = createMcpMessageHandler({
         const rawStatus = runtime.status();
         return ({
         ...rawStatus,
-        ...deriveBridgeDiagnostics(rawStatus, connections.now()),
+        ...deriveBridgeDiagnostics(rawStatus),
         bridgeVersion: BRIDGE_VERSION,
         bridgeGeneration: BRIDGE_GENERATION,
         controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
