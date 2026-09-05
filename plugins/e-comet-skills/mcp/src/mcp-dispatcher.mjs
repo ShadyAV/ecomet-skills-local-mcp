@@ -17,7 +17,17 @@ import { feedbackDiagnosticsSchema, validateSchemaValue } from './tool-schemas.m
 import { executeAuthorizedBrowserJob, executeSellerReviewsJob, extractBrowserJobToken, validateAuthorizedJobLimits } from './browser-job.mjs';
 import { mcpError, mcpResult, resourceLinkResult, textResult } from './mcp-protocol.mjs';
 import { createJobWriter } from './result-store.mjs';
-import { executeOzonPromotionJob, getOzonPromotionArtifactResource } from './ozon-promotion-job.mjs';
+import { StorageUnavailableError } from './storage-layout.mjs';
+import {
+    executeOzonPromotionJob,
+    executeOzonPromotionPackageJob,
+    getOzonPromotionArtifactResource,
+} from './ozon-promotion-job.mjs';
+import { executeOzonAnalyticsJob, safeOzonAnalyticsToolError } from './ozon-analytics-job.mjs';
+import { getOzonReportPackageArtifactResources } from './ozon-report-package-job.mjs';
+import { rejectedOzonPackage } from './ozon-report-package-result.mjs';
+import { parsePromotionPeriods } from './ozon-report-package-domain.mjs';
+import { parseAnalyticsDateRange } from './ozon-analytics-domain.mjs';
 import { parseOzonPromotionPeriod } from './ozon-promotion-domain.mjs';
 import { serverInstructions, tools, validateToolArguments } from './tool-catalog.mjs';
 import {
@@ -188,6 +198,7 @@ export const createMcpMessageHandler = ({
             try {
                 writer = await createWriter(authorization.job.jobId);
             } catch (error) {
+                if (error instanceof StorageUnavailableError) throw error;
                 throw new ToolExecutionError(
                     'LOCAL_STORAGE_FAILED',
                     'The local result file could not be created.',
@@ -275,7 +286,7 @@ export const createMcpMessageHandler = ({
             sendResult(
                 id,
                 textResult(
-                    { ok: false, status: 'failed', artifactId: '00000000-0000-4000-8000-000000000000', error: { code: 'UPLOAD_GRANT_INVALID', message: 'The feedback upload grant is invalid or has expired.', stage: 'grant', retryable: false, details: feedbackDiagnostics(undefined, 'input_validation') } },
+                    { ok: false, status: 'failed', error: { code: 'UPLOAD_GRANT_INVALID', message: 'The feedback upload grant is invalid or has expired.', stage: 'grant', retryable: false, details: feedbackDiagnostics(undefined, 'input_validation') } },
                     true
                 )
             );
@@ -555,6 +566,7 @@ export const createMcpMessageHandler = ({
             let normalized;
             try {
                 if (error instanceof ToolExecutionError) normalized = safeOzonPromotionToolError(error);
+                else if (error instanceof StorageUnavailableError) normalized = error;
             } catch {
                 normalized = undefined;
             }
@@ -564,7 +576,9 @@ export const createMcpMessageHandler = ({
                       message: normalized.message,
                       stage: normalized.stage,
                       retryable: false,
-                      ...(normalized.details === undefined ? {} : { details: normalized.details }),
+                      ...(normalized instanceof ToolExecutionError && normalized.details !== undefined
+                          ? { details: normalized.details }
+                          : {}),
                   }
                 : { code: 'ARTIFACT_REJECTED', message: 'The Ozon promotion report could not be completed safely.', stage: 'artifact', retryable: false };
             return {
@@ -655,6 +669,143 @@ export const createMcpMessageHandler = ({
         }
     };
 
+    const handleOzonReportPackage = async (id, toolName, family, args = {}) => {
+        const itemProperty = family === 'promotion' ? 'periods' : 'reports';
+        const items = args?.[itemProperty];
+        const artifactJobId = randomUUID();
+        let authorizationLease;
+        let terminalResult;
+        let argumentsValid = false;
+        const safeFailure = (error) => {
+            if (error instanceof StorageUnavailableError) {
+                return { code: error.code, message: error.message, stage: error.stage, retryable: false };
+            }
+            try {
+                const safe =
+                    family === 'analytics' ? safeOzonAnalyticsToolError(error) : safeOzonPromotionToolError(error);
+                return { code: safe.code, message: safe.message, stage: safe.stage, retryable: false };
+            } catch {
+                return {
+                    code: 'ARTIFACT_REJECTED',
+                    message: `The Ozon ${family} report package could not be completed safely.`,
+                    stage: 'artifact',
+                    retryable: false,
+                };
+            }
+        };
+        const failedPackage = (error) => {
+            if (!argumentsValid) {
+                return { ok: false, status: 'failed', jobType: toolName, error: safeFailure(error), stopReason: null };
+            }
+            const safeItem = (item) => ({
+                ...(typeof item?.dateFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateFrom)
+                    ? { dateFrom: item.dateFrom }
+                    : {}),
+                ...(typeof item?.dateTo === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateTo)
+                    ? { dateTo: item.dateTo }
+                    : {}),
+                ...(family === 'analytics' && (item?.breakdown === 'period' || item?.breakdown === 'daily')
+                    ? { breakdown: item.breakdown }
+                    : {}),
+            });
+            return rejectedOzonPackage(toolName, itemProperty, items.map(safeItem), safeFailure(error));
+        };
+        const capabilityFailure = () => {
+            const status = currentOzonStatus();
+            const supportField =
+                family === 'promotion' ? 'ozonSellerPromotionReportsSupported' : 'ozonSellerAnalyticsReportSupported';
+            if (status?.extensionConnected !== true || status[supportField] !== false) return undefined;
+            return family === 'analytics'
+                ? new ToolExecutionError(
+                      'OZON_ANALYTICS_CAPABILITY_UNAVAILABLE',
+                      'Ozon Seller analytics reports are not enabled in the connected extension build.',
+                      'context',
+                      false
+                  )
+                : new ToolExecutionError(
+                      'OZON_ROUTE_NOT_READY',
+                      'The connected extension cannot run Ozon promotion report packages.',
+                      'route',
+                      false
+                  );
+        };
+        try {
+            if (!validateToolArguments(toolName, args)) {
+                throw new ToolExecutionError('PREFLIGHT_FAILED', `The Ozon ${family} report package is invalid.`, 'preflight', false);
+            }
+            try {
+                if (family === 'promotion') parsePromotionPeriods(items);
+                else items.forEach(({ dateFrom, dateTo }) => parseAnalyticsDateRange(dateFrom, dateTo));
+            } catch {
+                throw new ToolExecutionError('PREFLIGHT_FAILED', `The Ozon ${family} report package is invalid.`, 'preflight', false);
+            }
+            argumentsValid = true;
+            if (typeof args.triggerUrl !== 'string' || !args.triggerUrl) {
+                throw new ToolExecutionError(
+                    'OZON_AUTHORIZATION_REJECTED',
+                    'The trusted browser-job hook did not provide Ozon authorization.',
+                    'authorization',
+                    false
+                );
+            }
+            const unavailableBeforeWait = capabilityFailure();
+            if (unavailableBeforeWait) throw unavailableBeforeWait;
+            if (!(await waitForExtensionReady())) throw ozonRouteUnavailableError('disconnected');
+            const unavailableAfterWait = capabilityFailure();
+            if (unavailableAfterWait) throw unavailableAfterWait;
+            try {
+                authorizationLease = await requestBrowserJobAuthorization(extractBrowserJobToken(args.triggerUrl));
+            } catch (error) {
+                throw classifyOzonAuthorizationFailure(error, currentOzonStatus());
+            }
+            if (
+                !authorizationLease ||
+                typeof authorizationLease.requestOzonReportPackage !== 'function' ||
+                typeof authorizationLease.release !== 'function'
+            ) {
+                throw new ToolExecutionError(
+                    'OZON_AUTHORIZATION_REJECTED',
+                    `The extension returned an invalid Ozon ${family} report package authorization.`,
+                    'authorization',
+                    false
+                );
+            }
+            const sharedExecution = {
+                authorization: authorizationLease.authorization,
+                requestOzonReportPackage: authorizationLease.requestOzonReportPackage,
+                createArtifactWriter: createOzonArtifactWriter,
+                artifactJobId,
+                now,
+            };
+            const result =
+                family === 'promotion'
+                    ? await executeOzonPromotionPackageJob({ ...sharedExecution, periods: items })
+                    : await executeOzonAnalyticsJob({ ...sharedExecution, reports: items });
+            const resources = getOzonReportPackageArtifactResources(result);
+            terminalResult = renderOzonResult(
+                result,
+                `Ozon Seller ${family} report package ${result.status}: ${resources.length} of ${items.length} XLSX workbook(s) available.`,
+                resources,
+                !result.ok
+            );
+        } catch (error) {
+            terminalResult = textResult(failedPackage(error), true);
+        } finally {
+            const currentLease = authorizationLease;
+            authorizationLease = undefined;
+            releaseAuthorizationInBackground(currentLease, `after Ozon ${family} report package completion`);
+        }
+        try {
+            sendResult(id, terminalResult);
+        } finally {
+            try {
+                await releaseOzonArtifactJob(artifactJobId, { deferWhileActive: true });
+            } catch (error) {
+                log(`failed to release Ozon ${family} package artifact pins after terminal response:`, error?.message);
+            }
+        }
+    };
+
     // `needsBridge` declares which operational tools depend on the bridge, so the wake-up is applied once at
     // the dispatch point below instead of being remembered inside each handler. A tool added without the flag
     // never nudges; a tool added with it cannot forget to. `local_bridge_status` is deliberately false because
@@ -686,6 +837,14 @@ export const createMcpMessageHandler = ({
         ],
         ['wb_seller_reviews', { needsBridge: true, run: (id, args) => handleSellerReviewsExport(id, args) }],
         ['ozon_seller_promotion_report', { needsBridge: true, run: (id, args) => handleOzonPromotionReport(id, args) }],
+        [
+            'ozon_seller_promotion_reports',
+            { needsBridge: true, run: (id, args) => handleOzonReportPackage(id, 'ozon_seller_promotion_reports', 'promotion', args) },
+        ],
+        [
+            'ozon_seller_analytics_report',
+            { needsBridge: true, run: (id, args) => handleOzonReportPackage(id, 'ozon_seller_analytics_report', 'analytics', args) },
+        ],
         ['prepare_e_comet_feedback', { needsBridge: false, run: (id, args) => handleFeedbackPrepare(id, args) }],
         ['submit_e_comet_feedback', { needsBridge: false, run: (id, args) => handleFeedbackSubmit(id, args) }],
         ['wb_product_images', { needsBridge: false, run: (id, args) => handleProductImages(id, args) }],

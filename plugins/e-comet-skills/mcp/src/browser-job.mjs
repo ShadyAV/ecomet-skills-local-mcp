@@ -29,7 +29,9 @@ import {
     SEARCH_CONCURRENCY,
 } from './config.mjs';
 import { SELLER_OPERATION_STAGES } from './extension-vocabulary.mjs';
+import { parseAnalyticsReports } from './ozon-analytics-domain.mjs';
 import { parseOzonPromotionPeriod } from './ozon-promotion-domain.mjs';
+import { parsePromotionPeriods } from './ozon-report-package-domain.mjs';
 import { ToolExecutionError } from './tool-errors.mjs';
 import {
     isSuccessfulWbResponse,
@@ -304,6 +306,32 @@ export const validateAuthorizedJobLimits = (authorization) => {
                 throw new Error('Invalid Ozon promotion descriptor');
             }
             parseOzonPromotionPeriod(job.dateFrom, job.dateTo);
+            return;
+        }
+
+        if (authorization.jobType === 'ozon_seller_promotion_reports') {
+            const keys = Object.keys(job);
+            if (
+                keys.length !== 3 ||
+                !keys.every((key) => ['jobId', 'type', 'periods'].includes(key)) ||
+                job.type !== 'ozon-seller-promotion-reports'
+            ) {
+                throw new Error('Invalid Ozon promotion package descriptor');
+            }
+            parsePromotionPeriods(job.periods);
+            return;
+        }
+
+        if (authorization.jobType === 'ozon_seller_analytics_report') {
+            const keys = Object.keys(job);
+            if (
+                keys.length !== 3 ||
+                !keys.every((key) => ['jobId', 'type', 'reports'].includes(key)) ||
+                job.type !== 'ozon-seller-analytics-report'
+            ) {
+                throw new Error('Invalid Ozon analytics descriptor');
+            }
+            parseAnalyticsReports(job.reports, authorization.issuedAt);
             return;
         }
 

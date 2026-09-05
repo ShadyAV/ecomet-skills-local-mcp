@@ -10,7 +10,10 @@ export const MESSAGE_TYPES = Object.freeze({
     browserJobAuthorize: 'browser_job_authorize',
     browserJobAuthorizationRelease: 'browser_job_authorization_release',
     ozonPromotionOperation: 'ozon_seller_promotion_report_operation',
+    ozonPromotionPackageOperation: 'ozon_seller_promotion_reports_operation',
     ozonPromotionStreamAck: 'ozon_seller_promotion_report_stream_ack',
+    ozonAnalyticsOperation: 'ozon_seller_analytics_report_operation',
+    ozonAnalyticsStreamAck: 'ozon_seller_analytics_report_stream_ack',
     // расширение -> local MCP
     helloAck: 'hello_ack',
     wbFetchResult: 'wb_fetch_result',
@@ -19,10 +22,15 @@ export const MESSAGE_TYPES = Object.freeze({
     wbFetchStreamEnd: 'wb_fetch_stream_end',
     browserJobAuthorizeResult: 'browser_job_authorize_result',
     browserJobAuthorizationReleaseResult: 'browser_job_authorization_release_result',
+    ozonReportPhase: 'ozon_seller_report_phase',
     ozonPromotionStreamStart: 'ozon_seller_promotion_report_stream_start',
     ozonPromotionStreamChunk: 'ozon_seller_promotion_report_stream_chunk',
     ozonPromotionStreamEnd: 'ozon_seller_promotion_report_stream_end',
     ozonPromotionResult: 'ozon_seller_promotion_report_result',
+    ozonAnalyticsStreamStart: 'ozon_seller_analytics_report_stream_start',
+    ozonAnalyticsStreamChunk: 'ozon_seller_analytics_report_stream_chunk',
+    ozonAnalyticsStreamEnd: 'ozon_seller_analytics_report_stream_end',
+    ozonAnalyticsResult: 'ozon_seller_analytics_report_result',
     error: 'error',
     // в обе стороны (heartbeat)
     ping: 'ping',
@@ -55,6 +63,12 @@ export const peerStatusMessage = ({
     ...(connections.extensionOzonPromotionReady === undefined
         ? {}
         : { ozonSellerPromotionReportSupported: connections.extensionOzonPromotionReady === true }),
+    ...(connections.extensionOzonPromotionPackageReady === undefined
+        ? {}
+        : { ozonSellerPromotionReportsSupported: connections.extensionOzonPromotionPackageReady === true }),
+    ...(connections.extensionOzonAnalyticsReady === undefined
+        ? {}
+        : { ozonSellerAnalyticsReportSupported: connections.extensionOzonAnalyticsReady === true }),
     ...(connections.extensionLastConnectedAtMs === null ? {} : { extensionLastConnectedAtMs: connections.extensionLastConnectedAtMs }),
     ...(connections.extensionLastDisconnectedAtMs === null ? {} : { extensionLastDisconnectedAtMs: connections.extensionLastDisconnectedAtMs }),
     // Вторичный процесс сам расширение не видит, поэтому без этого поля конкуренция
@@ -90,6 +104,8 @@ export const EXTENSION_TO_CLIENT_MESSAGE_TYPES = Object.freeze([
 ]);
 
 export const OZON_PROMOTION_CAPABILITY = 'ozon_seller_promotion_report@1';
+export const OZON_PROMOTION_PACKAGE_CAPABILITY = 'ozon_seller_promotion_reports@1';
+export const OZON_ANALYTICS_CAPABILITY = 'ozon_seller_analytics_report@1';
 // Первая сборка расширения, которая объявляет OZON_PROMOTION_CAPABILITY в hello_ack и умеет
 // исполнять типизированную операцию отчёта Ozon. Всё, что старше, отвергает подписанное задание
 // как неизвестное ещё на авторизации, поэтому пользователю нужно обновление, а не открытая страница.
@@ -106,6 +122,34 @@ export const OZON_PROMOTION_SERVER_MESSAGE_TYPES = Object.freeze([
     MESSAGE_TYPES.ozonPromotionStreamEnd,
     MESSAGE_TYPES.ozonPromotionResult,
 ]);
+export const OZON_ANALYTICS_CLIENT_MESSAGE_TYPES = Object.freeze([
+    MESSAGE_TYPES.ozonAnalyticsOperation,
+    MESSAGE_TYPES.ozonAnalyticsStreamAck,
+]);
+export const OZON_ANALYTICS_SERVER_MESSAGE_TYPES = Object.freeze([
+    MESSAGE_TYPES.ozonAnalyticsStreamStart,
+    MESSAGE_TYPES.ozonAnalyticsStreamChunk,
+    MESSAGE_TYPES.ozonAnalyticsStreamEnd,
+    MESSAGE_TYPES.ozonAnalyticsResult,
+]);
+export const OZON_ANALYTICS_TERMINAL_CODE_STAGES = Object.freeze({
+    OZON_AUTHORIZATION_REJECTED: 'authorization',
+    OZON_ADMISSION_CAPACITY_EXHAUSTED: 'extension',
+    OZON_ROUTE_NOT_READY: 'route',
+    OZON_ANALYTICS_CAPABILITY_UNAVAILABLE: 'context',
+    OZON_CONTEXT_CHANGED: 'context',
+    PREFLIGHT_FAILED: 'preflight',
+    CREATE_REJECTED: 'create',
+    CREATE_OUTCOME_UNKNOWN: 'create',
+    POLL_FAILED: 'poll',
+    POLL_EXHAUSTED: 'poll',
+    REPORT_TERMINAL_FAILURE: 'poll',
+    DOWNLOAD_REJECTED: 'download',
+    OZON_RATE_LIMITED: 'rate_limit',
+    ARTIFACT_REJECTED: 'artifact',
+    OPERATION_CANCELLED: 'cancelled',
+    OPERATION_DEADLINE_EXCEEDED: 'deadline',
+});
 export const EXTENSION_CAPABILITIES = Object.freeze(['wb_fetch', 'browser_job', 'seller_reviews']);
 
 // Стадия операции продавца внутри payload'а `wb_fetch`. Расширение решает по ней,

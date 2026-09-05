@@ -19,7 +19,9 @@ const MAX_CLAIM_BYTES = 4 * 1024;
 // accepted grant can be claimed without increasing the persisted 4 KiB hash-only record.
 const MAX_SUBMIT_BINDING_BYTES = 48 * 1024 + 256;
 const MAX_SESSION_BYTES = 512;
-const MAX_ACTIVE_CLAIMS = 128;
+// Counts pending claims and recent one-use guard tombstones: this is a physical store bound,
+// not a count of currently usable authorizations.
+const MAX_CLAIM_STORE_ENTRIES = 128;
 const MAX_CLAIM_TTL_MS = 60_000;
 const CLAIM_CLOCK_SKEW_MS = 5_000;
 const STALE_TEMPORARY_MS = 5 * 60_000;
@@ -30,7 +32,7 @@ const CLAIM_LOCK_RESIDUE_PATTERN = /^\.(?:claim-store-lock|stale-lock)-([1-9]\d{
 const TARGET_TOOLS = new Set(['prepare_e_comet_feedback', 'submit_e_comet_feedback']);
 
 class FeedbackClaimError extends Error {
-    constructor(reason = 'claim_record_invalid', cause) {
+    constructor(reason, cause) {
         super('The trusted feedback handoff claim could not be verified.', { cause });
         this.name = 'FeedbackClaimError';
         this.code = 'FEEDBACK_CLAIM_INVALID';
@@ -40,7 +42,7 @@ class FeedbackClaimError extends Error {
 
 const invalidClaim = (reason, cause) => new FeedbackClaimError(reason, cause);
 const claimFailure = (error, operation) => withFeedbackOperation(
-    error instanceof FeedbackClaimError ? error : invalidClaim(null, error), operation,
+    error instanceof FeedbackClaimError ? error : invalidClaim(undefined, error), operation,
 );
 const byteLength = (value) => Buffer.byteLength(value, 'utf8');
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
@@ -132,7 +134,7 @@ const acquireClaimStoreLock = async (directory) => {
             };
         } catch (error) {
             await rm(candidatePath, { recursive: true, force: true });
-            if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(safeFeedbackProperty(error, 'code'))) throw error;
+            if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EBUSY'].includes(safeFeedbackProperty(error, 'code'))) throw error;
         }
         try {
             const before = await stat(lockPath);
@@ -218,7 +220,7 @@ const readClaimRecord = async (path) => {
         throw invalidClaim();
     }
     const bytes = await readFile(path);
-    if (bytes.length < 1 || bytes.length > MAX_CLAIM_BYTES) throw invalidClaim();
+    if (bytes.length < 1 || bytes.length > MAX_CLAIM_BYTES) throw invalidClaim('claim_record_invalid');
     let record;
     try {
         record = JSON.parse(bytes.toString('utf8'));
@@ -232,7 +234,7 @@ const readClaimRecord = async (path) => {
         typeof record.signature !== 'string' ||
         !CLAIM_SIGNATURE_PATTERN.test(record.signature)
     ) {
-        throw invalidClaim();
+        throw invalidClaim('claim_record_invalid');
     }
     return record;
 };
@@ -288,7 +290,7 @@ const cleanupClaimDirectory = async (directory, nowMs) => {
             if (!removed) active += 1;
         }
     }
-    if (active >= MAX_ACTIVE_CLAIMS) throw invalidClaim('claim_capacity');
+    if (active >= MAX_CLAIM_STORE_ENTRIES) throw invalidClaim('claim_capacity');
 };
 
 /**
@@ -375,6 +377,7 @@ export const consumeFeedbackClaim = async (claim, options = {}) => {
             throw invalidClaim(consumed ? 'claim_already_consumed' : 'claim_missing', error);
         }
         // WHY: native Windows rename can succeed for multiple consumers. CREATE_NEW elects the sole owner first.
+        // A successful wx irreversibly consumes the claim even if a later transition fails; recovery needs a fresh claim.
         // Never unlink this guard from a consumer: a stalled owner must not remove a later guard after housekeeping.
         // Existing .claimed-* housekeeping reclaims it after five minutes, beyond the one-minute claim lifetime.
         try {

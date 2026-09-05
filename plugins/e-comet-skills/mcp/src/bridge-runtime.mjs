@@ -703,6 +703,12 @@ export const createBridgeRuntime = ({
             ...(connections.effectiveOzonPromotionSupportKnown
                 ? { ozonSellerPromotionReportSupported: connections.effectiveOzonPromotionReady === true }
                 : {}),
+            ...(connections.effectiveOzonPromotionPackageSupportKnown
+                ? { ozonSellerPromotionReportsSupported: connections.effectiveOzonPromotionPackageReady === true }
+                : {}),
+            ...(connections.effectiveOzonAnalyticsSupportKnown
+                ? { ozonSellerAnalyticsReportSupported: connections.effectiveOzonAnalyticsReady === true }
+                : {}),
             ...(connections.peerReady && connections.authenticatedPrimaryMetadata
                 ? { peer: connections.authenticatedPrimaryMetadata }
                 : {}),

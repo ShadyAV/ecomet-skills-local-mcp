@@ -1,4 +1,5 @@
 import { toolInputSchemas, toolOutputSchemas, validateSchemaValue } from './tool-schemas.mjs';
+import { OZON_PROMOTION_MIN_EXTENSION_VERSION } from './extension-vocabulary.mjs';
 
 const liveToolAnnotations = {
     readOnlyHint: true,
@@ -17,6 +18,18 @@ const ozonAuthorizationWorkflow =
     'The trusted Claude or Codex host hook injects the opaque transport-only triggerUrl; model-authored arguments must omit both triggerUrl and trigger_url. Never decode, print, edit, copy, or expose that authorization. ' +
     'local_bridge_status reports legacy WB browser context and must not be used to gate this Ozon tool; the Ozon capability and typed operation result are authoritative. ' +
     'Its extension version and Ozon capability fields are informational only: use them to explain a failure, never to skip or pre-approve this call. ';
+
+const ozonPackageAuthorizationWorkflow = (browserJobType, businessArguments) =>
+    `Call the remote browser_job exactly once with job {type:"${browserJobType}",${businessArguments}}, then invoke this local tool exactly once with the identical business array. ` +
+    'The trusted Claude or Codex host hook injects the opaque transport-only triggerUrl; model-authored arguments must omit both triggerUrl and trigger_url. Never decode, print, edit, copy, or expose that authorization. ' +
+    'Never automatically retry browser_job or the local report call; a fresh authorization requires an explicit user-directed retry. ' +
+    'Caller order is execution priority; acceptance does not guarantee that every item will finish. ' +
+    'For a user-directed continuation, include only the selected skipped items in a fresh package. Do not silently include completed or failed items. ' +
+    'CREATE_OUTCOME_UNKNOWN means creation may already have succeeded: explain that uncertainty and obtain a separate, item-specific retry decision. ' +
+    'Neither report family currently provides safe automated reconciliation; ordinary promotion preflight may create another report. ' +
+    'Use itemIndex to correlate the ordered results and stopReason to explain skipped work; a null stopReason means nothing was skipped, not that every item succeeded. ' +
+    'The extension automatically uses the first ready Seller context and pins its company for this package; never ask the user to focus a tab. A fresh authorization uses the then-current context and does not guarantee the previous company. ' +
+    'Do not use local_bridge_status to pre-approve or skip the signed operation; the family capability and typed operation result are authoritative. ';
 
 const resultPathGuidance =
     'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request.';
@@ -57,7 +70,7 @@ const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
     'In Codex, execute the three feedback calls sequentially; await each result before starting the next; direct MCP and functions.exec are both allowed; never run dependent stages in parallel. ' +
     'Do not call local_bridge_status, retry discovery, or perform a report resource reread in this flow. ' +
-    'Feedback is independent of bridge role, extension readiness, browser_job, and marketplace tabs. Explain the observed error, what it does not establish, and one next action from error.recommendedAction. ' +
+    'Feedback is independent of bridge role, extension readiness, browser_job, and marketplace tabs. After a preparation failure, explain the observed error, what it does not establish, and one next action from error.recommendedAction. For submit failures, explain only their observed safe error and supplied evidence. ' +
     feedbackFailureGuidance +
     'CHECK_FEEDBACK_HOOKS: ask the user to check enabled and trusted e-Comet hooks; never change trust on their behalf. RESTART_FEEDBACK_FLOW: explain only the supplied handoff evidence and ask to start a fresh flow; do not infer invalidity or expiry from the action alone. RETRY_WITH_VALID_REPORT: correct only identified invalid report fields while preserving the chosen history option. RETRY_FEEDBACK_ONCE: offer one retry, never loop. CHECK_LOCAL_STORAGE: ask the user to check local storage access without exposing paths. These actions never waive consent or permit a silent change of history choice. ' +
     'If prepare or submit returns FEEDBACK_HOOK_HANDOFF_UNAVAILABLE, or a hook denies submit with FEEDBACK_GRANT_MISSING, explain that the trusted e-Comet hook handoff is unavailable. Disabled, untrusted, or modified hooks are possible causes, not a proven diagnosis. In Codex, tell the user to verify in the e-Comet plugin settings that its hooks are enabled and trusted. In Claude, direct the user to its hook permission settings. For a Russian-language user say: «Не сработала защищённая передача через хуки e-Comet. Проверьте в настройках клиента, что хуки e-Comet включены и им выдано доверие, затем начните отправку заново.» Do not claim that e-Comet itself is broken, do not retry automatically, and never attempt to trust hooks on the user’s behalf. ' +
@@ -73,6 +86,8 @@ export const serverInstructions =
     'рекомендации, похожие товары или рекомендательная полка — wb_recommendations_by_product; ' +
     'скачать или экспортировать отчёт по отзывам продавца — wb_seller_reviews; ' +
     'скачать отчёт Ozon Seller по аналитике продвижения за период — ozon_seller_promotion_report; ' +
+    'скачать несколько отчётов Ozon Seller по аналитике продвижения — ozon_seller_promotion_reports; ' +
+    'скачать отчёты Ozon Seller по общей аналитике за период или по дням — ozon_seller_analytics_report; ' +
     'фото, фотографии, картинки, изображения или галерея — wb_product_images. ' +
     'Не начинайте с browser_job. После выбора подписанного локального инструмента следуйте его описанию: ' +
     'browser_job используется только следующим шагом для получения подписанной авторизации выбранного задания. ' +
@@ -239,12 +254,41 @@ export const tools = [
             'Neighboring analytics are unavailable in this first tool: it does not provide product, traffic, finance, campaign, or other Ozon reports. ' +
             'The operation may create a saved report in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
             'An OZON_ROUTE_NOT_READY failure carrying error.details.reason "extension_outdated" means the installed e-Comet extension is too old for this report: tell the user to update the extension to the version in error.details and retry, ' +
-            'and do not tell them to open the report page. This operation requires extension 1.5.6 or newer and any authenticated Ozon Seller page under https://seller.ozon.ru/app, not an exact promotion-overview route and never a Wildberries tab. ' +
+            `and do not tell them to open the report page. This operation requires extension ${OZON_PROMOTION_MIN_EXTENSION_VERSION} or newer and any authenticated Ozon Seller page under https://seller.ozon.ru/app, not an exact promotion-overview route and never a Wildberries tab. ` +
             'The same code without those details means no ready Ozon route was reachable; it does not establish a cause. A timeout is not proof of disconnection. If status reports extensionConnected:false, explain that there is no effective extension route, without claiming attachment to an old primary. ' +
             'For an unready route, ask the user to check the extension in the same browser profile and refresh any authenticated Ozon /app page, then obtain a new authorization before retrying. Never reuse the consumed one-use authorization, automatically loop, or use WB-tab recovery for Ozon. ' +
             'Returns compact metadata and exactly one private resource_link; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
         inputSchema: toolInputSchemas.ozon_seller_promotion_report,
         outputSchema: toolOutputSchemas.ozon_seller_promotion_report,
+        annotations: liveToolAnnotations,
+    },
+    {
+        name: 'ozon_seller_promotion_reports',
+        description:
+            'Download an ordered package of up to 50 Ozon Seller promotion analytics XLSX workbooks. ' +
+            ozonPackageAuthorizationWorkflow('ozon_seller_promotion_reports', 'periods:[{dateFrom,dateTo},...]') +
+            'Each period independently uses canonical inclusive dates and may contain at most 89 inclusive days. Periods may overlap and need not be chronological; exact duplicates are rejected and there is no aggregate-day cap. ' +
+            'One browser authorization and one local call cover the whole ordered package. Completed workbooks remain available when later items fail; return every completed resource_link and report every failed and skipped item from the ordered result. ' +
+            'The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
+            'Returns compact metadata and one private resource_link per completed workbook; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
+        inputSchema: toolInputSchemas.ozon_seller_promotion_reports,
+        outputSchema: toolOutputSchemas.ozon_seller_promotion_reports,
+        annotations: liveToolAnnotations,
+    },
+    {
+        name: 'ozon_seller_analytics_report',
+        description:
+            'Download an ordered package of up to 50 Ozon Seller general analytics XLSX workbooks. ' +
+            ozonPackageAuthorizationWorkflow('ozon_seller_analytics_report', 'reports:[{dateFrom,dateTo,breakdown},...]') +
+            'Each report independently uses canonical inclusive dates, an explicit breakdown:"period" or breakdown:"daily", at most 731 inclusive days, and the signed Moscow issuance window. ' +
+            'daily means daily rows inside one XLSX workbook for that report; never create one report per day unless the user explicitly requests separate date items. ' +
+            'Ranges may overlap and need not be chronological; the same range with different breakdowns is valid, exact duplicate descriptors are rejected, and there is no aggregate-day cap. ' +
+            'One browser authorization and one local call cover the whole ordered package. Completed workbooks remain available when later items fail; return every completed resource_link and report every failed and skipped item from the ordered result. ' +
+            'This analytics family is production-disabled until the connected extension status vocabulary and polling/backoff policy are live-verified and its capability is advertised; tool presence alone is not readiness. ' +
+            'Promotion analytics remains a separate Ozon workflow. The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
+            'Returns compact metadata and one private resource_link per completed workbook; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
+        inputSchema: toolInputSchemas.ozon_seller_analytics_report,
+        outputSchema: toolOutputSchemas.ozon_seller_analytics_report,
         annotations: liveToolAnnotations,
     },
 ];

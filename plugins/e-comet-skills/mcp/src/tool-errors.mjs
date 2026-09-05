@@ -3,6 +3,7 @@ import {
     OZON_PROMOTION_CAPABILITY,
     OZON_PROMOTION_MIN_EXTENSION_VERSION,
 } from './extension-vocabulary.mjs';
+import { StorageUnavailableError } from './storage-layout.mjs';
 
 const SAFE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
 const MAX_SAFE_MESSAGE_LENGTH = 500;
@@ -55,6 +56,7 @@ export const OZON_PROMOTION_TERMINAL_CODE_STAGES = Object.freeze({
     REPORT_TERMINAL_FAILURE: 'poll',
     DOWNLOAD_REJECTED: 'download',
     REUSED_REPORT_FORMAT_UNVERIFIED: 'download',
+    OZON_RATE_LIMITED: 'rate_limit',
     ARTIFACT_REJECTED: 'artifact',
     OPERATION_CANCELLED: 'cancelled',
     OPERATION_DEADLINE_EXCEEDED: 'deadline',
@@ -135,7 +137,7 @@ export const ozonRouteUnavailableError = (reason = 'unavailable') =>
             : reason === 'timeout'
               ? 'The Ozon report authorization response timed out; this does not establish why the route was unavailable. '
               : 'The Ozon extension route is unavailable; its cause is not established. ') +
-            'Ensure e-Comet extension 1.5.6 or newer is enabled in the same browser profile, refresh any authenticated Ozon Seller page under https://seller.ozon.ru/app, then request a new report authorization and retry.',
+            `Ensure e-Comet extension ${OZON_PROMOTION_MIN_EXTENSION_VERSION} or newer is enabled in the same browser profile, refresh any authenticated Ozon Seller page under https://seller.ozon.ru/app, then request a new report authorization and retry.`,
         'route',
         false
     );
@@ -145,7 +147,7 @@ export const ozonRouteUnavailableError = (reason = 'unavailable') =>
 // процесс ждал бы дедлайна вместо отказа. Диагноз устаревшего расширения добавляет к терминальному
 // ответу сам обработчик инструмента, а не этот сериализатор.
 export const toolFailure = (error, fallback = {}) => {
-    if (error instanceof ToolExecutionError) {
+    if (error instanceof ToolExecutionError || error instanceof StorageUnavailableError) {
         return {
             ok: false,
             code: error.code,

@@ -22,7 +22,7 @@ const LOCK_RELEASE_RETRY_LIMIT = 20;
 const TRANSIENT_WINDOWS_LOCK_ERRORS = new Set(['EPERM', 'EBUSY']);
 const REMOTE_BROWSER_JOB_TOOL = /^mcp__.+__browser_job$/;
 const LOCAL_BROWSER_TOOL =
-    /^mcp__(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:wb_product_card|wb_search_by_query|wb_check_by_query|wb_recommendations_by_product|wb_seller_reviews|ozon_seller_promotion_report)$/;
+    /^mcp__(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:wb_product_card|wb_search_by_query|wb_check_by_query|wb_recommendations_by_product|wb_seller_reviews|ozon_seller_promotion_report|ozon_seller_promotion_reports|ozon_seller_analytics_report)$/;
 const LOCAL_TOOL_BY_BROWSER_JOB_TYPE = Object.freeze({
     product_card: 'wb_product_card',
     search_by_query: 'wb_search_by_query',
@@ -30,6 +30,8 @@ const LOCAL_TOOL_BY_BROWSER_JOB_TYPE = Object.freeze({
     recommendations_by_product: 'wb_recommendations_by_product',
     seller_reviews: 'wb_seller_reviews',
     ozon_seller_promotion_report: 'ozon_seller_promotion_report',
+    ozon_seller_promotion_reports: 'ozon_seller_promotion_reports',
+    ozon_seller_analytics_report: 'ozon_seller_analytics_report',
 });
 const SIGNED_LOCAL_TOOLS = new Set(Object.values(LOCAL_TOOL_BY_BROWSER_JOB_TYPE));
 

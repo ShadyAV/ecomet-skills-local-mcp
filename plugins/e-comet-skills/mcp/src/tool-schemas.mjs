@@ -18,6 +18,8 @@ import {
     OZON_PROMOTION_MIN_EXTENSION_VERSION,
 } from './extension-vocabulary.mjs';
 import { OZON_EXTENSION_OUTDATED_REASON, OZON_PROMOTION_TERMINAL_CODE_STAGES } from './tool-errors.mjs';
+import { MAX_OZON_REPORT_PACKAGE_ITEMS } from './ozon-report-package-domain.mjs';
+import { OZON_PACKAGE_STOP_REASONS } from './ozon-report-package-result.mjs';
 
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
@@ -354,6 +356,29 @@ const peerRejectionSchema = object(
     ['code']
 );
 
+const storageTargetStatusSchema = objectUnion(
+    object({ state: { const: 'ready' }, backend: { type: 'string', enum: ['plugin_data', 'override'] } }, ['state', 'backend']),
+    object(
+        {
+            state: { const: 'unavailable' },
+            reason: {
+                type: 'string',
+                enum: ['plugin_data_missing', 'plugin_data_invalid', 'plugin_data_conflict', 'override_invalid'],
+            },
+        },
+        ['state', 'reason']
+    )
+);
+
+const storageStatusSchema = object(
+    {
+        results: storageTargetStatusSchema,
+        marketplaceArtifacts: storageTargetStatusSchema,
+        feedbackArtifacts: storageTargetStatusSchema,
+    },
+    ['results', 'marketplaceArtifacts', 'feedbackArtifacts']
+);
+
 const bridgeStatusSchema = object({
     ok: { const: true },
     extensionConnected: boolean,
@@ -386,6 +411,8 @@ const bridgeStatusSchema = object({
     }, ['count', 'lastAtMs', 'saturated']),
     extensionVersion: string,
     ozonSellerPromotionReportSupported: boolean,
+    ozonSellerPromotionReportsSupported: boolean,
+    ozonSellerAnalyticsReportSupported: boolean,
     peerRejection: peerRejectionSchema,
     bridgeVersion: string,
     bridgeGeneration: positiveInteger,
@@ -393,8 +420,8 @@ const bridgeStatusSchema = object({
     extensionProtocolVersion: positiveInteger,
     instanceId: string,
     websocket: string,
-    resultDirectory: string,
-}, ['ok', 'extensionConnected', 'bridgeRole']);
+    storage: storageStatusSchema,
+}, ['ok', 'extensionConnected', 'bridgeRole', 'storage']);
 
 const triggerUrlProperty = {
     type: 'string',
@@ -423,6 +450,16 @@ const canonicalDateProperty = {
 const ozonPromotionArtifactSchema = object(
     {
         name: { type: 'string', pattern: '^ozon-seller-promotion-\\d{4}-\\d{2}-\\d{2}-\\d{4}-\\d{2}-\\d{2}\\.xlsx$' },
+        mimeType: { const: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+        size: nonNegativeInteger,
+        sha256: { type: 'string', minLength: 64, maxLength: 64 },
+    },
+    ['name', 'mimeType', 'size', 'sha256']
+);
+
+const ozonAnalyticsArtifactSchema = object(
+    {
+        name: { type: 'string', pattern: '^ozon-seller-analytics-(period|daily)-\\d{4}-\\d{2}-\\d{2}-\\d{4}-\\d{2}-\\d{2}\\.xlsx$' },
         mimeType: { const: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
         size: nonNegativeInteger,
         sha256: { type: 'string', minLength: 64, maxLength: 64 },
@@ -459,6 +496,16 @@ const ozonPromotionErrorSchema = objectUnion(
     )
 );
 
+const localStorageUnavailableSchema = object(
+    {
+        code: { const: 'LOCAL_STORAGE_UNAVAILABLE' },
+        message: { const: 'Local output storage is unavailable.' },
+        stage: { const: 'storage' },
+        retryable: { const: false },
+    },
+    ['code', 'message', 'stage', 'retryable']
+);
+
 const ozonPromotionSuccessSchema = object(
     {
         ok: { const: true },
@@ -478,7 +525,7 @@ const ozonPromotionFailureSchema = object(
         jobType: { const: 'ozon_seller_promotion_report' },
         dateFrom: canonicalDateProperty,
         dateTo: canonicalDateProperty,
-        error: ozonPromotionErrorSchema,
+        error: objectUnion(ozonPromotionErrorSchema, localStorageUnavailableSchema),
     },
     ['ok', 'status', 'jobType', 'dateFrom', 'dateTo', 'error']
 );
@@ -500,6 +547,126 @@ const ozonPromotionPreflightFailureSchema = object(
     },
     ['ok', 'status', 'jobType', 'error']
 );
+
+const ozonPackageError = (codeStages) =>
+    objectUnion(
+        ...Object.entries(codeStages).map(([code, stage]) =>
+            object(
+                {
+                    code: { const: code },
+                    message: { type: 'string', minLength: 1, maxLength: 500 },
+                    stage: { const: stage },
+                    retryable: { const: false },
+                },
+                ['code', 'message', 'stage', 'retryable']
+            )
+        ),
+        localStorageUnavailableSchema
+    );
+
+const OZON_ANALYTICS_TERMINAL_CODE_STAGES = Object.freeze({
+    OZON_AUTHORIZATION_REJECTED: 'authorization',
+    OZON_ADMISSION_CAPACITY_EXHAUSTED: 'extension',
+    OZON_ROUTE_NOT_READY: 'route',
+    OZON_ANALYTICS_CAPABILITY_UNAVAILABLE: 'context',
+    OZON_CONTEXT_CHANGED: 'context',
+    PREFLIGHT_FAILED: 'preflight',
+    CREATE_REJECTED: 'create',
+    CREATE_OUTCOME_UNKNOWN: 'create',
+    POLL_FAILED: 'poll',
+    POLL_EXHAUSTED: 'poll',
+    REPORT_TERMINAL_FAILURE: 'poll',
+    DOWNLOAD_REJECTED: 'download',
+    OZON_RATE_LIMITED: 'rate_limit',
+    ARTIFACT_REJECTED: 'artifact',
+    OPERATION_CANCELLED: 'cancelled',
+    OPERATION_DEADLINE_EXCEEDED: 'deadline',
+});
+
+const promotionPeriodFields = {
+    dateFrom: canonicalDateProperty,
+    dateTo: canonicalDateProperty,
+};
+const analyticsReportFields = {
+    ...promotionPeriodFields,
+    breakdown: { type: 'string', enum: ['period', 'daily'] },
+};
+const packageItemSchemas = (fields, artifactSchema, errorSchema) => {
+    fields = { ...fields, itemIndex: { type: 'integer', minimum: 0, maximum: MAX_OZON_REPORT_PACKAGE_ITEMS - 1 } };
+    const requiredFields = Object.keys(fields);
+    const complete = object(
+        { ...fields, status: { const: 'complete' }, artifact: artifactSchema },
+        [...requiredFields, 'status', 'artifact']
+    );
+    const failed = object(
+        { ...fields, status: { const: 'failed' }, error: errorSchema },
+        [...requiredFields, 'status', 'error']
+    );
+    const skipped = object({ ...fields, status: { const: 'skipped' } }, [...requiredFields, 'status']);
+    return { complete, failed, skipped, error: errorSchema, any: objectUnion(complete, failed, skipped), incomplete: objectUnion(failed, skipped) };
+};
+
+const promotionPackageItems = packageItemSchemas(
+    promotionPeriodFields,
+    ozonPromotionArtifactSchema,
+    ozonPackageError(OZON_PROMOTION_TERMINAL_CODE_STAGES)
+);
+const analyticsPackageItems = packageItemSchemas(
+    analyticsReportFields,
+    ozonAnalyticsArtifactSchema,
+    ozonPackageError(OZON_ANALYTICS_TERMINAL_CODE_STAGES)
+);
+
+const packageResultSchema = (jobType, propertyName, itemSchemas) => {
+    const result = (ok, statusValue, items, skipped = false, preexecution = false) =>
+        object(
+            {
+                ok: { const: ok },
+                status: { const: statusValue },
+                jobType: { const: jobType },
+                [propertyName]: items,
+                stopReason: skipped ? { type: 'string', enum: OZON_PACKAGE_STOP_REASONS } : { type: 'null' },
+                ...(preexecution ? { error: itemSchemas.error } : {}),
+            },
+            ['ok', 'status', 'jobType', propertyName, 'stopReason', ...(preexecution ? ['error'] : [])]
+        );
+    const completeItems = array(itemSchemas.complete, { minItems: 1, maxItems: MAX_OZON_REPORT_PACKAGE_ITEMS });
+    const partialItems = {
+        ...array(itemSchemas.any, { minItems: 2, maxItems: MAX_OZON_REPORT_PACKAGE_ITEMS }),
+        allOf: [
+            { contains: itemSchemas.complete, minContains: 1 },
+            { contains: itemSchemas.incomplete, minContains: 1 },
+        ],
+    };
+    const failedItems = array(itemSchemas.incomplete, { minItems: 1, maxItems: MAX_OZON_REPORT_PACKAGE_ITEMS });
+    const preflightFailure = object(
+        {
+            ok: { const: false },
+            status: { const: 'failed' },
+            jobType: { const: jobType },
+            stopReason: { type: 'null' },
+            error: object(
+                {
+                    code: { const: 'PREFLIGHT_FAILED' },
+                    message: { type: 'string', minLength: 1, maxLength: 500 },
+                    stage: { const: 'preflight' },
+                    retryable: { const: false },
+                },
+                ['code', 'message', 'stage', 'retryable']
+            ),
+        },
+        ['ok', 'status', 'jobType', 'error', 'stopReason']
+    );
+    return objectUnion(
+        result(true, 'complete', completeItems),
+        result(true, 'partial', { ...partialItems, items: objectUnion(itemSchemas.complete, itemSchemas.failed) }),
+        result(true, 'partial', { ...partialItems, contains: itemSchemas.skipped }, true),
+        result(false, 'failed', { ...failedItems, items: itemSchemas.failed }),
+        result(false, 'failed', { ...failedItems, allOf: [{ contains: itemSchemas.skipped }, { contains: itemSchemas.failed }] }, true),
+        result(false, 'failed', array(itemSchemas.skipped, { minItems: 1, maxItems: MAX_OZON_REPORT_PACKAGE_ITEMS }), true, true),
+        preflightFailure
+    );
+};
 
 const projectionProperties = (limitName, scope) => ({
     [limitName]: {
@@ -572,10 +739,7 @@ export const feedbackDiagnosticsSchema = object({
 const feedbackErrorObject = (properties, required) => object({ ...properties, details: feedbackDiagnosticsSchema }, required);
 const feedbackErrorSchema = objectUnion(
     feedbackErrorObject({ code: { const: 'FEEDBACK_SUBMISSION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'submit' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    feedbackErrorObject({ code: { const: 'FEEDBACK_PREPARATION_FAILED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'prepare' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'handoff' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    feedbackErrorObject({ code: { const: 'TRANSCRIPT_TOO_LARGE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-    feedbackErrorObject({ code: { const: 'TRANSCRIPT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'transcript' }, retryable: { const: true } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'ARTIFACT_UNAVAILABLE' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'artifact' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'UPLOAD_GRANT_INVALID' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'grant' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'UPLOAD_REJECTED' }, message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
@@ -624,6 +788,28 @@ export const toolInputSchemas = {
         },
         ['dateFrom', 'dateTo']
     ),
+    ozon_seller_promotion_reports: object(
+        {
+            periods: array(object(promotionPeriodFields, ['dateFrom', 'dateTo']), {
+                minItems: 1,
+                maxItems: MAX_OZON_REPORT_PACKAGE_ITEMS,
+                uniqueItems: true,
+            }),
+            triggerUrl: ozonTriggerUrlProperty,
+        },
+        ['periods']
+    ),
+    ozon_seller_analytics_report: object(
+        {
+            reports: array(object(analyticsReportFields, ['dateFrom', 'dateTo', 'breakdown']), {
+                minItems: 1,
+                maxItems: MAX_OZON_REPORT_PACKAGE_ITEMS,
+                uniqueItems: true,
+            }),
+            triggerUrl: ozonTriggerUrlProperty,
+        },
+        ['reports']
+    ),
     wb_product_images: object(
         {
             nmIds: {
@@ -663,9 +849,70 @@ export const toolOutputSchemas = {
     submit_e_comet_feedback: objectUnion(feedbackSubmitSuccessSchema, feedbackSubmitFailureSchema),
     wb_product_images: objectUnion(...liveAggregateSchemas(imagesSuccessSchema), toolErrorSchema),
     ozon_seller_promotion_report: objectUnion(ozonPromotionSuccessSchema, ozonPromotionFailureSchema, ozonPromotionPreflightFailureSchema),
+    ozon_seller_promotion_reports: packageResultSchema(
+        'ozon_seller_promotion_reports',
+        'periods',
+        promotionPackageItems
+    ),
+    ozon_seller_analytics_report: packageResultSchema(
+        'ozon_seller_analytics_report',
+        'reports',
+        analyticsPackageItems
+    ),
+};
+
+const canonicalUniqueValue = (value, ancestors = new Set()) => {
+    if (value === null) return 'null';
+    if (typeof value === 'string') return `string:${JSON.stringify(value)}`;
+    if (typeof value === 'number') return `number:${Number.isNaN(value) ? 'NaN' : String(value)}`;
+    if (typeof value === 'boolean') return `boolean:${value}`;
+    if (typeof value === 'undefined') return 'undefined';
+    if (typeof value === 'bigint') return `bigint:${value}`;
+    if (typeof value !== 'object') return `${typeof value}:${String(value)}`;
+    if (ancestors.has(value)) throw new TypeError('Schema values must not contain cycles.');
+    ancestors.add(value);
+    try {
+        if (Array.isArray(value)) {
+            return `array:[${Array.from({ length: value.length }, (_, index) =>
+                Object.hasOwn(value, index) ? canonicalUniqueValue(value[index], ancestors) : 'hole'
+            ).join(',')}]`;
+        }
+        return `object:{${Object.keys(value)
+            .sort()
+            .map((key) => `${JSON.stringify(key)}:${canonicalUniqueValue(value[key], ancestors)}`)
+            .join(',')}}`;
+    } finally {
+        ancestors.delete(value);
+    }
+};
+
+const hasUniqueItems = (values) => {
+    const primitiveValues = new Set();
+    const structuredValues = new Set();
+    try {
+        for (const value of values) {
+            if (value !== null && typeof value === 'object') {
+                const identity = canonicalUniqueValue(value);
+                if (structuredValues.has(identity)) return false;
+                structuredValues.add(identity);
+            } else {
+                if (primitiveValues.has(value)) return false;
+                primitiveValues.add(value);
+            }
+        }
+    } catch {
+        return false;
+    }
+    return true;
 };
 
 export const validateSchemaValue = (value, schema) => {
+    if (schema.allOf && !schema.allOf.every((candidate) => validateSchemaValue(value, candidate))) return false;
+    if (schema.contains) {
+        if (!Array.isArray(value)) return false;
+        const matches = value.filter((item) => validateSchemaValue(item, schema.contains)).length;
+        if (matches < (schema.minContains ?? 1) || matches > (schema.maxContains ?? Infinity)) return false;
+    }
     if (schema.oneOf) {
         return schema.oneOf.filter((candidate) => validateSchemaValue(value, candidate)).length === 1;
     }
@@ -689,8 +936,8 @@ export const validateSchemaValue = (value, schema) => {
     }
     if (schema.type === 'array') {
         if (!Array.isArray(value) || value.length < (schema.minItems ?? 0) || value.length > (schema.maxItems ?? Infinity)) return false;
-        if (schema.uniqueItems && new Set(value).size !== value.length) return false;
-        return value.every((item) => validateSchemaValue(item, schema.items));
+        if (!value.every((item) => validateSchemaValue(item, schema.items))) return false;
+        return !schema.uniqueItems || hasUniqueItems(value);
     }
     if (schema.type === 'string') {
         return (

@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 
+import { pruneLegacyArtifacts } from './artifact-store.mjs';
 import { createBridgeRuntime } from './bridge-runtime.mjs';
 import {
     BRIDGE_GENERATION,
@@ -18,13 +19,13 @@ import {
     PEER_TOKEN_DIR,
     PEER_TOKEN_READ_TIMEOUT_MS,
     PORT,
-    RESULT_DIR,
+    STORAGE_LAYOUT,
     SESSION_NONCE,
 } from './config.mjs';
 import { ConnectionState } from './connection-state.mjs';
 import { deriveBridgeDiagnostics } from './bridge-diagnostics.mjs';
 import { createExtensionProtocol } from './extension-protocol.mjs';
-import { startFeedbackArtifactMaintenance } from './feedback-artifact-store.mjs';
+import { maintainFeedbackArtifacts, startFeedbackArtifactMaintenance } from './feedback-artifact-store.mjs';
 import { localMessage, MESSAGE_TYPES } from './extension-vocabulary.mjs';
 import { HandoffState } from './handoff-state.mjs';
 import { createMcpMessageHandler } from './mcp-dispatcher.mjs';
@@ -33,11 +34,13 @@ import { loadOrCreatePeerToken, loadPeerToken } from './peer-auth.mjs';
 import { createPeerTokenSource } from './peer-token-source.mjs';
 import { createPeerProtocol } from './peer-protocol.mjs';
 import { RequestBroker } from './request-broker.mjs';
+import { pruneLegacyResults } from './result-store.mjs';
 import { createOzonPromotionRoute } from './server-routing.mjs';
 import { attachStdioTransport } from './stdio-transport.mjs';
 import { ToolExecutionError } from './tool-errors.mjs';
 import { connectWebSocket } from './websocket-client.mjs';
 import { sendWs, WS_OPEN } from './websocket.mjs';
+import { storageStatus } from './storage-layout.mjs';
 
 const nodeMajor = Number.parseInt(process.versions.node.split('.')[0], 10);
 if (!Number.isInteger(nodeMajor) || nodeMajor < 22) {
@@ -264,7 +267,7 @@ const handleMcpMessage = createMcpMessageHandler({
         extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
         instanceId,
         websocket: `ws://${HOST}:${PORT}${EXTENSION_PATH}`,
-        resultDirectory: RESULT_DIR,
+        storage: storageStatus(STORAGE_LAYOUT),
     });},
     waitForExtensionReady: () => connections.waitForExtensionReady(EXTENSION_READINESS_WAIT_MS),
     // A degraded secondary retries slowly in the background; an actual request is the signal to try again now.
@@ -307,6 +310,11 @@ feedbackMaintenanceStart = setImmediate(() => {
     if (shuttingDown) return;
     try {
         feedbackMaintenance = startFeedbackArtifactMaintenance({
+            maintain: async () => {
+                await maintainFeedbackArtifacts();
+                await pruneLegacyArtifacts();
+                await pruneLegacyResults();
+            },
             // Paths and raw storage errors are intentionally excluded from diagnostics.
             onError: () => log('feedback artifact maintenance failed'),
         });

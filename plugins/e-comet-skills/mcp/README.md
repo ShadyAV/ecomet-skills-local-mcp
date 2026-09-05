@@ -6,8 +6,10 @@ dependencies; all required source modules are included in this directory. Node.j
 The `secondary` bridge role is a normal proxy role. `peer.bridgeVersion` and `extension.version`
 identify different components; version skew alone does not establish a failure cause.
 `extensionConnected:false` means there is no effective extension route, not why it is absent.
-Ozon reports require e-Comet extension 1.5.6+ and any authenticated Ozon Seller `/app` page,
-not a Wildberries tab or a specific promotion-overview page. Feedback is independent of bridge
+The released singular Ozon promotion report requires e-Comet extension 1.5.6+ and any authenticated Ozon Seller `/app` page,
+not a Wildberries tab or a specific promotion-overview page. Ozon company context comes only from the
+`sc_company_id` cookie; the extension does not depend on Vue, Vuex, Axios defaults, or a visible company label.
+Feedback is independent of bridge
 and extension readiness; its optional history is bounded current-session history supplied by
 the trusted host hook. The explicit history choice and protected handoff remain required.
 
@@ -23,17 +25,18 @@ is never silently changed and truncation markers are not inserted.
 `local_bridge_status` distinguishes bridge startup, extension waiting, Wildberries-tab readiness,
 update needs, and pairing failures. It reports facts, not a global next action: recovery depends on
 the user's task and the selected typed tool's result. It also reports the
-connected extension's version and whether that build announces the Ozon promotion capability; both
-are informational and never gate a typed tool. Peer-token storage affects pairing only;
-`peerRejection.code` identifies the observed pairing failure. Browser jobs may still
-return `LOCAL_STORAGE_FAILED` when result or artifact directories are unwritable; storage
-classification, fallback, and retry work is deferred.
+connected extension's version and family-specific Ozon capability verdicts; these observations
+are informational and never replace the typed tool's own capability gate. Peer-token storage affects pairing only;
+`peerRejection.code` identifies the observed pairing failure. Storage-dependent calls return the typed
+`LOCAL_STORAGE_UNAVAILABLE` outcome when no valid host plugin-data root or explicit store override exists.
+The peer token and normal feedback-claim rendezvous remain in shared profile state, outside host-specific
+plugin-data output, so concurrently running supported hosts can coordinate the same local lifecycle.
 
 The canonical source and tests live under `e-comet-local-mcp/` in the private skills repository. This plugin contains a
 release snapshot of its `src/` directory.
 
 The MCP listens only on `127.0.0.1:17361`, and the extension connects automatically while local access is enabled.
-There is no pairing flow in the MVP. Full WB responses are stored in the platform-standard user data directory; MCP
+There is no pairing flow in the MVP. Full WB responses and artifacts are stored below the host plugin-data root; MCP
 tool results contain only compact summaries and local paths.
 The extension WebSocket accepts only the official e-Comet Chrome Web Store origin by default.
 
@@ -48,11 +51,11 @@ Each result file is UTF-8 NDJSON with one fetched unit per line:
 The original WB payload is at `response.data.body`. Product-card responses may additionally contain
 `response.warehouseNames`, a best-effort map of warehouse ID to the locally known display name.
 
-Full responses use the platform-standard user data directory: `%LOCALAPPDATA%\e-comet\local-agent` on Windows,
-`~/Library/Application Support/e-comet/local-agent` on macOS, and
-`${XDG_DATA_HOME:-~/.local/share}/e-comet/local-agent` on Linux. `ECOMET_LOCAL_AGENT_RESULT_DIR` overrides this path.
-POSIX result directories are created or repaired to mode `0700` and result files to `0600`. On Windows, privacy relies
-on ACL inheritance from the current user's local application-data directory rather than POSIX mode bits.
+Full responses and artifacts use the host-provided plugin-data directory under `local-mcp-output-v2`. Codex supplies
+`PLUGIN_DATA`; Claude supplies `CLAUDE_PLUGIN_DATA`. There is no automatic `%LOCALAPPDATA%`, macOS application-data,
+or XDG fallback for new payloads. Absolute `ECOMET_LOCAL_AGENT_RESULT_DIR`, `ECOMET_LOCAL_AGENT_ARTIFACT_DIR`, and
+`ECOMET_FEEDBACK_ARTIFACT_DIR` values override only their corresponding store. POSIX directories are created or
+repaired to mode `0700` and files to `0600`; Windows relies on ACL inheritance from the host's plugin-data directory.
 
 Local tools:
 
@@ -64,6 +67,11 @@ Local tools:
 - `prepare_e_comet_feedback` — prepares one local e-Comet issue-report archive after explicit user consent;
 - `submit_e_comet_feedback` — uploads one prepared feedback archive with a trusted one-use grant;
 - `ozon_seller_promotion_report` — exports one Ozon Seller promotion analytics XLSX report for one inclusive period;
+- `ozon_seller_promotion_reports` — exports 1–50 ordered promotion-period XLSX files through one `browser_job`
+  authorization and one local call;
+- `ozon_seller_analytics_report` — exports 1–50 ordered general-analytics XLSX files through one `browser_job`
+  authorization and one local call; the connected extension must advertise the analytics capability, which remains
+  production-disabled until its live status and polling/backoff gate is verified;
 - `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
   peer when it cannot;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
@@ -79,12 +87,24 @@ verifies the RS256 signature, expiry, account UUID, job type, and exact signed s
 browser operations without matching authorization. Marketplace response bodies remain on the user's computer and do
 not pass through e-Comet backend services.
 
+The plural promotion signer accepts exactly `periods:[{dateFrom,dateTo},...]`; the analytics signer accepts exactly
+`reports:[{dateFrom,dateTo,breakdown},...]`. Each signs one descriptor containing the complete caller-ordered array.
+Promotion and analytics are separate variants and are never mixed. Package streams and ACKs carry an item index under
+one shared Ozon report owner and correlation. The create phase is never automatically retried after dispatch ambiguity.
+Completed artifacts remain available when later items fail, and a partial response lists every complete, failed, and
+skipped item.
+
 `wb_seller_reviews` accepts the signed mixed export descriptor, expands an omitted `isAnswered` into separate answered and
 unanswered physical reports, and preserves successful work when another export fails. It returns compact status metadata plus
 one private local `resource_link` for each successful XLSX workbook. Workbook bytes and base64 never enter tool content or model
 context; opening or summarizing a workbook is a separate explicit action. Artifacts are retained locally for 24 hours. Each
 workbook is limited to 100 MiB and each job to 500 MiB; the shared artifact store is limited to 512 MiB and 1000 files, with
 oldest completed artifacts evicted first.
+
+Ozon tools likewise return the original XLSX workbooks as private `resource_link` entries rooted in the launching
+host's plugin data. The plugin does not add a workbook reader or converter; the originating agent may use its normal
+file and spreadsheet capabilities when the user asks to inspect a workbook. Legacy platform-data stores are read,
+retired, or cleaned only by bounded maintenance; new payloads never fall back there.
 
 `ozon_seller_promotion_report` needs an extension build that announces the Ozon promotion capability. An older
 build cannot run the report at all, so the tool answers with an explicit outdated-extension diagnosis naming the

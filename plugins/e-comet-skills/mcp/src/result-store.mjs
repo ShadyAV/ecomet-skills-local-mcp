@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
-    RESULT_DIR,
+    RESULT_STORAGE,
+    LEGACY_RESULT_DIR,
     RESULT_ACTIVE_STALE_MS,
     RESULT_MAX_FILE_BYTES,
     RESULT_MAX_FILES,
     RESULT_MAX_TOTAL_BYTES,
     RESULT_RETENTION_MS,
 } from './config.mjs';
+import { requireStorageTarget } from './storage-layout.mjs';
 
 const RESULT_JOB_ID_FILE_PART_LENGTH = 128;
 const safeFilePart = (value) => value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, RESULT_JOB_ID_FILE_PART_LENGTH);
@@ -29,7 +31,8 @@ const ensurePrivateResultFile = async (resultPath) => {
 };
 
 export const pruneResults = async ({
-    resultDir = RESULT_DIR,
+    resultDir = undefined,
+    storageTarget = RESULT_STORAGE,
     now = Date.now(),
     retentionMs = RESULT_RETENTION_MS,
     activeStaleMs = RESULT_ACTIVE_STALE_MS,
@@ -37,6 +40,7 @@ export const pruneResults = async ({
     maxFiles = RESULT_MAX_FILES,
     excludePaths = [],
 } = {}) => {
+    resultDir ??= requireStorageTarget(storageTarget, 'results');
     const errors = [];
     const excluded = new Set(excludePaths);
     await ensurePrivateResultDirectory(resultDir);
@@ -84,10 +88,23 @@ export const pruneResults = async ({
     return errors;
 };
 
+export const pruneLegacyResults = async (options = {}) => {
+    const resultDir = options.resultDir ?? LEGACY_RESULT_DIR;
+    try {
+        const metadata = await lstat(resultDir);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) return [new Error('Legacy result directory is invalid')];
+    } catch (error) {
+        if (error?.code === 'ENOENT') return [];
+        return [normalizeError(error)];
+    }
+    return pruneResults({ ...options, resultDir });
+};
+
 export const createJobWriter = async (
     jobId,
     {
-        resultDir = RESULT_DIR,
+        resultDir = undefined,
+        storageTarget = RESULT_STORAGE,
         append = appendFile,
         maxFileBytes = RESULT_MAX_FILE_BYTES,
         retentionMs = RESULT_RETENTION_MS,
@@ -96,6 +113,7 @@ export const createJobWriter = async (
         maxFiles = RESULT_MAX_FILES,
     } = {}
 ) => {
+    resultDir ??= requireStorageTarget(storageTarget, 'results');
     await ensurePrivateResultDirectory(resultDir);
     const retentionOptions = { resultDir, retentionMs, activeStaleMs, maxTotalBytes, maxFiles };
     const writeErrors = await pruneResults(retentionOptions);

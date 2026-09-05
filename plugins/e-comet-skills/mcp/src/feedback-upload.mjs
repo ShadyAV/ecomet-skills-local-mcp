@@ -8,7 +8,8 @@ const MAX_UPLOAD_URL_BYTES = 8 * 1024;
 const MAX_REQUIRED_HEADERS = 32;
 const MAX_HEADER_NAME_BYTES = 128;
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
-const MAX_UPLOAD_TIMEOUT_MS = 30_000;
+const MAX_UPLOAD_TIMEOUT_MS = 180_000;
+const DEFAULT_UPLOAD_TIMEOUT_MS = 120_000;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 class FeedbackUploadError extends Error {
@@ -81,7 +82,7 @@ const assertGrant = ({ uploadUrl, requiredHeaders, expiresAt, bytes }, now, maxB
  * @param {{ requestImpl?: typeof httpsRequest, now?: () => number, timeoutMs?: number, maxBytes?: number, setTimeoutImpl?: (callback: () => void, milliseconds: number) => unknown, clearTimeoutImpl?: (timer: unknown) => void }} options
  */
 export const putFeedbackArchive = async (grant, options = {}) => {
-    const { requestImpl = httpsRequest, now = Date.now, timeoutMs = 15_000, maxBytes = FEEDBACK_MAX_BYTES, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout } = options;
+    const { requestImpl = httpsRequest, now = Date.now, timeoutMs = DEFAULT_UPLOAD_TIMEOUT_MS, maxBytes = FEEDBACK_MAX_BYTES, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout } = options;
     if (typeof requestImpl !== 'function' || typeof now !== 'function' || typeof setTimeoutImpl !== 'function' || typeof clearTimeoutImpl !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_UPLOAD_TIMEOUT_MS || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > FEEDBACK_MAX_BYTES) {
         throw grantInvalid();
     }

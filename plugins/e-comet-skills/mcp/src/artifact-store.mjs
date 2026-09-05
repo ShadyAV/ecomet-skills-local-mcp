@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 
 import {
-    ARTIFACT_DIR,
+    ARTIFACT_STORAGE,
+    LEGACY_ARTIFACT_DIR,
     ARTIFACT_MAX_CHUNK_BYTES,
     ARTIFACT_MAX_FILE_BYTES,
     ARTIFACT_MAX_FILES,
@@ -13,6 +14,7 @@ import {
     ARTIFACT_MAX_TOTAL_BYTES,
     ARTIFACT_RETENTION_MS,
 } from './config.mjs';
+import { requireStorageTarget } from './storage-layout.mjs';
 
 const defaultFileSystem = { appendFile, chmod, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile };
 const jobUsage = new Map();
@@ -817,7 +819,7 @@ export const releaseArtifactJob = async (
 };
 
 const pruneArtifactsUnlocked = async ({
-    artifactDir = ARTIFACT_DIR,
+    artifactDir = undefined,
     now = Date.now(),
     retentionMs = ARTIFACT_RETENTION_MS,
     maxTotalBytes = ARTIFACT_MAX_TOTAL_BYTES,
@@ -916,11 +918,23 @@ const pruneArtifactsUnlocked = async ({
 };
 
 export const pruneArtifacts = async (options = {}) => {
-    const artifactDir = options.artifactDir ?? ARTIFACT_DIR;
+    const artifactDir = options.artifactDir ?? requireStorageTarget(options.storageTarget ?? ARTIFACT_STORAGE, 'marketplaceArtifacts');
     const fs = { ...defaultFileSystem, ...(options.fileSystem ?? {}) };
     const platform = options.platform ?? process.platform;
     await ensurePrivateDirectory(artifactDir, fs, platform);
     return withArtifactStoreLock(artifactDir, () => pruneArtifactsUnlocked(options), fs);
+};
+
+export const pruneLegacyArtifacts = async (options = {}) => {
+    const artifactDir = options.artifactDir ?? LEGACY_ARTIFACT_DIR;
+    try {
+        const metadata = await lstat(artifactDir);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) return [new Error('Legacy artifact directory is invalid')];
+    } catch (error) {
+        if (error?.code === 'ENOENT') return [];
+        return [asError(error)];
+    }
+    return pruneArtifacts({ ...options, artifactDir });
 };
 
 const artifactTotalBytes = async (artifactDir, fs) => {
@@ -941,6 +955,7 @@ const artifactCompletedFileCount = async (artifactDir, fs) =>
  *     fileName?: string,
  *     mimeType?: string,
  *     artifactDir?: string,
+ *     storageTarget?: { state: string, path?: string, reason?: string },
  *     maxChunkBytes?: number,
  *     maxFileBytes?: number,
  *     maxJobBytes?: number,
@@ -959,7 +974,7 @@ export const createArtifactWriter = async (options = {}) => {
         jobId,
         fileName,
         mimeType,
-        artifactDir = ARTIFACT_DIR,
+        artifactDir: configuredArtifactDir,
         maxChunkBytes = ARTIFACT_MAX_CHUNK_BYTES,
         maxFileBytes = ARTIFACT_MAX_FILE_BYTES,
         maxJobBytes = ARTIFACT_MAX_JOB_BYTES,
@@ -972,6 +987,7 @@ export const createArtifactWriter = async (options = {}) => {
         fileSystem = {},
         platform = process.platform,
     } = options;
+    const artifactDir = configuredArtifactDir ?? requireStorageTarget(options.storageTarget ?? ARTIFACT_STORAGE, 'marketplaceArtifacts');
     if (typeof jobId !== 'string' || jobId.length === 0) throw new Error('Artifact job ID is required');
     if (typeof mimeType !== 'string' || mimeType.length === 0) throw new Error('Artifact MIME type is required');
     validateLimits({ maxChunkBytes, maxFileBytes, maxJobBytes, maxTotalBytes, maxFiles, retentionMs });

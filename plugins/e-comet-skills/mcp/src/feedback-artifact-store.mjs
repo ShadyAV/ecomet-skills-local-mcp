@@ -4,14 +4,16 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-    FEEDBACK_ARTIFACT_DIR,
+    FEEDBACK_ARTIFACT_STORAGE,
     FEEDBACK_ARTIFACT_MAX_FILES,
     FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES,
     FEEDBACK_ARTIFACT_RETENTION_MS,
     FEEDBACK_KINDS,
     FEEDBACK_MAX_BYTES,
+    LEGACY_FEEDBACK_ARTIFACT_DIR,
 } from './config.mjs';
 import { FeedbackPreparationError } from './feedback-errors.mjs';
+import { requireStorageTarget } from './storage-layout.mjs';
 
 const MANIFEST_SCHEMA_VERSION = 1;
 const MAX_MANIFEST_BYTES = 64 * 1024;
@@ -20,15 +22,17 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const FEEDBACK_KIND_SET = new Set(FEEDBACK_KINDS);
 const FEEDBACK_STORE_LOCK_RETRY_LIMIT = 200;
 const FEEDBACK_STORE_LOCK_RETRY_DELAY_MS = 25;
+const FEEDBACK_STORE_LOCK_ROLLBACK_RETRY_LIMIT = 3;
 const FEEDBACK_STORE_LOCK_STALE_MS = 30_000;
 const FEEDBACK_STORE_LOCK_OWNER_PATTERN = /^([1-9]\d{0,9})-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FEEDBACK_STORE_LOCK_CANDIDATE_PATTERN = /^\.feedback-artifact-store-lock-([1-9]\d{0,9})-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PENDING_ARTIFACT_PATTERN = /^\.pending-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 const PENDING_MANIFEST_PATTERN = /^\.pending-manifest-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 const FEEDBACK_MAINTENANCE_INTERVAL_MS = 15 * 60 * 1000;
 
-class FeedbackCrashCleanupError extends Error {
+class FeedbackReconciliationError extends Error {
     constructor(cause) {
-        super('Feedback crash leftover cleanup is incomplete', { cause });
+        super('Feedback artifact cleanup reconciliation is incomplete', { cause });
         this.feedbackReason = 'storage_cleanup_incomplete';
     }
 }
@@ -40,6 +44,8 @@ export const feedbackArtifactStorageUnavailable = (cause) => new FeedbackPrepara
 const assertPositiveInteger = (value, name) => {
     if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`Feedback ${name} must be a positive safe integer`);
 };
+// Inputs are capped at FEEDBACK_MAX_BYTES before this native digest; the bounded synchronous work avoids
+// adding a streaming lifecycle while the store lock protects one immutable snapshot.
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const asNodeError = (error) => (error instanceof Error ? error : new Error(String(error)));
 const isNotFound = (error) => error?.code === 'ENOENT';
@@ -56,6 +62,75 @@ const isProcessAlive = (pid) => {
         return true;
     } catch (error) {
         return error?.code === 'ESRCH' ? false : undefined;
+    }
+};
+
+const sameDirectoryIdentity = (first, second) => first.dev === second.dev && first.ino === second.ino;
+
+const rollbackEmptyFeedbackStoreLock = async (lockPath) => {
+    let ownedIdentity;
+    for (let attempt = 0; attempt < FEEDBACK_STORE_LOCK_ROLLBACK_RETRY_LIMIT; attempt += 1) {
+        let current;
+        try {
+            current = await stat(lockPath);
+        } catch (error) {
+            if (isNotFound(error)) return;
+            throw error;
+        }
+        if (ownedIdentity === undefined) ownedIdentity = current;
+        else if (!sameDirectoryIdentity(ownedIdentity, current)) return;
+        try {
+            await rmdir(lockPath);
+            return;
+        } catch (error) {
+            if (isNotFound(error)) return;
+            if (!['EPERM', 'EBUSY'].includes(error?.code) || attempt + 1 === FEEDBACK_STORE_LOCK_ROLLBACK_RETRY_LIMIT) throw error;
+            await delay(FEEDBACK_STORE_LOCK_RETRY_DELAY_MS);
+        }
+    }
+};
+
+const hasLiveFeedbackStoreCandidate = async (artifactDirectory) => {
+    const entries = await readdir(artifactDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const match = FEEDBACK_STORE_LOCK_CANDIDATE_PATTERN.exec(entry.name);
+        if (match === null) continue;
+        const pid = Number(match[1]);
+        if (isProcessAlive(pid) === false) continue;
+        const ownerId = entry.name.slice('.feedback-artifact-store-lock-'.length);
+        try {
+            const owners = await readdir(join(artifactDirectory, entry.name), { withFileTypes: true });
+            if (owners.some((owner) => owner.isFile() && owner.name === ownerId)) return true;
+        } catch (error) {
+            if (!isNotFound(error)) return true;
+        }
+    }
+    return false;
+};
+
+const reclaimDeadFeedbackStoreCandidates = async (artifactDirectory) => {
+    const entries = await readdir(artifactDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const match = FEEDBACK_STORE_LOCK_CANDIDATE_PATTERN.exec(entry.name);
+        if (match === null) continue;
+        const pid = Number(match[1]);
+        if (isProcessAlive(pid) !== false) continue;
+        const candidatePath = join(artifactDirectory, entry.name);
+        let metadata;
+        try {
+            metadata = await stat(candidatePath);
+            if (!metadata.isDirectory() || isProcessAlive(pid) !== false) continue;
+            const current = await stat(candidatePath);
+            if (current.dev !== metadata.dev || current.ino !== metadata.ino || current.mtimeMs !== metadata.mtimeMs) continue;
+            const stalePath = join(artifactDirectory, `.feedback-artifact-store-stale-lock-${process.pid}-${randomUUID()}`);
+            await rename(candidatePath, stalePath);
+            await rm(stalePath, { recursive: true, force: true }).catch(() => {});
+        } catch {
+            // Dead-intent cleanup is best-effort housekeeping. Ignore every lookup or rename
+            // failure here; the subsequent lock acquisition remains authoritative.
+        }
     }
 };
 
@@ -141,6 +216,48 @@ const readManifest = async (artifactDirectory) => {
     return { schemaVersion: MANIFEST_SCHEMA_VERSION, artifacts: manifest.artifacts, pendingCleanup };
 };
 
+const existingFeedbackDirectory = async (directory, artifactId) => {
+    if (typeof directory !== 'string') return false;
+    try {
+        const metadata = await lstat(directory);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+        const manifest = await readManifest(directory);
+        return [...manifest.artifacts, ...manifest.pendingCleanup].some((entry) => entry.artifactId === artifactId);
+    } catch (error) {
+        if (isNotFound(error)) return false;
+        throw error;
+    }
+};
+
+const realDirectoryExists = async (directory) => {
+    if (typeof directory !== 'string') return false;
+    try {
+        const metadata = await lstat(directory);
+        return metadata.isDirectory() && !metadata.isSymbolicLink();
+    } catch (error) {
+        if (isNotFound(error)) return false;
+        throw error;
+    }
+};
+
+const locateFeedbackDirectory = async ({ artifactId, configuredDirectory, storageTarget, legacyArtifactDirectory }) => {
+    if (configuredDirectory !== undefined) {
+        return (await existingFeedbackDirectory(configuredDirectory, artifactId)) ? configuredDirectory : undefined;
+    }
+    const candidates = new Set([
+        ...(storageTarget?.state === 'ready' ? [storageTarget.path] : []),
+        ...(typeof legacyArtifactDirectory === 'string' ? [legacyArtifactDirectory] : []),
+    ]);
+    const matches = [];
+    for (const directory of candidates) {
+        if (await existingFeedbackDirectory(directory, artifactId)) matches.push(directory);
+    }
+    if (matches.length > 1) {
+        throw storageError('Feedback artifact identity is ambiguous across storage generations', 'artifact_ambiguous');
+    }
+    return matches[0];
+};
+
 const writeManifest = async (artifactDirectory, manifest, platform) => {
     const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`, 'utf8');
     if (bytes.length > MAX_MANIFEST_BYTES) throw new RangeError('Feedback artifact manifest exceeds its byte limit');
@@ -157,14 +274,51 @@ const writeManifest = async (artifactDirectory, manifest, platform) => {
 
 const acquireFeedbackStoreLock = async (artifactDirectory) => {
     const lockPath = join(artifactDirectory, '.feedback-artifact-store.lock');
+    await reclaimDeadFeedbackStoreCandidates(artifactDirectory);
     for (let attempt = 0; attempt < FEEDBACK_STORE_LOCK_RETRY_LIMIT; attempt += 1) {
         const ownerId = `${process.pid}-${randomUUID()}`;
         const candidatePath = join(artifactDirectory, `.feedback-artifact-store-lock-${ownerId}`);
-        const ownerPath = join(candidatePath, ownerId);
+        const candidateOwnerPath = join(candidatePath, ownerId);
+        const ownerPath = join(lockPath, ownerId);
+        let acquired = false;
+        let published = false;
         await mkdir(candidatePath, { mode: 0o700 });
         try {
-            await writeFile(ownerPath, '', { mode: 0o600, flag: 'wx' });
-            await rename(candidatePath, lockPath);
+            await writeFile(candidateOwnerPath, '', { mode: 0o600, flag: 'wx' });
+            // The final mkdir is the portable atomic claim. The populated candidate remains a
+            // live intent until its owner marker moves into the lock, protecting a delayed
+            // publisher while an old empty lock remains reclaimable after the stale grace.
+            await mkdir(lockPath, { mode: 0o700 });
+            acquired = true;
+            await rename(candidateOwnerPath, ownerPath);
+            published = true;
+        } catch (error) {
+            let rollbackError;
+            if (acquired) {
+                try {
+                    // The populated candidate keeps conforming waiters from replacing our empty lock;
+                    // identity rechecks keep a retry from removing an unexpected successor.
+                    await rollbackEmptyFeedbackStoreLock(lockPath);
+                } catch (cleanupError) {
+                    rollbackError = cleanupError;
+                }
+            }
+            let candidateCleanupError;
+            try {
+                await rm(candidatePath, { recursive: true, force: true });
+            } catch (cleanupError) {
+                candidateCleanupError = cleanupError;
+            }
+            if (rollbackError) throw rollbackError;
+            if (candidateCleanupError) throw candidateCleanupError;
+            // A stale reclaimer may remove our not-yet-published empty lock. That is contention,
+            // not a terminal filesystem failure; the populated candidate is discarded and retried.
+            if (!['ENOENT', 'EEXIST', 'ENOTEMPTY', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
+        }
+        if (published) {
+            // Publication transferred the only owner marker into the final lock. Empty candidate removal
+            // is housekeeping and cannot revoke an otherwise valid acquisition.
+            await rmdir(candidatePath).catch(() => undefined);
             return async () => {
                 await rm(join(lockPath, ownerId), { force: true });
                 try {
@@ -173,24 +327,35 @@ const acquireFeedbackStoreLock = async (artifactDirectory) => {
                     if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) throw error;
                 }
             };
-        } catch (error) {
-            await rm(candidatePath, { recursive: true, force: true });
-            if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
         }
         try {
             const metadata = await stat(lockPath);
-            const owners = (await readdir(lockPath, { withFileTypes: true }))
+            // Read populated intents before final owners: publication moves the marker between them,
+            // so either side of the transition is observed while empty cleanup residue is ignored.
+            const liveCandidate = await hasLiveFeedbackStoreCandidate(artifactDirectory);
+            const lockEntries = await readdir(lockPath, { withFileTypes: true });
+            const owners = lockEntries
                 .filter((entry) => entry.isFile())
                 .map((entry) => lockOwnerPid(entry.name))
                 .filter((pid) => pid !== null);
+            // This is deliberately conservative, not fair: any observed live/unknown publisher wins
+            // protection, so overlapping publishers may make a waiter exhaust its bounded retries.
             // Identifiable dead owners need no age grace. Live/unknown processes remain protected.
-            if (!owners.some((pid) => isProcessAlive(pid) !== false) &&
+            if (!liveCandidate && !owners.some((pid) => isProcessAlive(pid) !== false) &&
                 (owners.length > 0 || Date.now() - metadata.mtimeMs > FEEDBACK_STORE_LOCK_STALE_MS)) {
                 const current = await stat(lockPath);
                 if (current.dev === metadata.dev && current.ino === metadata.ino && current.mtimeMs === metadata.mtimeMs) {
-                    const stalePath = join(artifactDirectory, `.feedback-artifact-store-stale-lock-${process.pid}-${randomUUID()}`);
-                    await rename(lockPath, stalePath);
-                    await rm(stalePath, { recursive: true, force: true });
+                    // WHY: a pathname rename could move a live successor installed after the stat above.
+                    // Remove only names observed in the stale directory; a successor's fresh owner marker
+                    // then makes this non-recursive rmdir fail safely instead of deleting its critical section.
+                    for (const entry of lockEntries) {
+                        await rm(join(lockPath, entry.name), { recursive: entry.isDirectory(), force: true });
+                    }
+                    try {
+                        await rmdir(lockPath);
+                    } catch (error) {
+                        if (!['ENOENT', 'ENOTEMPTY', 'EEXIST', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
+                    }
                     continue;
                 }
             }
@@ -243,6 +408,9 @@ const pruneEntries = (entries, { maxArtifacts, maxTotalBytes, retentionMs, nowMs
 const totalEntryBytes = (entries, physicalBytes) => entries.reduce((sum, entry) => sum + physicalBytes.get(entry.artifactId), 0);
 
 const measureArtifactBytes = async (artifactDirectory, entries) => {
+    // Keep metadata reads serialized under the store lock: the manifest is hard-bounded to 100
+    // entries, and avoiding filesystem fan-out is preferable until profiling proves this scan
+    // approaches the lock deadline on supported hosts.
     const physicalBytes = new Map();
     for (const entry of entries) {
         let total = 0;
@@ -250,7 +418,7 @@ const measureArtifactBytes = async (artifactDirectory, entries) => {
             try {
                 total += (await lstat(join(artifactPath(artifactDirectory, entry.artifactId), name))).size;
             } catch (error) {
-                if (!isNotFound(error)) throw error;
+                if (!isNotFound(error)) throw new FeedbackReconciliationError(error);
             }
         }
         physicalBytes.set(entry.artifactId, total);
@@ -283,7 +451,7 @@ const removeCrashLeftovers = async (artifactDirectory, manifest, removeArtifactI
         try {
             await removeArtifactImpl(join(artifactDirectory, entry.name), { recursive: true, force: true });
         } catch (error) {
-            cleanupError ??= new FeedbackCrashCleanupError(error);
+            cleanupError ??= new FeedbackReconciliationError(error);
         }
     }
     // WHY: unindexed crash survivors have no trustworthy manifest accounting. Reconciliation must fail closed
@@ -374,11 +542,11 @@ const reconcileStoreUnlocked = async ({
 
 /**
  * @param {{ kind: string, includeTranscript: boolean, reportBytes: Buffer, archiveBytes: Buffer }} artifact
- * @param {{ artifactDirectory?: string, maxArtifacts?: number, maxTotalBytes?: number, retentionMs?: number, now?: () => number, platform?: NodeJS.Platform, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm, createArtifactId?: () => string }} options
+ * @param {{ artifactDirectory?: string, storageTarget?: { state: string, path?: string, reason?: string }, maxArtifacts?: number, maxTotalBytes?: number, retentionMs?: number, now?: () => number, platform?: NodeJS.Platform, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm, createArtifactId?: () => string }} options
  */
 export const registerFeedbackArtifact = async (artifact, options = {}) => {
     const {
-        artifactDirectory = FEEDBACK_ARTIFACT_DIR,
+        artifactDirectory: configuredArtifactDirectory,
         maxArtifacts = FEEDBACK_ARTIFACT_MAX_FILES,
         maxTotalBytes = FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES,
         retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS,
@@ -388,6 +556,10 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
         removeArtifactImpl = rm,
         createArtifactId = randomUUID,
     } = options;
+    const artifactDirectory = configuredArtifactDirectory ?? requireStorageTarget(
+        options.storageTarget ?? FEEDBACK_ARTIFACT_STORAGE,
+        'feedbackArtifacts'
+    );
     if (!artifact || typeof artifact !== 'object' || !FEEDBACK_KIND_SET.has(artifact.kind)) throw new RangeError('Feedback kind is invalid');
     if (typeof artifact.includeTranscript !== 'boolean') throw new TypeError('Feedback transcript inclusion must be a boolean');
     assertBytes(artifact.reportBytes, 'report', FEEDBACK_MAX_BYTES);
@@ -474,17 +646,18 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
 
 /**
  * @param {{ artifactId: string, expectedSize: number, expectedSha256: string }} request
- * @param {{ artifactDirectory?: string, platform?: NodeJS.Platform, retentionMs?: number, now?: () => number, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm }} options
+ * @param {{ artifactDirectory?: string, legacyArtifactDirectory?: string, storageTarget?: { state: string, path?: string, reason?: string }, platform?: NodeJS.Platform, retentionMs?: number, now?: () => number, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm }} options
  */
 export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
     const {
-        artifactDirectory = FEEDBACK_ARTIFACT_DIR,
+        artifactDirectory: configuredArtifactDirectory,
         platform = process.platform,
         retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS,
         now = Date.now,
         writeManifestImpl = writeManifest,
         removeArtifactImpl = rm,
     } = options;
+    const storageTarget = options.storageTarget ?? FEEDBACK_ARTIFACT_STORAGE;
     if (!request || typeof request !== 'object' || !ARTIFACT_ID_PATTERN.test(request.artifactId)) throw new RangeError('Feedback artifact ID is invalid');
     assertPositiveInteger(request.expectedSize, 'expected size');
     if (typeof request.expectedSha256 !== 'string' || !SHA256_PATTERN.test(request.expectedSha256)) {
@@ -496,7 +669,18 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
     }
     const nowMs = now();
     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new RangeError('Feedback artifact clock must return a non-negative safe integer');
-    await ensurePrivateDirectory(artifactDirectory, platform);
+    const artifactDirectory = await locateFeedbackDirectory({
+        artifactId: request.artifactId,
+        configuredDirectory: configuredArtifactDirectory,
+        storageTarget,
+        legacyArtifactDirectory: options.legacyArtifactDirectory ?? LEGACY_FEEDBACK_ARTIFACT_DIR,
+    });
+    if (artifactDirectory === undefined) {
+        if (configuredArtifactDirectory === undefined && storageTarget.state !== 'ready') {
+            requireStorageTarget(storageTarget, 'feedbackArtifacts');
+        }
+        throw storageError('Feedback artifact is missing or expired', 'artifact_missing');
+    }
     return withFeedbackStoreLock(artifactDirectory, async () => {
         const originalManifest = await readManifest(artifactDirectory);
         let manifest;
@@ -513,9 +697,9 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
                 removeArtifactImpl,
             });
         } catch (error) {
-            // Only this owned cleanup failure precedes pruning/publication and leaves active entries intact.
-            // Loading grants no admission; exact target validation below remains mandatory.
-            if (!(error instanceof FeedbackCrashCleanupError)) throw error;
+            // WHY: whole-store reconciliation grants no admission here. If its pre-prune scan is
+            // temporarily blocked, the exact indexed target still has to pass every check below.
+            if (!(error instanceof FeedbackReconciliationError)) throw error;
             manifest = originalManifest;
         }
         const entry = manifest.artifacts.find((candidate) => candidate.artifactId === request.artifactId);
@@ -552,11 +736,11 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
  * Removes one definitively uploaded artifact. The manifest first moves the entry into pendingCleanup so any
  * filesystem failure remains durable and ordinary maintenance can retry it.
  * @param {{ artifactId: string }} request
- * @param {{ artifactDirectory?: string, maxArtifacts?: number, platform?: NodeJS.Platform, retentionMs?: number, now?: () => number, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm }} options
+ * @param {{ artifactDirectory?: string, legacyArtifactDirectory?: string, storageTarget?: { state: string, path?: string, reason?: string }, maxArtifacts?: number, platform?: NodeJS.Platform, retentionMs?: number, now?: () => number, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm }} options
  */
 export const retireFeedbackArtifact = async (request, options = {}) => {
     const {
-        artifactDirectory = FEEDBACK_ARTIFACT_DIR,
+        artifactDirectory: configuredArtifactDirectory,
         maxArtifacts = FEEDBACK_ARTIFACT_MAX_FILES,
         platform = process.platform,
         retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS,
@@ -564,6 +748,7 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
         writeManifestImpl = writeManifest,
         removeArtifactImpl = rm,
     } = options;
+    const storageTarget = options.storageTarget ?? FEEDBACK_ARTIFACT_STORAGE;
     if (!request || typeof request !== 'object' || !ARTIFACT_ID_PATTERN.test(request.artifactId)) {
         throw new RangeError('Feedback artifact ID is invalid');
     }
@@ -574,7 +759,13 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
     }
     const nowMs = now();
     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new RangeError('Feedback artifact clock must return a non-negative safe integer');
-    await ensurePrivateDirectory(artifactDirectory, platform);
+    const artifactDirectory = await locateFeedbackDirectory({
+        artifactId: request.artifactId,
+        configuredDirectory: configuredArtifactDirectory,
+        storageTarget,
+        legacyArtifactDirectory: options.legacyArtifactDirectory ?? LEGACY_FEEDBACK_ARTIFACT_DIR,
+    });
+    if (artifactDirectory === undefined) return { retired: false, localCleanup: 'complete' };
     return withFeedbackStoreLock(artifactDirectory, async () => {
         const manifest = await reconcileStoreUnlocked({
             artifactDirectory,
@@ -637,11 +828,11 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
 
 /**
  * Reconciles crash leftovers and applies retention/quota limits without preparing a new artifact.
- * @param {{ artifactDirectory?: string, maxArtifacts?: number, maxTotalBytes?: number, retentionMs?: number, now?: () => number, platform?: NodeJS.Platform, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm }} options
+ * @param {{ artifactDirectory?: string, legacyArtifactDirectory?: string, storageTarget?: { state: string, path?: string, reason?: string }, maxArtifacts?: number, maxTotalBytes?: number, retentionMs?: number, now?: () => number, platform?: NodeJS.Platform, writeManifestImpl?: typeof writeManifest, removeArtifactImpl?: typeof rm }} options
  */
 export const maintainFeedbackArtifacts = async (options = {}) => {
     const {
-        artifactDirectory = FEEDBACK_ARTIFACT_DIR,
+        artifactDirectory: configuredArtifactDirectory,
         maxArtifacts = FEEDBACK_ARTIFACT_MAX_FILES,
         maxTotalBytes = FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES,
         retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS,
@@ -650,6 +841,22 @@ export const maintainFeedbackArtifacts = async (options = {}) => {
         writeManifestImpl = writeManifest,
         removeArtifactImpl = rm,
     } = options;
+    const storageTarget = options.storageTarget ?? FEEDBACK_ARTIFACT_STORAGE;
+    if (configuredArtifactDirectory === undefined) {
+        const candidates = [
+            ...(storageTarget.state === 'ready' ? [storageTarget.path] : []),
+            options.legacyArtifactDirectory ?? LEGACY_FEEDBACK_ARTIFACT_DIR,
+        ];
+        const existing = [];
+        for (const directory of new Set(candidates)) {
+            if (await realDirectoryExists(directory)) existing.push(directory);
+        }
+        for (const artifactDirectory of existing) {
+            await maintainFeedbackArtifacts({ ...options, artifactDirectory });
+        }
+        return;
+    }
+    const artifactDirectory = configuredArtifactDirectory;
     assertPositiveInteger(maxArtifacts, 'artifact count limit');
     assertPositiveInteger(maxTotalBytes, 'artifact total byte limit');
     assertPositiveInteger(retentionMs, 'artifact retention');

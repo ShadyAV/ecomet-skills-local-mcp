@@ -18,17 +18,28 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const transcriptUnavailable = (cause) => new FeedbackPreparationError('TRANSCRIPT_UNAVAILABLE', cause);
 const claimInvalid = (cause) => new FeedbackPreparationError('FEEDBACK_CLAIM_INVALID', cause);
 const hookHandoffUnavailable = (cause) => new FeedbackPreparationError('FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', cause);
-const safeSummary = (summary) => redactFeedbackText(summary.replace(/\r\n?/g, '\n')).slice(0, FEEDBACK_MAX_SUMMARY_LENGTH);
+const safeSummary = (summary) => {
+    const text = redactFeedbackText(summary.replace(/\r\n?/g, '\n')).toWellFormed();
+    let end = Math.min(text.length, FEEDBACK_MAX_SUMMARY_LENGTH);
+    if (end < text.length && /[\ud800-\udbff]/u.test(text[end - 1])) end -= 1;
+    return text.slice(0, end);
+};
 const safeArtifactId = (artifactId) => (typeof artifactId === 'string' && ARTIFACT_ID.test(artifactId) ? artifactId : undefined);
 
 const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 const completeJsonlPrefix = (bytes, maxBytes) => {
+    // File order is the only trusted ordering contract across supported hosts. When the shared
+    // package budget is exceeded, retain the earliest complete physical records; do not infer
+    // that the file tail is newer. This rare truncation is intentionally not reported separately.
     const prefix = bytes.subarray(0, Math.max(0, maxBytes));
     const finalNewline = prefix.lastIndexOf(0x0a);
     if (finalNewline === -1) return Buffer.alloc(0);
     const complete = prefix.subarray(0, finalNewline + 1);
+    // Fatal validation is repeated after the external transcript-reader seam and after budget
+    // fitting. Near-limit histories are rare, and retaining one validation boundary is preferred
+    // to trusting an injected reader or duplicating validated/unvalidated buffer types.
     try {
         UTF8_DECODER.decode(complete);
     } catch (error) {
@@ -84,10 +95,14 @@ export const readTrustedFeedbackTranscript = async (path, options = {}) => {
 
 const readTrustedTranscript = (path, options) => readTrustedFeedbackTranscript(path, options);
 
+/** @typedef {(input: { reportBytes: Buffer, metadataBytes: Buffer, transcriptBytes?: Buffer }, options: { maxBytes: number }) => Buffer | Promise<Buffer>} FeedbackZipCreator */
+
 /**
  * Creates and stores an immutable feedback archive. transcriptPath is injected by the trusted host hook.
+ * `dependencies` is an internal composition/test seam; production supplies only getBridgeStatus
+ * and uses the validated built-in persistence, ZIP, claim, clock, and runtime metadata functions.
  * @param {{ kind?: string, summary?: string, details?: string, includeTranscript?: boolean, transcriptPath?: string, feedbackClaim?: string, feedbackSession?: string }} input
- * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, consumeClaim?: typeof consumeFeedbackClaim, createZip?: typeof createFeedbackZip, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number }} dependencies
+ * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, consumeClaim?: typeof consumeFeedbackClaim, createZip?: FeedbackZipCreator, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number }} dependencies
  */
 export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const {
@@ -159,7 +174,7 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const metadataBytes = fitSourceBudget();
     let archiveBytes;
     try {
-        archiveBytes = createZip(
+        archiveBytes = await createZip(
             { reportBytes, metadataBytes, ...(transcriptBytes === undefined ? {} : { transcriptBytes }) },
             { maxBytes },
         );
@@ -168,6 +183,9 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     }
     let artifact;
     try {
+        // Production reaches the built-in registrar only after input and archive validation, so
+        // remaining failures belong to the local persistence/capacity boundary. Arbitrary injected
+        // registrar failures exist only through the internal test seam described above.
         artifact = await registerArtifact({ kind, includeTranscript, reportBytes, archiveBytes });
     } catch (error) {
         throw feedbackArtifactStorageUnavailable(error);

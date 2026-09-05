@@ -5,10 +5,13 @@ import { chmod, mkdir, readFile, readdir, rename, rm, rmdir, stat, unlink, write
 import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { MAX_MCP_MESSAGE_BYTES } from '../mcp/src/config.mjs';
 import { issueFeedbackClaim } from '../mcp/src/feedback-claim.mjs';
-import { feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from '../mcp/src/feedback-diagnostics.mjs';
+import { FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from '../mcp/src/feedback-diagnostics.mjs';
 
-const MAX_HOOK_EVENT_BYTES = 1024 * 1024;
+// PostToolUse can carry one maximum-size MCP request and response. Reserve another 256 KiB for the
+// host's session/tool metadata and platform paths while keeping malformed stdin decisively bounded.
+const MAX_HOOK_EVENT_BYTES = 2 * MAX_MCP_MESSAGE_BYTES + 256 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
 const MAX_TRANSCRIPT_PATH_BYTES = 4096;
 const MAX_STATE_FILE_BYTES = 64 * 1024;
@@ -36,12 +39,12 @@ const MAX_REQUIRED_HEADERS = 32;
 const MAX_HEADER_NAME_BYTES = 128;
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const MAX_GRANT_PAYLOAD_BYTES = 48 * 1024;
-const UPLOAD_TIMEOUT_MS = 15_000;
+const GRANT_START_WINDOW_MS = 30_000;
 const GRANT_HANDOFF_RESERVE_MS = 5_000;
-// WHY: staging promises enough lifetime for both ordinary Post->Pre scheduling and the complete one-shot PUT.
-const MIN_STAGE_GRANT_REMAINING_MS = UPLOAD_TIMEOUT_MS + GRANT_HANDOFF_RESERVE_MS;
-// WHY: once PreToolUse starts, charging the scheduling reserve again rejects grants that still cover the complete PUT.
-const MIN_CLAIM_GRANT_REMAINING_MS = UPLOAD_TIMEOUT_MS;
+// WHY: the grant must survive ordinary Post->Pre scheduling and the start of the PUT. Its expiry
+// is not coupled to the uploader's longer wall deadline for completing an already-started request.
+const MIN_STAGE_GRANT_REMAINING_MS = GRANT_START_WINDOW_MS + GRANT_HANDOFF_RESERVE_MS;
+const MIN_CLAIM_GRANT_REMAINING_MS = GRANT_START_WINDOW_MS;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const HEADER_VALUE_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const OBJECT_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
@@ -749,8 +752,14 @@ export const stagePreparedArtifact = async ({
         const preparedPath = preparedPathForSession(dataDirectory, sessionId);
         const grantPath = grantPathForSession(dataDirectory, sessionId);
         const active = await cleanupStore(dataDirectory, nowMs, retentionMs);
+        const ownsCapacitySlot = await Promise.all([preparedPath, grantPath].map(path =>
+            stat(path).then(() => true, error => {
+                if (safeFeedbackProperty(error, 'code') === 'ENOENT') return false;
+                throw error;
+            })
+        )).then(paths => paths.some(Boolean));
         // Reserve publication headroom, including a possible unclaimable replacement backup.
-        if (active >= maxEntries) {
+        if (active >= maxEntries && !ownsCapacitySlot) {
             throw new FeedbackHandoffError('FEEDBACK_CAPACITY', 'Too many feedback handoffs are waiting locally.');
         }
         await removeFile(grantPath);
@@ -787,10 +796,7 @@ export const stageUploadGrant = async ({
     }
     await ensurePrivateStoreDirectory(dataDirectory);
     await withStoreLock(dataDirectory, fileNow, async () => {
-        const active = await cleanupStore(dataDirectory, nowMs, retentionMs);
-        if (active >= MAX_PENDING_ENTRIES) {
-            throw new FeedbackHandoffError('FEEDBACK_CAPACITY', 'Too many feedback handoffs are waiting locally.');
-        }
+        await cleanupStore(dataDirectory, nowMs, retentionMs);
         const preparedPath = preparedPathForSession(dataDirectory, sessionId);
         const grantPath = grantPathForSession(dataDirectory, sessionId);
         if (await stat(grantPath).then(() => true, () => false)) {
@@ -1057,7 +1063,7 @@ const safeHookError = (error, operation) => {
     const details = feedbackDiagnostics(error, operation);
     const owned = ownedErrors.get(error);
     if (owned) return { ...owned, details };
-    const filesystemBlocked = ['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EDQUOT', 'EROFS', 'EMFILE', 'ENFILE', 'EIO', 'EEXIST', 'ENOTDIR', 'EISDIR', 'ENOTEMPTY', 'EBUSY', 'EINVAL', 'ELOOP', 'EXDEV', 'ENAMETOOLONG'].includes(details.systemCode);
+    const filesystemBlocked = FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES.includes(details.systemCode);
     if (filesystemBlocked) return { code: 'FEEDBACK_STORAGE_ERROR', message: 'A local feedback filesystem operation could not complete.', details };
     if (safeFeedbackProperty(error, 'code') === 'FEEDBACK_CLAIM_INVALID') {
         return { code: 'FEEDBACK_CLAIM_INVALID', message: 'The trusted feedback handoff claim could not be verified.', details };
