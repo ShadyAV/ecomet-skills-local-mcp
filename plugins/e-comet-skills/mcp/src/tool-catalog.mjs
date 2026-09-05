@@ -284,7 +284,8 @@ export const tools = [
             'daily means daily rows inside one XLSX workbook for that report; never create one report per day unless the user explicitly requests separate date items. ' +
             'Ranges may overlap and need not be chronological; the same range with different breakdowns is valid, exact duplicate descriptors are rejected, and there is no aggregate-day cap. ' +
             'One browser authorization and one local call cover the whole ordered package. Completed workbooks remain available when later items fail; return every completed resource_link and report every failed and skipped item from the ordered result. ' +
-            'This analytics family is production-disabled until the connected extension status vocabulary and polling/backoff policy are live-verified and its capability is advertised; tool presence alone is not readiness. ' +
+            'Check that the connected extension advertises the analytics capability; tool presence alone is not readiness. ' +
+            'When the user asks to analyze a downloaded workbook, an importer may reject Ozon formatting even though the original export succeeded. Use another standard spreadsheet reader such as Calamine without modifying the original XLSX; do not recreate the report to fix a reader error. ' +
             'Promotion analytics remains a separate Ozon workflow. The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
             'Returns compact metadata and one private resource_link per completed workbook; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
         inputSchema: toolInputSchemas.ozon_seller_analytics_report,
