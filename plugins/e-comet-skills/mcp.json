@@ -1,0 +1,18 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "e-comet-local": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/mcp/src/server.mjs"
+      ],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "NODE_ENV": "development",
+        "ECOMET_ENABLE_EXTENSION_ID_OVERRIDE": "1",
+        "ECOMET_ALLOWED_EXTENSION_IDS": "apeallgchpgibifmbgefkhifidihmodh,kfdeggpflkbafbjdhbcmfgeibhdnmaio"
+      }
+    }
+  }
+}
