@@ -51,11 +51,11 @@ Each result file is UTF-8 NDJSON with one fetched unit per line:
 The original WB payload is at `response.data.body`. Product-card responses may additionally contain
 `response.warehouseNames`, a best-effort map of warehouse ID to the locally known display name.
 
-Full responses and artifacts use the host-provided plugin-data directory under `local-mcp-output-v2`. Codex supplies
-`PLUGIN_DATA`; Claude supplies `CLAUDE_PLUGIN_DATA`. There is no automatic `%LOCALAPPDATA%`, macOS application-data,
-or XDG fallback for new payloads. Absolute `ECOMET_LOCAL_AGENT_RESULT_DIR`, `ECOMET_LOCAL_AGENT_ARTIFACT_DIR`, and
+Full responses and artifacts use `PLUGIN_DATA` or `CLAUDE_PLUGIN_DATA` when supplied by the host. If both are absent,
+the local MCP uses the per-user e-Comet application-data directory. Both use owned `local-mcp-output-v2` children;
+bridge status identifies the selected backend. Invalid declared paths fail explicitly. Absolute `ECOMET_LOCAL_AGENT_RESULT_DIR`, `ECOMET_LOCAL_AGENT_ARTIFACT_DIR`, and
 `ECOMET_FEEDBACK_ARTIFACT_DIR` values override only their corresponding store. POSIX directories are created or
-repaired to mode `0700` and files to `0600`; Windows relies on ACL inheritance from the host's plugin-data directory.
+repaired to mode `0700` and files to `0600`; Windows relies on ACL inheritance from the selected current-user directory.
 
 Local tools:
 
@@ -70,8 +70,7 @@ Local tools:
 - `ozon_seller_promotion_reports` — exports 1–50 ordered promotion-period XLSX files through one `browser_job`
   authorization and one local call;
 - `ozon_seller_analytics_report` — exports 1–50 ordered general-analytics XLSX files through one `browser_job`
-  authorization and one local call; the connected extension must advertise the analytics capability, which remains
-  production-disabled until its live status and polling/backoff gate is verified;
+  authorization and one local call; the connected extension must advertise the analytics capability;
 - `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
   peer when it cannot;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.

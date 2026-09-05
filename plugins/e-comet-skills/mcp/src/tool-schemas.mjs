@@ -357,13 +357,13 @@ const peerRejectionSchema = object(
 );
 
 const storageTargetStatusSchema = objectUnion(
-    object({ state: { const: 'ready' }, backend: { type: 'string', enum: ['plugin_data', 'override'] } }, ['state', 'backend']),
+    object({ state: { const: 'ready' }, backend: { type: 'string', enum: ['plugin_data', 'application_data', 'override'] } }, ['state', 'backend']),
     object(
         {
             state: { const: 'unavailable' },
             reason: {
                 type: 'string',
-                enum: ['plugin_data_missing', 'plugin_data_invalid', 'plugin_data_conflict', 'override_invalid'],
+                enum: ['plugin_data_missing', 'plugin_data_invalid', 'plugin_data_conflict', 'application_data_invalid', 'override_invalid'],
             },
         },
         ['state', 'reason']

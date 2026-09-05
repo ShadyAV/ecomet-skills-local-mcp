@@ -1,4 +1,5 @@
 import { posix, win32 } from 'node:path';
+import { resolveLocalStateDir } from './state-paths.mjs';
 
 const OUTPUT_SUBTREE = 'local-mcp-output-v2';
 const UNEXPANDED_PATH = /(?:\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|%[^%]+%|^~(?:[\\/]|$))/;
@@ -36,7 +37,7 @@ const identity = (value, platform) => (platform === 'win32' ? value.toLowerCase(
 
 export const resolvePluginDataRoot = (env = process.env, platform = process.platform) => {
     const candidates = [env?.PLUGIN_DATA, env?.CLAUDE_PLUGIN_DATA]
-        .filter((value) => typeof value === 'string' && value.trim().length > 0);
+        .filter((value) => value !== undefined);
     if (candidates.length === 0) return unavailable('plugin_data_missing');
     const normalized = candidates.map((value) => normalizedAbsolutePath(value, platform));
     if (normalized.some((value) => value === undefined)) return unavailable('plugin_data_invalid');
@@ -46,8 +47,8 @@ export const resolvePluginDataRoot = (env = process.env, platform = process.plat
     return Object.freeze({ state: 'ready', path: normalized[0] });
 };
 
-export const explicitOrPluginTarget = (explicitValue, pluginRoot, childName, platform = process.platform) => {
-    if (typeof explicitValue === 'string' && explicitValue.trim().length > 0) {
+export const explicitOrPluginTarget = (explicitValue, pluginRoot, childName, platform = process.platform, backend = 'plugin_data') => {
+    if (explicitValue !== undefined) {
         const path = normalizedAbsolutePath(explicitValue, platform);
         return path === undefined
             ? unavailable('override_invalid')
@@ -55,24 +56,41 @@ export const explicitOrPluginTarget = (explicitValue, pluginRoot, childName, pla
     }
     if (pluginRoot.state !== 'ready') return pluginRoot;
     const path = pathApi(platform).join(pluginRoot.path, OUTPUT_SUBTREE, childName);
-    return Object.freeze({ state: 'ready', backend: 'plugin_data', path });
+    return Object.freeze({ state: 'ready', backend, path });
 };
 
-export const resolveStorageLayout = ({ env = process.env, platform = process.platform } = {}) => {
-    const pluginRoot = resolvePluginDataRoot(env, platform);
+export const resolveStorageLayout = ({ env = process.env, platform = process.platform, home = undefined } = {}) => {
+    let pluginRoot = resolvePluginDataRoot(env, platform);
+    let backend = 'plugin_data';
+    // Legacy hosts may provide plugin data only to hooks. Missing host metadata permits
+    // application storage, but a declared invalid/conflicting path must never select it.
+    if (env?.PLUGIN_DATA === undefined && env?.CLAUDE_PLUGIN_DATA === undefined) {
+        backend = 'application_data';
+        let path;
+        try {
+            path = normalizedAbsolutePath(resolveLocalStateDir({ env, platform, home }), platform);
+        } catch {
+            path = undefined;
+        }
+        pluginRoot = path === undefined
+            ? unavailable('application_data_invalid')
+            : Object.freeze({ state: 'ready', path });
+    }
     return Object.freeze({
-        results: explicitOrPluginTarget(env?.ECOMET_LOCAL_AGENT_RESULT_DIR, pluginRoot, 'results', platform),
+        results: explicitOrPluginTarget(env?.ECOMET_LOCAL_AGENT_RESULT_DIR, pluginRoot, 'results', platform, backend),
         marketplaceArtifacts: explicitOrPluginTarget(
             env?.ECOMET_LOCAL_AGENT_ARTIFACT_DIR,
             pluginRoot,
             'marketplace-artifacts',
-            platform
+            platform,
+            backend
         ),
         feedbackArtifacts: explicitOrPluginTarget(
             env?.ECOMET_FEEDBACK_ARTIFACT_DIR,
             pluginRoot,
             'feedback-artifacts',
-            platform
+            platform,
+            backend
         ),
     });
 };
