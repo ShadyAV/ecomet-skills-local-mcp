@@ -53,9 +53,16 @@ export const classifyOzonAuthorizationFailure = (error, status) => {
         return ozonRouteUnavailableError(error.code === 'EXTENSION_DISCONNECTED' ? 'disconnected'
             : error.code === 'BROWSER_JOB_AUTHORIZATION_TIMEOUT' ? 'timeout' : 'unavailable');
     }
+    let message = 'The Ozon promotion report authorization was rejected.';
+    if (error instanceof ToolExecutionError && error.code === 'BROWSER_JOB_REJECTED'
+        && error.message === 'Extension is not authenticated with e-Comet') {
+        message = 'The e-Comet extension is not signed in. Open the e-Comet extension and sign in to the same e-Comet account used for this request.';
+    } else if (error instanceof ToolExecutionError && error.code === 'BROWSER_JOB_ACCOUNT_MISMATCH') {
+        message = 'The e-Comet extension is signed in to a different e-Comet account. Open the e-Comet extension and sign in to the same e-Comet account used for this request.';
+    }
     return new ToolExecutionError(
         'OZON_AUTHORIZATION_REJECTED',
-        'The Ozon promotion report authorization was rejected.',
+        message,
         'authorization',
         false,
         { cause: error }
