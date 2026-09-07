@@ -350,7 +350,20 @@ const sellerExportSchema = object({
     error: sellerExportErrorSchema,
 }, ['isAnswered', 'status']);
 
+const fileDeliverySchema = object({
+    status: { type: 'string', enum: ['complete', 'partial', 'failed'] },
+    copied: nonNegativeInteger,
+    failures: array(object({
+        resourceIndex: nonNegativeInteger,
+        code: { const: 'REPORT_DELIVERY_FAILED' },
+        stage: { type: 'string', enum: ['output_directory', 'source', 'copy', 'verification'] },
+        reason: { type: 'string', enum: ['invalid_output_directory', 'invalid_artifact_metadata', 'source_not_file', 'integrity_mismatch', 'filesystem_error', 'unexpected_error'] },
+        systemCode: { type: 'string', enum: ['EACCES', 'EPERM', 'ENOSPC', 'EDQUOT', 'ENOENT', 'ENOTDIR', 'EISDIR', 'EEXIST', 'EROFS', 'EMFILE', 'ENFILE', 'EIO', 'ENAMETOOLONG'] },
+    }, ['resourceIndex', 'code', 'stage', 'reason'])),
+}, ['status', 'copied', 'failures']);
+
 const sellerReviewsSuccessSchema = object({
+    fileDelivery: fileDeliverySchema,
     ok: boolean,
     status: { type: 'string', enum: ['complete', 'partial', 'failed'] },
     jobType: { const: 'seller_reviews' },
@@ -554,6 +567,7 @@ const ozonPromotionSuccessSchema = object(
         dateFrom: canonicalDateProperty,
         dateTo: canonicalDateProperty,
         artifact: ozonPromotionArtifactSchema,
+        fileDelivery: fileDeliverySchema,
     },
     ['ok', 'status', 'jobType', 'dateFrom', 'dateTo', 'artifact']
 );
@@ -658,6 +672,7 @@ const packageResultSchema = (jobType, propertyName, itemSchemas) => {
                 status: { const: statusValue },
                 jobType: { const: jobType },
                 [propertyName]: items,
+                fileDelivery: fileDeliverySchema,
                 stopReason: skipped ? { type: 'string', enum: OZON_PACKAGE_STOP_REASONS } : { type: 'null' },
                 ...(preexecution ? { error: itemSchemas.error } : {}),
             },

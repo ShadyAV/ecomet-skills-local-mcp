@@ -1,3 +1,4 @@
+import { deliverReportResult } from './report-delivery.mjs';
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -168,6 +169,7 @@ export const createMcpMessageHandler = ({
     ensureBridgeConnected = () => undefined,
     requestBrowserJobAuthorization,
     artifactStorageTarget = ARTIFACT_STORAGE,
+    reportOutputDirectory = undefined,
     createSellerArtifactWriter = createArtifactWriter,
     releaseSellerArtifactJob = releaseArtifactJob,
     createOzonArtifactWriter = createArtifactWriter,
@@ -656,7 +658,7 @@ export const createMcpMessageHandler = ({
             }
         }
         try {
-            sendResult(id, terminalResult);
+            sendResult(id, await deliverReportResult(terminalResult, sellerArtifacts, reportOutputDirectory));
         } finally {
             try {
                 // Cancellation may publish a partial response while another writer
@@ -691,6 +693,7 @@ export const createMcpMessageHandler = ({
         const artifactJobId = randomUUID();
         let authorizationLease;
         let terminalResult;
+        let reportArtifacts = [];
         let periodValidated = false;
         const failureResult = (error) => {
             let normalized;
@@ -777,6 +780,7 @@ export const createMcpMessageHandler = ({
                 artifactJobId,
                 now,
             });
+            reportArtifacts = [getOzonPromotionArtifactResource(result)];
             terminalResult = renderOzonResult(
                 result,
                 `Ozon Seller promotion report complete: one XLSX workbook for ${dateFrom} through ${dateTo}.`,
@@ -790,7 +794,7 @@ export const createMcpMessageHandler = ({
             releaseAuthorizationInBackground(currentLease, 'after Ozon promotion report completion');
         }
         try {
-            sendResult(id, terminalResult);
+            sendResult(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
         } finally {
             try {
                 await releaseOzonArtifactJob(artifactJobId, { deferWhileActive: true });
@@ -811,6 +815,7 @@ export const createMcpMessageHandler = ({
         const artifactJobId = randomUUID();
         let authorizationLease;
         let terminalResult;
+        let reportArtifacts = [];
         let argumentsValid = false;
         const safeFailure = (error) => {
             if (error instanceof StorageUnavailableError) {
@@ -907,6 +912,7 @@ export const createMcpMessageHandler = ({
                     ? await executeOzonPromotionPackageJob({ ...sharedExecution, periods: items })
                     : await executeOzonAnalyticsJob({ ...sharedExecution, reports: items });
             const resources = getOzonReportPackageArtifactResources(result);
+            reportArtifacts = resources;
             terminalResult = renderOzonResult(
                 result,
                 `Ozon Seller ${family} report package ${result.status}: ${resources.length} of ${items.length} XLSX workbook(s) available.`,
@@ -921,7 +927,7 @@ export const createMcpMessageHandler = ({
             releaseAuthorizationInBackground(currentLease, `after Ozon ${family} report package completion`);
         }
         try {
-            sendResult(id, terminalResult);
+            sendResult(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
         } finally {
             try {
                 await releaseOzonArtifactJob(artifactJobId, { deferWhileActive: true });

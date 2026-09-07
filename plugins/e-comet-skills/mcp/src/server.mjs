@@ -256,6 +256,7 @@ runtime = createBridgeRuntime({
 const requestBrowserJobAuthorization = (...args) => requestBroker.requestAuthorization(...args);
 const shutdownController = new AbortController();
 const handleMcpMessage = createMcpMessageHandler({
+    reportOutputDirectory: process.env.CLAUDE_PROJECT_DIR,
     getBridgeStatus: () => {
         const rawStatus = runtime.status();
         return ({

@@ -41,6 +41,7 @@ const resultPathGuidance =
     'Use it only when present. If storageWarnings accompany an absent path, preserve the inline data and explain the storage failure; never invent a file path.';
 
 const reportDeliveryGuidance =
+    'When the host provides a project output directory, the tool automatically creates verified report copies in its e-comet-reports folder. fileDelivery describes copying separately from report generation; use its stage, reason and systemCode to diagnose a failure. Never ask to mount internal Cowork plugin/session storage. ' +
     'Use the exact returned resource_link.uri or artifact.path: name is a display name and may differ from the stored filename. ' +
     'If opening fails, check that exact file with the host file capability that can access the MCP host filesystem. An empty filename search, an unavailable resource listing, or an Excel opening error does not prove deletion or retention cleanup. ' +
     'When the file exists, recover delivery through the host file capability using the same workbook; if a copy is needed, preserve the original and verify the copy against the returned size and SHA-256. ' +
