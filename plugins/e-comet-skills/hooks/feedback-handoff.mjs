@@ -1050,7 +1050,7 @@ const deniedPreToolUseOutput = (error) => {
     const recovery = error.code === 'FEEDBACK_GRANT_REFRESH_REQUIRED'
         ? 'Call report_issue again for the same prepared artifact.'
         : error.code === 'FEEDBACK_GRANT_MISSING'
-            ? 'The trusted e-Comet feedback handoff is unavailable. A disabled, untrusted, or modified hook is one possible cause. Check the client hook settings, then start a new feedback flow. Do not retry automatically.'
+            ? 'This submit call was blocked before upload; the hook ran. No upload was attempted by this call. This does not establish the outcome of an earlier submit. Do not retry automatically with unchanged state. Check the observed call sequence: if report_issue has not been called for this prepared artifact and no earlier upload has an uncertain outcome, find remote e-Comet report_issue and call it once with the prepared kind and size_bytes, then submit the same artifactId, preserving the existing consent and history choice. If report_issue is unavailable, stop and report that the remote authorization tool is unavailable; check the remote e-Comet connector status and ask to connect only when it is observed disconnected. If report_issue was already called, inspect its result and handoff evidence instead of repeating it or guessing a cause.'
             : 'Do not retry automatically. Ask the user before starting a new feedback flow.';
     return JSON.stringify({
         hookSpecificOutput: {

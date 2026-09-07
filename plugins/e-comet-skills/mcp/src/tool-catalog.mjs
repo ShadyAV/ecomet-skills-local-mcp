@@ -74,7 +74,7 @@ const feedbackConsentWorkflow =
     'Whenever asking for the history choice, warn at most once that the bounded current-session history includes more than the visible chat and may contain system context, tool calls/results, code, paths, and sensitive data. Do not repeat this warning when clarifying an ambiguous choice. ' +
     'Do not describe report contents, diagnostics, environment metadata, version, platform, architecture, size, or file formats. Do not present a formal bullet list, checklist, or three-option menu unless the user asks for one. Cancellation is accepted, but it need not be offered as a menu option. ' +
     'If the history choice is ambiguous, ask one short clarification, do not repeat the warning, and call no feedback tools. ' +
-    'When both an identifiable issue and an unambiguous history choice are known, the first subsequent action must be prepare_e_comet_feedback; emit no assistant prose, acknowledgement, restatement, or recap before that call. ' +
+    'When both an identifiable issue and an unambiguous history choice are known and remote report_issue is available, the first subsequent action must be prepare_e_comet_feedback; emit no assistant prose, acknowledgement, restatement, or recap before that call. ' +
     'If the user declines, do not call prepare_e_comet_feedback, report_issue, or submit_e_comet_feedback. ';
 
 const feedbackReportAuthoringGuidance =
@@ -88,14 +88,21 @@ const feedbackFailureGuidance =
     'An optional error.details.source module and line identify public-code investigation context, not a user filesystem path or proof of root cause. Unknown internal errors remain unknown: never guess an invalid grant, missing artifact, or secondary bridge failure. ' +
     'For a trusted-hook denial, explain its fixed safe cause and next action without overriding consent, changing the history choice, or changing hook trust. ';
 
+const feedbackRemotePrerequisiteGuidance =
+    'Before preparation, ensure remote e-Comet report_issue is available in the current session. If it is deferred, perform one targeted tool search for report_issue; do not treat the two local feedback tools as a complete sending capability. If the remote tool is unavailable, stop before preparation and explain that sending requires the remote e-Comet connector. Check its status through the host when possible; ask the user to Connect/sign in only if it is observed disconnected. An unavailable tool alone does not prove a disconnected connector. Preserve the issue and chosen history option. ';
+
+const feedbackGrantMissingGuidance =
+    'FEEDBACK_GRANT_MISSING is a denial by a running hook, not evidence that hooks are disabled or untrusted. This submit attempt was blocked before upload. If no earlier upload was attempted, say «Отчёт не отправлен: не получено разрешение на загрузку.»; never say it might already have been received merely because this denial occurred. Check the observed sequence. If report_issue was skipped, no earlier upload is uncertain, and consent is still valid, obtain its grant once and continue with the same prepared artifact and history choice; do not make the user repeat consent or recreate the archive. If the remote tool is unavailable, report that prerequisite and inspect connector status. If report_issue was already called, inspect its result and handoff evidence; missing grant state alone does not authorize repeating it. Preserve any genuinely uncertain earlier upload outcome. ';
+
 const feedbackExecutionWorkflow =
     'After preparation, call remote report_issue exactly once and immediately with {kind: prepared.kind, size_bytes: prepared.sizeBytes}; then immediately call submit_e_comet_feedback with {artifactId: prepared.artifactId} only. ' +
     'In Codex, execute the three feedback calls sequentially; await each result before starting the next; direct MCP and functions.exec are both allowed; never run dependent stages in parallel. ' +
-    'Do not call local_bridge_status, retry discovery, or perform a report resource reread in this flow. ' +
+    'Do not call local_bridge_status, repeat discovery, or perform a report resource reread in this flow. The one targeted prerequisite lookup belongs before preparation, never between successful dependent stages. ' +
     'Feedback is independent of bridge role, extension readiness, browser_job, and marketplace tabs. After a preparation failure, explain the observed error, what it does not establish, and one next action from error.recommendedAction. For submit failures, explain only their observed safe error and supplied evidence. ' +
     feedbackFailureGuidance +
-    'CHECK_FEEDBACK_HOOKS: ask the user to check enabled and trusted e-Comet hooks; never change trust on their behalf. RESTART_FEEDBACK_FLOW: explain only the supplied handoff evidence and ask to start a fresh flow; do not infer invalidity or expiry from the action alone. RETRY_WITH_VALID_REPORT: correct only identified invalid report fields while preserving the chosen history option. RETRY_FEEDBACK_ONCE: offer one retry, never loop. CHECK_LOCAL_STORAGE: ask the user to check local storage access without exposing paths. These actions never waive consent or permit a silent change of history choice. ' +
-    'If prepare or submit returns FEEDBACK_HOOK_HANDOFF_UNAVAILABLE, or a hook denies submit with FEEDBACK_GRANT_MISSING, explain that the trusted e-Comet hook handoff is unavailable. Disabled, untrusted, or modified hooks are possible causes, not a proven diagnosis. In Codex, tell the user to verify in the e-Comet plugin settings that its hooks are enabled and trusted. In Claude, direct the user to its hook permission settings. For a Russian-language user say: «Не сработала защищённая передача через хуки e-Comet. Проверьте в настройках клиента, что хуки e-Comet включены и им выдано доверие, затем начните отправку заново.» Do not claim that e-Comet itself is broken, do not retry automatically, and never attempt to trust hooks on the user’s behalf. ' +
+    'CHECK_FEEDBACK_HOOKS: inspect the available host/plugin hook configuration and supplied failure evidence; ask the user to enable or trust a hook only when that missing prerequisite is observed, and never change trust on their behalf. RESTART_FEEDBACK_FLOW: explain only the supplied handoff evidence and ask to start a fresh flow; do not infer invalidity or expiry from the action alone. RETRY_WITH_VALID_REPORT: correct only identified invalid report fields while preserving the chosen history option. RETRY_FEEDBACK_ONCE: offer one retry, never loop. CHECK_LOCAL_STORAGE: ask the user to check local storage access without exposing paths. These actions never waive consent or permit a silent change of history choice. ' +
+    feedbackGrantMissingGuidance +
+    'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE means the local tool did not receive the trusted handoff; its cause is not established by that code. Use the supplied diagnostics and observed host configuration. In Claude Code, /hooks inspects configured hooks; do not invent a Cowork hook-trust switch or direct the user to change permissions without evidence. ' +
     'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
     'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Transcript truncation diagnostics belong only inside the bug report; do not mention them in user-facing confirmations. Give no additional caveat or implementation detail. ' +
     'If submit returns UPLOAD_UNCERTAIN or FEEDBACK_SUBMISSION_FAILED, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ';
@@ -232,6 +239,7 @@ export const tools = [
         name: 'prepare_e_comet_feedback',
         description:
             'Prepare one local e-Comet feedback archive from a concise issue report. Use only after the user explicitly agrees to report an e-Comet problem. ' +
+            feedbackRemotePrerequisiteGuidance +
             feedbackConsentWorkflow +
             feedbackReportAuthoringGuidance +
             'Use exactly one remote report_issue kind: bug, wrong_data, missing_capability, or unclear_contract; pass that same kind unchanged to report_issue. ' +
@@ -247,6 +255,7 @@ export const tools = [
         name: 'submit_e_comet_feedback',
         description:
             'Upload the prepared e-Comet feedback archive only after remote report_issue returns the trusted upload grant. ' +
+            feedbackGrantMissingGuidance +
             'The host hook injects uploadUrl, requiredHeaders, objectKey, expiresAt, expectedSize, expectedSha256, feedbackClaim, and feedbackSession. Model-authored arguments must omit every transport/claim field and snake_case alias; provide only the prepared artifactId. ' +
             feedbackFailureGuidance +
             'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Transcript truncation diagnostics belong only inside the bug report; do not mention them in user-facing confirmations. Give no additional caveat or implementation detail. ' +
