@@ -2,6 +2,7 @@ import {
     EXTENSION_UPDATE_URL,
     OZON_PROMOTION_CAPABILITY,
     OZON_PROMOTION_MIN_EXTENSION_VERSION,
+    isOzonExecutionInterruptionDetails,
 } from './extension-vocabulary.mjs';
 import { StorageUnavailableError } from './storage-layout.mjs';
 
@@ -48,6 +49,7 @@ export const OZON_PROMOTION_TERMINAL_CODE_STAGES = Object.freeze({
     PREFLIGHT_FAILED: 'preflight',
     REPORT_AMBIGUOUS: 'preflight',
     CREATE_REJECTED: 'create',
+    CREATE_SERVICE_UNAVAILABLE: 'create',
     CREATE_OUTCOME_UNKNOWN: 'create',
     CREATE_REPORT_AMBIGUOUS: 'create',
     CREATE_NOT_OBSERVABLE: 'create',
@@ -58,6 +60,7 @@ export const OZON_PROMOTION_TERMINAL_CODE_STAGES = Object.freeze({
     REUSED_REPORT_FORMAT_UNVERIFIED: 'download',
     OZON_RATE_LIMITED: 'rate_limit',
     ARTIFACT_REJECTED: 'artifact',
+    OZON_EXECUTION_INTERRUPTED: 'execution',
     OPERATION_CANCELLED: 'cancelled',
     OPERATION_DEADLINE_EXCEEDED: 'deadline',
 });
@@ -94,6 +97,8 @@ export const safeOzonPromotionToolError = (value) => {
         typeof value?.message !== 'string' ||
         value.message.length === 0 ||
         value.message.length > MAX_SAFE_MESSAGE_LENGTH
+        || (value?.code === 'OZON_EXECUTION_INTERRUPTED' && value.details !== undefined &&
+            !isOzonExecutionInterruptionDetails(value.code, value.details))
     ) {
         throw new TypeError('Invalid Ozon promotion terminal error.');
     }
@@ -102,6 +107,9 @@ export const safeOzonPromotionToolError = (value) => {
     // приходят как разобранный из JSON обычный объект и instanceof пройти не могут, поэтому чужая
     // сторона сокета не в состоянии дописать собственный текст в контекст модели через это поле.
     if (value instanceof ToolExecutionError && isOzonExtensionOutdatedDetails(value.details)) safe.details = value.details;
+    if (isOzonExecutionInterruptionDetails(value.code, value.details)) {
+        safe.details = { phase: value.details.phase, createOutcome: value.details.createOutcome };
+    }
     return safe;
 };
 

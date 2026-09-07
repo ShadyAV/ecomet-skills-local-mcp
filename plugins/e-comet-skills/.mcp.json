@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "e-comet-local": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "mcp/src/server.mjs"
+      ],
+      "cwd": ".",
+      "tools": {
+        "prepare_e_comet_feedback": {
+          "approval_mode": "approve"
+        },
+        "submit_e_comet_feedback": {
+          "approval_mode": "approve"
+        }
+      }
+    }
+  }
+}

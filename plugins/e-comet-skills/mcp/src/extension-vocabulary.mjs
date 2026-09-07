@@ -106,12 +106,12 @@ export const EXTENSION_TO_CLIENT_MESSAGE_TYPES = Object.freeze([
 export const OZON_PROMOTION_CAPABILITY = 'ozon_seller_promotion_report@1';
 export const OZON_PROMOTION_PACKAGE_CAPABILITY = 'ozon_seller_promotion_reports@1';
 export const OZON_ANALYTICS_CAPABILITY = 'ozon_seller_analytics_report@1';
-// Первая сборка расширения, которая объявляет OZON_PROMOTION_CAPABILITY в hello_ack и умеет
-// исполнять типизированную операцию отчёта Ozon. Всё, что старше, отвергает подписанное задание
-// как неизвестное ещё на авторизации, поэтому пользователю нужно обновление, а не открытая страница.
+// Supported floor for the released singular @1 contract, not the first build that advertised it.
+// Package tools require 1.5.7 separately; raising their floor must not change singular guidance
+// or its public error-details schema. Runtime admission checks the advertised capability.
 export const OZON_PROMOTION_MIN_EXTENSION_VERSION = '1.5.6';
 // Единственный поддерживаемый канал обновления расширения.
-export const EXTENSION_UPDATE_URL = 'https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh';
+export const EXTENSION_UPDATE_URL = 'https://chromewebstore.google.com/detail/e-comet/kfdeggpflkbafbjdhbcmfgeibhdnmaio';
 export const OZON_PROMOTION_CLIENT_MESSAGE_TYPES = Object.freeze([
     MESSAGE_TYPES.ozonPromotionOperation,
     MESSAGE_TYPES.ozonPromotionStreamAck,
@@ -140,6 +140,7 @@ export const OZON_ANALYTICS_TERMINAL_CODE_STAGES = Object.freeze({
     OZON_CONTEXT_CHANGED: 'context',
     PREFLIGHT_FAILED: 'preflight',
     CREATE_REJECTED: 'create',
+    CREATE_SERVICE_UNAVAILABLE: 'create',
     CREATE_OUTCOME_UNKNOWN: 'create',
     POLL_FAILED: 'poll',
     POLL_EXHAUSTED: 'poll',
@@ -147,6 +148,7 @@ export const OZON_ANALYTICS_TERMINAL_CODE_STAGES = Object.freeze({
     DOWNLOAD_REJECTED: 'download',
     OZON_RATE_LIMITED: 'rate_limit',
     ARTIFACT_REJECTED: 'artifact',
+    OZON_EXECUTION_INTERRUPTED: 'execution',
     OPERATION_CANCELLED: 'cancelled',
     OPERATION_DEADLINE_EXCEEDED: 'deadline',
 });
@@ -194,3 +196,17 @@ export const RETRYABLE_FETCH_ERROR_CODES = Object.freeze([
 ]);
 
 export const UNCLASSIFIED_FETCH_ERROR_CODE = 'WB_FETCH_FAILED';
+
+// Numeric Ozon evidence is deliberately narrower than free-form diagnostic details.
+export const isOzonAnalyticsTerminalDetails = (code, value) => code === 'REPORT_TERMINAL_FAILURE' &&
+    value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 1 && Object.hasOwn(value, 'marketplaceErrorCode') &&
+    Number.isSafeInteger(value.marketplaceErrorCode) && value.marketplaceErrorCode >= -2147483648 &&
+    value.marketplaceErrorCode <= 2147483647;
+
+export const isOzonExecutionInterruptionDetails = (code, value) => code === 'OZON_EXECUTION_INTERRUPTED' &&
+    value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && Object.hasOwn(value, 'phase') && Object.hasOwn(value, 'createOutcome') &&
+    ((['pre_create', 'create_dispatched'].includes(value.phase) && value.createOutcome === 'not_started') ||
+        (value.phase === 'create_settled' && value.createOutcome === 'confirmed') ||
+        (['polling', 'downloading', 'streaming'].includes(value.phase) && ['not_started', 'confirmed'].includes(value.createOutcome)));

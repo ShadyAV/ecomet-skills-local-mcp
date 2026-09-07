@@ -14,6 +14,8 @@ import { PEER_REJECTION_CODES } from './connection-state.mjs';
 import { FEEDBACK_DIAGNOSTIC_OPERATIONS, FEEDBACK_DIAGNOSTIC_ERROR_TYPES, FEEDBACK_DIAGNOSTIC_SYSTEM_CODES, FEEDBACK_DIAGNOSTIC_MODULES, FEEDBACK_DIAGNOSTIC_REASONS } from './feedback-diagnostics.mjs';
 import {
     EXTENSION_UPDATE_URL,
+    FETCH_ERROR_CODES,
+    OZON_ANALYTICS_TERMINAL_CODE_STAGES,
     OZON_PROMOTION_CAPABILITY,
     OZON_PROMOTION_MIN_EXTENSION_VERSION,
 } from './extension-vocabulary.mjs';
@@ -57,7 +59,17 @@ const liveAggregateSchemas = (schema) => [
             status: { const: 'failed' },
         },
     },
-];
+].flatMap((published) => {
+    // Useful inline data survives a failed NDJSON publication. That response must
+    // omit resultPath and explain storage failure; neither a fabricated path nor
+    // unexplained absence is valid. Keep the alternatives mutually exclusive.
+    const { resultPath: _resultPath, ...inlineProperties } = published.properties;
+    return [published, {
+        ...published,
+        properties: { ...inlineProperties, storageWarnings: array(string, { minItems: 1 }) },
+        required: [...published.required.filter(name => name !== 'resultPath'), 'storageWarnings'],
+    }];
+});
 
 const priceSchema = object({
     basic: number,
@@ -81,7 +93,17 @@ const listingProductSchema = object({
     globalPosition: positiveInteger,
 }, ['nmId', 'position']);
 
+const buyerErrorProperties = {
+    skipped: boolean,
+    errorDetails: object({
+        code: { type: 'string', enum: [...Object.values(FETCH_ERROR_CODES), 'WB_FETCH_FAILED', 'WB_RATE_LIMITED', 'WB_REQUEST_FAILED'] },
+        stage: { const: 'execution' },
+        retryable: boolean,
+    }, ['code', 'stage', 'retryable']),
+};
+
 const pageSchema = object({
+    ...buyerErrorProperties,
     page: positiveInteger,
     ok: boolean,
     httpStatus: integer,
@@ -112,6 +134,7 @@ const quantitySchema = object({
 }, ['total', 'byWarehouse', 'bySize']);
 
 const unitSchema = object({
+    ...buyerErrorProperties,
     key: string,
     ok: boolean,
     httpStatus: integer,
@@ -119,6 +142,7 @@ const unitSchema = object({
 }, ['key', 'ok']);
 
 const productCardSchema = object({
+    complete: boolean,
     nmId: positiveInteger,
     ok: boolean,
     status: integer,
@@ -164,11 +188,16 @@ export const toolErrorSchema = object({
         enum: ['arguments', 'handoff', 'extension', 'authorization', 'execution', 'storage', 'images', 'seller', 'local'],
     },
     retryable: boolean,
+    details: object({
+        operation: { const: 'create_result' },
+        systemCode: { type: 'string', enum: ['EEXIST', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT', 'EROFS', 'ENOTDIR'] },
+    }, ['operation', 'systemCode']),
     resultPath: string,
     storageWarnings,
 }, ['ok', 'code', 'message', 'stage', 'retryable']);
 
 const productCardSuccessSchema = object({
+    stopReason: { const: 'rate_limited' },
     ...liveBaseProperties,
     jobType: { const: 'product_card' },
     total: nonNegativeInteger,
@@ -188,6 +217,7 @@ const searchQuerySchema = object({
 }, ['query', 'pagesRequested', 'pagesSucceeded', 'productsSeen', 'productsReturned', 'globalPositionsComplete', 'pages']);
 
 const searchSuccessSchema = object({
+    stopReason: { const: 'rate_limited' },
     ...liveBaseProperties,
     jobType: { const: 'search_by_query' },
     pagesRequested: positiveInteger,
@@ -205,6 +235,7 @@ const checkProductSchema = object({
 }, ['nmId']);
 
 const checkQueryProperties = {
+    ...buyerErrorProperties,
     query: string,
     pagesChecked: nonNegativeInteger,
     error: string,
@@ -233,6 +264,7 @@ const checkQuerySchema = objectUnion(
 );
 
 const checkSuccessSchema = object({
+    stopReason: { const: 'rate_limited' },
     ...liveBaseProperties,
     jobType: { const: 'check_by_query' },
     complete: boolean,
@@ -265,6 +297,7 @@ const recommendationArticleSchema = object({
 ]);
 
 const recommendationsSuccessSchema = object({
+    stopReason: { const: 'rate_limited' },
     ...liveBaseProperties,
     jobType: { const: 'recommendations_by_product' },
     complete: boolean,
@@ -279,7 +312,11 @@ const recommendationsSuccessSchema = object({
 
 const imageProductSchema = object({
     nmId: positiveInteger,
-    status: { type: 'string', enum: ['ok', 'not_found'] },
+    status: { type: 'string', enum: ['ok', 'not_found', 'partial', 'failed', 'skipped'] },
+    error: object({
+        code: { enum: ['WB_IMAGE_RATE_LIMITED', 'WB_IMAGE_PROBE_FAILED'] },
+        message: string, stage: { const: 'images' }, retryable: { const: false },
+    }, ['code', 'message', 'stage', 'retryable']),
     basket: positiveInteger,
     baseUrl: string,
     imageUrls: array(string),
@@ -325,6 +362,7 @@ const sellerReviewsSuccessSchema = object({
 }, ['ok', 'status', 'jobType', 'jobId', 'exports']);
 
 const imagesSuccessSchema = object({
+    stopReason: { const: 'rate_limited' },
     ok: boolean,
     status,
     jobId: string,
@@ -394,6 +432,8 @@ const bridgeStatusSchema = object({
         lastDisconnectedAt: string,
         version: string,
         ozonSellerPromotionReportSupported: boolean,
+        ozonSellerPromotionReportsSupported: boolean,
+        ozonSellerAnalyticsReportSupported: boolean,
     }, ['state', 'route']),
     peer: object({ bridgeVersion: string, browserContextPropagationSupported: boolean }),
     browserContext: object({
@@ -548,7 +588,14 @@ const ozonPromotionPreflightFailureSchema = object(
     ['ok', 'status', 'jobType', 'error']
 );
 
-const ozonPackageError = (codeStages) =>
+const ozonExecutionInterruptionDetailsSchema = objectUnion(
+    object({ phase: { type: 'string', enum: ['pre_create', 'create_dispatched'] }, createOutcome: { const: 'not_started' } }, ['phase', 'createOutcome']),
+    object({ phase: { const: 'create_settled' }, createOutcome: { const: 'confirmed' } }, ['phase', 'createOutcome']),
+    object({ phase: { type: 'string', enum: ['polling', 'downloading', 'streaming'] },
+        createOutcome: { type: 'string', enum: ['not_started', 'confirmed'] } }, ['phase', 'createOutcome'])
+);
+
+const ozonPackageError = (codeStages, analytics = false) =>
     objectUnion(
         ...Object.entries(codeStages).map(([code, stage]) =>
             object(
@@ -557,6 +604,10 @@ const ozonPackageError = (codeStages) =>
                     message: { type: 'string', minLength: 1, maxLength: 500 },
                     stage: { const: stage },
                     retryable: { const: false },
+                    ...(analytics && code === 'REPORT_TERMINAL_FAILURE' ? { details: object({
+                        marketplaceErrorCode: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
+                    }, ['marketplaceErrorCode']) } : {}),
+                    ...(code === 'OZON_EXECUTION_INTERRUPTED' ? { details: ozonExecutionInterruptionDetailsSchema } : {}),
                 },
                 ['code', 'message', 'stage', 'retryable']
             )
@@ -564,24 +615,6 @@ const ozonPackageError = (codeStages) =>
         localStorageUnavailableSchema
     );
 
-const OZON_ANALYTICS_TERMINAL_CODE_STAGES = Object.freeze({
-    OZON_AUTHORIZATION_REJECTED: 'authorization',
-    OZON_ADMISSION_CAPACITY_EXHAUSTED: 'extension',
-    OZON_ROUTE_NOT_READY: 'route',
-    OZON_ANALYTICS_CAPABILITY_UNAVAILABLE: 'context',
-    OZON_CONTEXT_CHANGED: 'context',
-    PREFLIGHT_FAILED: 'preflight',
-    CREATE_REJECTED: 'create',
-    CREATE_OUTCOME_UNKNOWN: 'create',
-    POLL_FAILED: 'poll',
-    POLL_EXHAUSTED: 'poll',
-    REPORT_TERMINAL_FAILURE: 'poll',
-    DOWNLOAD_REJECTED: 'download',
-    OZON_RATE_LIMITED: 'rate_limit',
-    ARTIFACT_REJECTED: 'artifact',
-    OPERATION_CANCELLED: 'cancelled',
-    OPERATION_DEADLINE_EXCEEDED: 'deadline',
-});
 
 const promotionPeriodFields = {
     dateFrom: canonicalDateProperty,
@@ -614,7 +647,7 @@ const promotionPackageItems = packageItemSchemas(
 const analyticsPackageItems = packageItemSchemas(
     analyticsReportFields,
     ozonAnalyticsArtifactSchema,
-    ozonPackageError(OZON_ANALYTICS_TERMINAL_CODE_STAGES)
+    ozonPackageError(OZON_ANALYTICS_TERMINAL_CODE_STAGES, true)
 );
 
 const packageResultSchema = (jobType, propertyName, itemSchemas) => {
@@ -702,6 +735,9 @@ const hookOnlyFeedbackField = (description) => ({
         `${description.description} Injected by the trusted Claude or Codex host hook immediately before this local tool call; ` +
         'model-authored arguments must omit it and every snake_case alias.',
 });
+// Preserve authored report text: the STDIO message and trusted prepare binding enforce
+// MAX_MCP_MESSAGE_BYTES before rendering. The archive budget also includes the transcript;
+// it is not a replacement per-field allowance for model-authored summary/details.
 const feedbackPrepareSchema = object(
     {
         kind: { type: 'string', enum: FEEDBACK_KINDS },

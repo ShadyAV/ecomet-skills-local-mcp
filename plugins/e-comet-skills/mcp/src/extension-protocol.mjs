@@ -8,6 +8,8 @@ import {
     OZON_ANALYTICS_CAPABILITY,
     OZON_ANALYTICS_SERVER_MESSAGE_TYPES,
     OZON_ANALYTICS_TERMINAL_CODE_STAGES,
+    isOzonAnalyticsTerminalDetails,
+    isOzonExecutionInterruptionDetails,
     OZON_PROMOTION_CAPABILITY,
     OZON_PROMOTION_PACKAGE_CAPABILITY,
     OZON_PROMOTION_SERVER_MESSAGE_TYPES,
@@ -15,6 +17,7 @@ import {
     SELLER_OPERATION_STAGES,
     UNCLASSIFIED_FETCH_ERROR_CODE,
 } from './extension-vocabulary.mjs';
+import { parseAnalyticsDateRange } from './ozon-analytics-domain.mjs';
 import { parseOzonPromotionPeriod } from './ozon-promotion-domain.mjs';
 import { ToolExecutionError, safeExternalToolError, safeOzonPromotionToolError } from './tool-errors.mjs';
 import { encodeFrame } from './websocket.mjs';
@@ -118,19 +121,12 @@ export const isValidOzonReportPackageRequest = (value) => {
         }
         if (!hasOnlyKeys(item, ['dateFrom', 'dateTo', 'breakdown']) || Object.keys(item).length !== 3) return false;
         if (item.breakdown !== 'period' && item.breakdown !== 'daily') return false;
-        if (typeof item.dateFrom !== 'string' || typeof item.dateTo !== 'string') return false;
-        const from = Date.parse(`${item.dateFrom}T00:00:00.000Z`);
-        const to = Date.parse(`${item.dateTo}T00:00:00.000Z`);
-        return (
-            /^\d{4}-\d{2}-\d{2}$/.test(item.dateFrom) &&
-            /^\d{4}-\d{2}-\d{2}$/.test(item.dateTo) &&
-            Number.isFinite(from) &&
-            Number.isFinite(to) &&
-            new Date(from).toISOString().slice(0, 10) === item.dateFrom &&
-            new Date(to).toISOString().slice(0, 10) === item.dateTo &&
-            to >= from &&
-            (to - from) / (24 * 60 * 60 * 1000) + 1 <= 731
-        );
+        try {
+            parseAnalyticsDateRange(item.dateFrom, item.dateTo);
+            return true;
+        } catch {
+            return false;
+        }
     });
 };
 const isValidOzonStreamStart = (value, indexed = false) =>
@@ -162,13 +158,15 @@ const isValidOzonStreamEnd = (value, indexed = false) =>
     typeof value.sha256 === 'string' &&
     SHA256_PATTERN.test(value.sha256);
 const isValidOzonResult = (value, allowSkipped = false) => {
+    // Promotion may carry date context; analytics below deliberately requires its own exact error keys.
     if (!isRecord(value) || !hasOnlyKeys(value, ['ok', 'status', 'error'])) return false;
     if (value.ok === true) return Object.keys(value).length === 1;
     const skipped = allowSkipped && value.status === 'skipped' && Object.keys(value).length === 3;
     if (value.ok !== false || (!skipped && Object.keys(value).length !== 2) || !isRecord(value.error)) return false;
     const error = value.error;
     if (
-        !hasOnlyKeys(error, ['code', 'stage', 'retryable', 'message', 'dateFrom', 'dateTo']) ||
+        !hasOnlyKeys(error, ['code', 'stage', 'retryable', 'message', 'dateFrom', 'dateTo', 'details']) ||
+        (Object.hasOwn(error, 'details') && (!allowSkipped || !isOzonExecutionInterruptionDetails(error.code, error.details))) ||
         typeof error.message !== 'string' ||
         error.message.length === 0 ||
         error.message.length > MAX_SAFE_MESSAGE_LENGTH
@@ -194,7 +192,9 @@ const isValidIndexedOzonResult = (value, family) => {
     if (result.ok !== false || (!skipped && Object.keys(result).length !== 2) || !isRecord(result.error)) return false;
     const error = result.error;
     return (
-        hasOnlyKeys(error, ['code', 'stage', 'retryable', 'message']) &&
+        hasOnlyKeys(error, ['code', 'stage', 'retryable', 'message', 'details']) &&
+        (!Object.hasOwn(error, 'details') || (!skipped && isOzonAnalyticsTerminalDetails(error.code, error.details)) ||
+            isOzonExecutionInterruptionDetails(error.code, error.details)) &&
         OZON_ANALYTICS_TERMINAL_CODE_STAGES[error.code] === error.stage &&
         error.retryable === false &&
         typeof error.message === 'string' &&
@@ -373,7 +373,7 @@ export const createExtensionProtocol = ({
                   : requestBroker.hasPendingOzonPromotionOperation(message.id)
                     ? requestBroker.rejectOzonPromotionReport(message.id, rejection)
                   : requestBroker.hasPendingOzonReportPackage(message.id)
-                    ? requestBroker.rejectOzonReportPackage?.(message.id, rejection)
+                    ? requestBroker.rejectOzonReportPackage(message.id, rejection)
                   : requestBroker.hasPendingSellerOperation(message.id)
                     ? requestBroker.rejectSellerOperation(message.id, rejection)
                     : requestBroker.rejectFetch(message.id, rejection);

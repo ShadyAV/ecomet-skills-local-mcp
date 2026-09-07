@@ -189,19 +189,22 @@ const parsePeerOzonPackageStream = (message) => {
         if (!kind) continue;
         const commonKeys = ['type', 'requestId', 'ackId', 'itemIndex'];
         const keys = kind === 'chunk' ? [...commonKeys, 'index', 'data'] : [...commonKeys, 'metadata'];
+        // Nested fields must not give validation, broker dispatch, and the ACK different identities.
         if (
             !hasOnlyKeys(message, keys) ||
             !isValidPeerRequestId(message.requestId) ||
             !isValidPeerRequestId(message.ackId) ||
             !Number.isSafeInteger(message.itemIndex) ||
-            message.itemIndex < 0
+            message.itemIndex < 0 ||
+            (kind !== 'chunk' && !hasOnlyKeys(message.metadata,
+                kind === 'start' ? ['name', 'mimeType', 'declaredSize'] : ['size', 'sha256']))
         ) {
             return null;
         }
         const payload =
             kind === 'chunk'
                 ? { frameId: message.ackId, itemIndex: message.itemIndex, index: message.index, data: message.data }
-                : { frameId: message.ackId, itemIndex: message.itemIndex, ...message.metadata };
+                : { ...message.metadata, frameId: message.ackId, itemIndex: message.itemIndex };
         if (!isValidPeerOzonPayload(message.requestId, types[`direct${kind[0].toUpperCase()}${kind.slice(1)}`], payload)) return null;
         return { family, kind, payload };
     }
@@ -217,7 +220,8 @@ const parsePeerOzonPackageResult = (message) => {
             !isValidPeerRequestId(message.ackId) ||
             !Number.isSafeInteger(message.itemIndex) ||
             message.itemIndex < 0 ||
-            !isValidPeerOzonPayload(message.requestId, types.directResult, { itemIndex: message.itemIndex, ...message.response })
+            !hasOnlyKeys(message.response, ['ok', 'status', 'error']) ||
+            !isValidPeerOzonPayload(message.requestId, types.directResult, { ...message.response, itemIndex: message.itemIndex })
         ) {
             return null;
         }

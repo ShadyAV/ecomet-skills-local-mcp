@@ -4,26 +4,9 @@ import { ozonAnalyticsArtifactName, parseAnalyticsReports } from './ozon-analyti
 import { executeOzonReportPackage } from './ozon-report-package-job.mjs';
 import { StorageUnavailableError } from './storage-layout.mjs';
 import { ToolExecutionError } from './tool-errors.mjs';
+import { OZON_ANALYTICS_TERMINAL_CODE_STAGES, isOzonAnalyticsTerminalDetails, isOzonExecutionInterruptionDetails } from './extension-vocabulary.mjs';
 
 const SIGNED_EXPIRY_SAFETY_RESERVE_MS = 1000;
-const CODE_STAGES = Object.freeze({
-    OZON_AUTHORIZATION_REJECTED: 'authorization',
-    OZON_ADMISSION_CAPACITY_EXHAUSTED: 'extension',
-    OZON_ROUTE_NOT_READY: 'route',
-    OZON_ANALYTICS_CAPABILITY_UNAVAILABLE: 'context',
-    OZON_CONTEXT_CHANGED: 'context',
-    PREFLIGHT_FAILED: 'preflight',
-    CREATE_REJECTED: 'create',
-    CREATE_OUTCOME_UNKNOWN: 'create',
-    POLL_FAILED: 'poll',
-    POLL_EXHAUSTED: 'poll',
-    REPORT_TERMINAL_FAILURE: 'poll',
-    DOWNLOAD_REJECTED: 'download',
-    OZON_RATE_LIMITED: 'rate_limit',
-    ARTIFACT_REJECTED: 'artifact',
-    OPERATION_CANCELLED: 'cancelled',
-    OPERATION_DEADLINE_EXCEEDED: 'deadline',
-});
 
 const authorizationRejected = (cause) =>
     new ToolExecutionError(
@@ -38,8 +21,12 @@ export const safeOzonAnalyticsToolError = (error) => {
     if (error instanceof StorageUnavailableError) {
         return { code: error.code, message: error.message, stage: error.stage, retryable: false };
     }
-    const stage = CODE_STAGES[error?.code];
+    const stage = OZON_ANALYTICS_TERMINAL_CODE_STAGES[error?.code];
     if (
+        // Local ToolExecutionError always owns an initially undefined details field.
+        // Absence of evidence must not erase an otherwise known local failure.
+        (error?.details !== undefined && !isOzonAnalyticsTerminalDetails(error?.code, error.details) &&
+            !isOzonExecutionInterruptionDetails(error?.code, error.details)) ||
         stage === undefined ||
         error?.stage !== stage ||
         error?.retryable !== false ||
@@ -49,7 +36,10 @@ export const safeOzonAnalyticsToolError = (error) => {
     ) {
         throw new TypeError('Invalid Ozon analytics terminal error.');
     }
-    return { code: error.code, message: error.message, stage, retryable: false };
+    return { code: error.code, message: error.message, stage, retryable: false,
+        ...(isOzonAnalyticsTerminalDetails(error.code, error.details) ? { details: { marketplaceErrorCode: error.details.marketplaceErrorCode } } : {}),
+        ...(isOzonExecutionInterruptionDetails(error.code, error.details)
+            ? { details: { phase: error.details.phase, createOutcome: error.details.createOutcome } } : {}) };
 };
 
 export const executeOzonAnalyticsJob = async ({
@@ -65,6 +55,7 @@ export const executeOzonAnalyticsJob = async ({
         if (authorization.jobType !== 'ozon_seller_analytics_report') throw new Error('Wrong Ozon analytics job type');
         const requested = parseAnalyticsReports(reports, authorization.issuedAt);
         const signed = parseAnalyticsReports(authorization.job?.reports, authorization.issuedAt);
+        // Both parsers rebuild fields in canonical order; item order remains signed execution priority.
         if (JSON.stringify(requested) !== JSON.stringify(signed)) throw new Error('Signed Ozon analytics reports do not match');
         if (typeof requestOzonReportPackage !== 'function' || typeof createArtifactWriter !== 'function') {
             throw new Error('Ozon analytics execution dependencies are unavailable');

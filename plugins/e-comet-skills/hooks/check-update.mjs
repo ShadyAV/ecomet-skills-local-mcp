@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CALVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+codex\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const ECOMET_TOOL_PATTERN = /^mcp__(?:(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet(?:[-_]local)?__.+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__(?:info|describe_metrics|list_entities|query_metrics|query_forecast|browser_job|report_issue))$/;
+const ECOMET_TOOL_PATTERN = /^mcp__(?:(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet(?:[-_]local)?__.+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__(?:info|describe_metrics|list_entities|query_metrics|query_forecast|browser_job|org_balance|query_phrase_frequency|campaign_settings|campaign_clusters_settings|campaign_target_products_settings|report_issue))$/;
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_SESSION_BYTES = 1024;
 const MAX_STDIN_BYTES = 1024 * 1024;
@@ -20,8 +20,8 @@ const CACHE_REPLACE_RETRY_MS = 10;
 export const LOCK_RELEASE_RETRY_LIMIT = 20;
 export const LOCK_RELEASE_RETRY_MS = 5;
 const TRANSIENT_FILESYSTEM_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM']);
-const UPDATE_URL = 'https://github.com/e-comet/skills#plugin-update';
-export const CHANGELOG_URL = 'https://github.com/e-comet/skills/blob/main/CHANGELOG.md';
+const UPDATE_URL = 'https://github.com/ShadyAV/ecomet-skills-local-mcp#plugin-update';
+export const CHANGELOG_URL = 'https://github.com/ShadyAV/ecomet-skills-local-mcp/blob/main/CHANGELOG.md';
 // Claude Code caps hook output at 10,000 characters; Codex caps a model-visible hook message at
 // roughly 2,500 tokens, which for Cyrillic is pessimistically ~3,750 characters. This budget sits
 // under the tighter ceiling with margin and still holds far more than the changelog written to date.
@@ -31,7 +31,7 @@ const MAX_RELEASES = 200;
 const MAX_ADDED_ENTRIES = 20;
 const MAX_ADDED_ENTRY_BYTES = 2048;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-const REMOTE_MANIFEST_URL = 'https://raw.githubusercontent.com/e-comet/skills/main/plugins/e-comet-skills/.codex-plugin/plugin.json';
+const REMOTE_MANIFEST_URL = 'https://raw.githubusercontent.com/ShadyAV/ecomet-skills-local-mcp/main/plugins/e-comet-skills/.codex-plugin/plugin.json';
 const CACHE_NAME = 'plugin-update-latest-v1.json';
 const GLOBAL_LOCK_NAME = 'plugin-update-latest-v1.lock';
 const SESSION_DIRECTORY = 'plugin-update-sessions-v1';

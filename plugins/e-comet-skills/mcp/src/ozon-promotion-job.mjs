@@ -171,7 +171,8 @@ export const executeOzonPromotionPackageJob = async ({
                 return { code: error.code, message: error.message, stage: error.stage, retryable: false };
             }
             const safe = safeOzonPromotionToolError(error);
-            return { code: safe.code, message: safe.message, stage: safe.stage, retryable: false };
+            return { code: safe.code, message: safe.message, stage: safe.stage, retryable: false,
+                ...(safe.code === 'OZON_EXECUTION_INTERRUPTED' && safe.details ? { details: safe.details } : {}) };
         },
         now,
     });

@@ -36,6 +36,8 @@ const normalizedAbsolutePath = (value, platform) => {
 const identity = (value, platform) => (platform === 'win32' ? value.toLowerCase() : value);
 
 export const resolvePluginDataRoot = (env = process.env, platform = process.platform) => {
+    // An empty declaration is invalid configuration, not an absent host variable:
+    // silently falling back would relocate output the host explicitly tried to own.
     const candidates = [env?.PLUGIN_DATA, env?.CLAUDE_PLUGIN_DATA]
         .filter((value) => value !== undefined);
     if (candidates.length === 0) return unavailable('plugin_data_missing');
@@ -64,7 +66,7 @@ export const resolveStorageLayout = ({ env = process.env, platform = process.pla
     let backend = 'plugin_data';
     // Legacy hosts may provide plugin data only to hooks. Missing host metadata permits
     // application storage, but a declared invalid/conflicting path must never select it.
-    if (env?.PLUGIN_DATA === undefined && env?.CLAUDE_PLUGIN_DATA === undefined) {
+    if (pluginRoot.state === 'unavailable' && pluginRoot.reason === 'plugin_data_missing') {
         backend = 'application_data';
         let path;
         try {

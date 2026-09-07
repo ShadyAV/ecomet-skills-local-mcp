@@ -9,15 +9,17 @@ const IMMEDIATE_ABORT_CODES = new Set([
     'OZON_ANALYTICS_CAPABILITY_UNAVAILABLE',
     'OZON_CONTEXT_CHANGED',
     'OPERATION_CANCELLED',
-    'OPERATION_DEADLINE_EXCEEDED',
     'OZON_RATE_LIMITED',
     'ARTIFACT_REJECTED',
+    'OZON_EXECUTION_INTERRUPTED',
     'ARTIFACT_CLEANUP_FAILED',
     'JOB_ARTIFACT_QUOTA_EXCEEDED',
     'ARTIFACT_FILE_QUOTA_EXCEEDED',
     'ARTIFACT_TOTAL_QUOTA_EXCEEDED',
 ]);
 const SYSTEMIC_CODES = new Set([
+    'CREATE_SERVICE_UNAVAILABLE',
+    'OPERATION_DEADLINE_EXCEEDED',
     'PREFLIGHT_FAILED',
     'POLL_FAILED',
     'POLL_EXHAUSTED',
@@ -86,6 +88,10 @@ const artifactFailure = {
     stage: 'artifact',
     retryable: false,
 };
+const unclassifiedFailure = {
+    ...artifactFailure,
+    message: 'The Ozon report could not be completed safely; the failure could not be classified.',
+};
 
 export const getOzonReportPackageArtifactResources = (result) => artifactResources.get(result) ?? [];
 
@@ -114,19 +120,27 @@ export const executeOzonReportPackage = async ({
 
     const normalizedFailure = (item, error) => {
         if (PRIVATE_ARTIFACT_CODES.has(error?.code)) return { ...item, status: 'failed', error: artifactFailure };
-        let safe = artifactFailure;
+        let safe = unclassifiedFailure;
         try {
             safe = normalizeError(error);
         } catch {
-            safe = artifactFailure;
+            safe = unclassifiedFailure;
         }
         return { ...item, status: 'failed', error: safe };
     };
-    const abortStream = async (index) => {
+    const abortStream = async (index, deferCleanup = false) => {
         const stream = streams.get(index);
+        if (stream) stream.cancelled = true;
         if (!stream?.writer) return undefined;
         try {
-            await stream.writer.abort();
+            const cleanup = stream.writer.abort();
+            if (deferCleanup) {
+                // The broker fenced this item's active writer. Its store retains pending
+                // cleanup and pins; a blocked syscall cannot delay the authenticated failure.
+                void cleanup.catch(() => undefined);
+                return undefined;
+            }
+            await cleanup;
             return undefined;
         } catch {
             return artifactFailure;
@@ -163,6 +177,7 @@ export const executeOzonReportPackage = async ({
                         validateXlsx: true,
                         ...(signal === undefined ? {} : { signal }),
                     });
+                    if (stream.cancelled) void stream.writer.abort().catch(() => undefined);
                 },
                 onItemChunk: async (itemIndex, chunkIndex, data) => {
                     activeIndex = itemIndex;
@@ -176,9 +191,10 @@ export const executeOzonReportPackage = async ({
                     const stream = streams.get(itemIndex);
                     if (abortPolicy.stopped) return;
                     if (!stream?.writer || stream.artifact) throw new Error('Ozon package artifact end is out of order');
-                    stream.artifact = await stream.writer.complete(metadata);
+                    const artifact = await stream.writer.complete(metadata);
+                    if (!stream.cancelled) stream.artifact = artifact;
                 },
-                onItemResult: async (itemIndex, remoteResult) => {
+                onItemResult: async (itemIndex, remoteResult, { deferCleanup = false, commitArtifact = () => true } = {}) => {
                     activeIndex = itemIndex;
                     if (abortPolicy.stopped) {
                         await abortStream(itemIndex);
@@ -199,10 +215,13 @@ export const executeOzonReportPackage = async ({
                         if (cleanupFailure) itemResult = normalizedFailure(items[itemIndex], cleanupFailure);
                         else itemResult = { ...items[itemIndex], status: 'skipped' };
                     } else if (remoteResult?.ok === true && stream?.artifact) {
+                        // Publish only after the broker has detached this accepted file
+                        // from cancellation. A cancelled/stale handler cannot commit it.
+                        if (!commitArtifact()) return;
                         itemResult = { ...items[itemIndex], status: 'complete', artifact: publicArtifact(stream.artifact) };
                         resources.push(stream.artifact);
                     } else {
-                        cleanupFailure = await abortStream(itemIndex);
+                        cleanupFailure = await abortStream(itemIndex, deferCleanup);
                         itemResult = normalizedFailure(items[itemIndex], cleanupFailure ?? remoteResult?.error ?? artifactFailure);
                     }
                     results[itemIndex] = itemResult;
@@ -227,11 +246,13 @@ export const executeOzonReportPackage = async ({
             artifactResources.set(result, resources);
             return result;
         } else if (!results[activeIndex]) {
-            const cleanupFailure = await abortStream(activeIndex);
+            // The broker has terminated the package and fenced its writer. Private I/O must not
+            // delay the terminal response or replace its cause; the store owns deferred cleanup.
+            void abortStream(activeIndex);
             const failure = phases.get(activeIndex) === 'create_dispatched'
                 ? { code: 'CREATE_OUTCOME_UNKNOWN', stage: 'create', retryable: false,
                     message: 'The Ozon report create outcome could not be confirmed.' }
-                : cleanupFailure ?? error;
+                : error;
             stopAt(activeIndex, normalizedFailure(items[activeIndex], failure));
         } else {
             for (let index = activeIndex + 1; index < items.length; index += 1) {

@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
+import { isUtf8 } from 'node:buffer';
 import { lstat, open } from 'node:fs/promises';
-import { TextDecoder } from 'node:util';
 
 import { BRIDGE_VERSION, FEEDBACK_MAX_BYTES, FEEDBACK_MAX_SUMMARY_LENGTH } from './config.mjs';
 import { consumeFeedbackClaim } from './feedback-claim.mjs';
@@ -27,33 +27,29 @@ const safeSummary = (summary) => {
 const safeArtifactId = (artifactId) => (typeof artifactId === 'string' && ARTIFACT_ID.test(artifactId) ? artifactId : undefined);
 
 const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
-const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
+// Reader metadata stays process-private and does not alter the Buffer API or source bytes.
+const truncatedTranscripts = new WeakSet();
 
-const completeJsonlPrefix = (bytes, maxBytes) => {
-    // File order is the only trusted ordering contract across supported hosts. When the shared
-    // package budget is exceeded, retain the earliest complete physical records; do not infer
-    // that the file tail is newer. This rare truncation is intentionally not reported separately.
-    const prefix = bytes.subarray(0, Math.max(0, maxBytes));
-    const finalNewline = prefix.lastIndexOf(0x0a);
-    if (finalNewline === -1) return Buffer.alloc(0);
-    const complete = prefix.subarray(0, finalNewline + 1);
-    // Fatal validation is repeated after the external transcript-reader seam and after budget
-    // fitting. Near-limit histories are rare, and retaining one validation boundary is preferred
-    // to trusting an injected reader or duplicating validated/unvalidated buffer types.
-    try {
-        UTF8_DECODER.decode(complete);
-    } catch (error) {
-        throw transcriptUnavailable(error);
-    }
+const completeJsonlTail = (bytes, maxBytes) => {
+    // Reports usually follow the failure immediately. Retain the latest complete physical
+    // records, without interpreting host-specific branches or rewriting the consented bytes.
+    const finalNewline = bytes.lastIndexOf(0x0a);
+    const completeEnd = finalNewline + 1;
+    const start = completeEnd > maxBytes ? bytes.indexOf(0x0a, completeEnd - maxBytes - 1) + 1 : 0;
+    const complete = bytes.subarray(start, completeEnd);
+    if (start > 0 || truncatedTranscripts.has(bytes)) truncatedTranscripts.add(complete);
+    // Validate every boundary, including the injected reader and budget fitting, without
+    // allocating a discarded string for each potentially 32 MiB transcript buffer.
+    if (!isUtf8(complete)) throw transcriptUnavailable(new TypeError('Invalid transcript UTF-8'));
     return complete;
 };
 
-const readBoundedDescriptor = async (handle, size) => {
+const readBoundedDescriptor = async (handle, size, start = 0) => {
     // WHY: the validated descriptor size freezes the consented snapshot, excluding later appends and rejecting truncation.
     const bytes = Buffer.allocUnsafe(size);
     let offset = 0;
     while (offset < bytes.length) {
-        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, start + offset);
         if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > bytes.length - offset) throw transcriptUnavailable();
         if (bytesRead === 0) throw transcriptUnavailable();
         offset += bytesRead;
@@ -83,8 +79,14 @@ export const readTrustedFeedbackTranscript = async (path, options = {}) => {
             throw transcriptUnavailable();
         }
         if (!Number.isSafeInteger(descriptor.size) || descriptor.size < 0) throw transcriptUnavailable();
-        const bytes = await readBoundedDescriptor(handle, Math.min(descriptor.size, maxBytes));
-        return completeJsonlPrefix(bytes, bytes.length);
+        // One preceding byte distinguishes a full first record from a partial record at the
+        // bounded window boundary. Positional reads never include appends beyond the snapshot.
+        const start = Math.max(0, descriptor.size - maxBytes - 1);
+        const bytes = await readBoundedDescriptor(handle, descriptor.size - start, start);
+        const firstRecord = start === 0 ? 0 : bytes.indexOf(0x0a) + 1;
+        const aligned = start > 0 && firstRecord === 0 ? Buffer.alloc(0) : bytes.subarray(firstRecord);
+        if (start > 0) truncatedTranscripts.add(aligned);
+        return completeJsonlTail(aligned, maxBytes);
     } catch (error) {
         if (safeFeedbackProperty(error, 'code') === 'TRANSCRIPT_UNAVAILABLE') throw error;
         throw transcriptUnavailable(error);
@@ -144,8 +146,10 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const reportBytes = atOperation('report_render', () => renderFeedbackReport({ kind, summary, details, diagnostics, includeTranscript }));
     const createdAt = atOperation('metadata_encode', () => new Date(now()).toISOString());
     const transcriptIncluded = includeTranscript === true;
+    let transcriptTruncated = false;
     const serializeMetadata = (transcriptSizeBytes) => atOperation('metadata_encode', () => serializeFeedbackMetadata({
         createdAt, version, platform, arch, transcriptIncluded, transcriptSizeBytes,
+        ...(transcriptTruncated ? { transcriptTruncated: true } : {}),
     }));
     const framingBytes = atOperation('archive_create', () => feedbackZipFramingBytes({ includeTranscript: transcriptIncluded }));
     let transcriptBytes;
@@ -155,7 +159,8 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         try {
             const selected = await readTranscript(transcriptPath, { maxBytes: remaining });
             if (!Buffer.isBuffer(selected)) throw transcriptUnavailable();
-            transcriptBytes = completeJsonlPrefix(selected, remaining);
+            transcriptBytes = completeJsonlTail(selected, remaining);
+            transcriptTruncated = truncatedTranscripts.has(transcriptBytes);
         } catch (error) {
             throw transcriptUnavailable(error);
         }
@@ -165,9 +170,10 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
             const metadataBytes = serializeMetadata(transcriptBytes?.length ?? 0);
             if (transcriptBytes === undefined) return metadataBytes;
             const remaining = Math.max(0, maxBytes - framingBytes - reportBytes.length - metadataBytes.length);
-            const shortened = completeJsonlPrefix(transcriptBytes, remaining);
+            const shortened = completeJsonlTail(transcriptBytes, remaining);
             if (shortened.length === transcriptBytes.length) return metadataBytes;
             transcriptBytes = shortened;
+            transcriptTruncated = truncatedTranscripts.has(transcriptBytes);
         }
         return serializeMetadata(transcriptBytes?.length ?? 0);
     };

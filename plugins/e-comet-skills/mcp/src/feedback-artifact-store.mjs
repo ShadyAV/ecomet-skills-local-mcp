@@ -1,3 +1,4 @@
+import { createOwnedLockReleaseTracker } from './owned-lock-release.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -134,11 +135,16 @@ const reclaimDeadFeedbackStoreCandidates = async (artifactDirectory) => {
     }
 };
 
-const ensurePrivateDirectory = async (directory, platform) => {
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+const tightenExistingPrivateDirectory = async (directory, platform) => {
+    // Read/retire must restore privacy without recreating a missing or ambiguous store.
     const metadata = await lstat(directory);
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('Feedback artifact directory must be a private real directory');
     if (platform !== 'win32') await chmod(directory, 0o700);
+};
+
+const ensurePrivateDirectory = async (directory, platform) => {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await tightenExistingPrivateDirectory(directory, platform);
 };
 
 const ensurePrivateFile = async (path, platform) => {
@@ -367,7 +373,10 @@ const acquireFeedbackStoreLock = async (artifactDirectory) => {
     throw storageError('Feedback artifact storage is busy', 'storage_busy');
 };
 
+const ownedLockReleases = createOwnedLockReleaseTracker();
 const withFeedbackStoreLock = async (artifactDirectory, operation) => {
+    const lockPath = join(artifactDirectory, '.feedback-artifact-store.lock');
+    await ownedLockReleases.retryPending(lockPath);
     const release = await acquireFeedbackStoreLock(artifactDirectory);
     let operationError;
     try {
@@ -377,7 +386,7 @@ const withFeedbackStoreLock = async (artifactDirectory, operation) => {
         throw error;
     } finally {
         try {
-            await release();
+            await ownedLockReleases.release(lockPath, release);
         } catch (releaseError) {
             if (!operationError) throw releaseError;
         }
@@ -681,27 +690,12 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
         }
         throw storageError('Feedback artifact is missing or expired', 'artifact_missing');
     }
+    await tightenExistingPrivateDirectory(artifactDirectory, platform);
     return withFeedbackStoreLock(artifactDirectory, async () => {
-        const originalManifest = await readManifest(artifactDirectory);
-        let manifest;
-        try {
-            manifest = await reconcileStoreUnlocked({
-                artifactDirectory,
-                manifest: originalManifest,
-                maxArtifacts: FEEDBACK_ARTIFACT_MAX_FILES,
-                maxTotalBytes: FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES,
-                retentionMs,
-                nowMs,
-                platform,
-                writeManifestImpl,
-                removeArtifactImpl,
-            });
-        } catch (error) {
-            // WHY: whole-store reconciliation grants no admission here. If its pre-prune scan is
-            // temporarily blocked, the exact indexed target still has to pass every check below.
-            if (!(error instanceof FeedbackReconciliationError)) throw error;
-            manifest = originalManifest;
-        }
+        // Exact reads grant no new capacity. Global maintenance may need to rename an unrelated
+        // expired entry and must not prevent submitting this verified, active archive. Read only
+        // the authoritative locked manifest: never fall back to a pre-tombstone snapshot.
+        const manifest = await readManifest(artifactDirectory);
         const entry = manifest.artifacts.find((candidate) => candidate.artifactId === request.artifactId);
         if (!entry) throw storageError('Feedback artifact is missing or expired', 'artifact_missing');
         if (nowMs - entry.createdAtMs > retentionMs) throw storageError('Feedback artifact is expired', 'artifact_expired');
@@ -765,7 +759,11 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
         storageTarget,
         legacyArtifactDirectory: options.legacyArtifactDirectory ?? LEGACY_FEEDBACK_ARTIFACT_DIR,
     });
+    // No artifact remains in the configured candidate stores; this is not a global scan of old roots.
+    // Production load and retire share the startup snapshot, including any readable legacy store.
+    // An unavailable target cannot redirect retirement away from an archive loaded in this process.
     if (artifactDirectory === undefined) return { retired: false, localCleanup: 'complete' };
+    await tightenExistingPrivateDirectory(artifactDirectory, platform);
     return withFeedbackStoreLock(artifactDirectory, async () => {
         const manifest = await reconcileStoreUnlocked({
             artifactDirectory,

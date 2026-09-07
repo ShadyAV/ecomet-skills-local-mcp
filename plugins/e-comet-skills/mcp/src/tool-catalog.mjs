@@ -7,6 +7,9 @@ const liveToolAnnotations = {
     idempotentHint: false,
     openWorldHint: true,
 };
+// Report generation can add saved marketplace reports even when its business
+// purpose is data retrieval. Keep buyer-only tools' read-only annotation separate.
+const reportToolAnnotations = { ...liveToolAnnotations, readOnlyHint: false };
 
 const authorizationWorkflow =
     'This typed local tool owns the workflow: select it based on user intent, then call the remote e-Comet browser_job exactly once with the matching typed job and immediately invoke this tool. ' +
@@ -28,11 +31,23 @@ const ozonPackageAuthorizationWorkflow = (browserJobType, businessArguments) =>
     'CREATE_OUTCOME_UNKNOWN means creation may already have succeeded: explain that uncertainty and obtain a separate, item-specific retry decision. ' +
     'Neither report family currently provides safe automated reconciliation; ordinary promotion preflight may create another report. ' +
     'Use itemIndex to correlate the ordered results and stopReason to explain skipped work; a null stopReason means nothing was skipped, not that every item succeeded. ' +
+    'OZON_EXECUTION_INTERRUPTED identifies an internal phase-delivery failure, not a Seller login or route diagnosis. ' +
+    'Use its safe phase/createOutcome evidence: confirmed creation must not be repeated automatically; skipped work has not run. Offer an e-Comet bug report for persistent internal failures. ' +
     'The extension automatically uses the first ready Seller context and pins its company for this package; never ask the user to focus a tab. A fresh authorization uses the then-current context and does not guarantee the previous company. ' +
     'Do not use local_bridge_status to pre-approve or skip the signed operation; the family capability and typed operation result are authoritative. ';
 
 const resultPathGuidance =
-    'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request.';
+    'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request. ' +
+    'Use it only when present. If storageWarnings accompany an absent path, preserve the inline data and explain the storage failure; never invent a file path.';
+
+const localBridgeFailureGuidance =
+    'LOCAL_BRIDGE_* failures describe observed local pairing or listener problems, not marketplace login failures. Use the returned cause and local_bridge_status; do not prescribe opening a WB tab or obtaining repeated authorizations for a local permissions/bind failure. ' +
+    'For LOCAL_STORAGE_FAILED, use details.systemCode and the message when supplied to distinguish access, space/quota and path conflicts; do not infer the cause from the generic code alone. ';
+
+const buyerOutcomeGuidance =
+    'When stopReason is "rate_limited", Wildberries returned HTTP 429: no new work was scheduled after that observation, while already in-flight requests may finish. ' +
+    'Report the retained results and skipped work; never automatically repeat the job. skipped:true identifies work that was not dispatched, not proof that a product is missing. ' +
+    'Use item errorDetails.code/stage/retryable when present to explain the observed failure; the legacy error text is supplementary. Do not infer missing login, extension failure or a root cause from a timeout alone. ';
 
 const proactiveFeedbackOffer =
     "If an e-Comet tool fails unexpectedly, returns clearly incorrect data, or cannot provide its documented capability, briefly offer to report the problem. If the user accepts, use prepare_e_comet_feedback and follow that tool's instructions. ";
@@ -75,7 +90,7 @@ const feedbackExecutionWorkflow =
     'CHECK_FEEDBACK_HOOKS: ask the user to check enabled and trusted e-Comet hooks; never change trust on their behalf. RESTART_FEEDBACK_FLOW: explain only the supplied handoff evidence and ask to start a fresh flow; do not infer invalidity or expiry from the action alone. RETRY_WITH_VALID_REPORT: correct only identified invalid report fields while preserving the chosen history option. RETRY_FEEDBACK_ONCE: offer one retry, never loop. CHECK_LOCAL_STORAGE: ask the user to check local storage access without exposing paths. These actions never waive consent or permit a silent change of history choice. ' +
     'If prepare or submit returns FEEDBACK_HOOK_HANDOFF_UNAVAILABLE, or a hook denies submit with FEEDBACK_GRANT_MISSING, explain that the trusted e-Comet hook handoff is unavailable. Disabled, untrusted, or modified hooks are possible causes, not a proven diagnosis. In Codex, tell the user to verify in the e-Comet plugin settings that its hooks are enabled and trusted. In Claude, direct the user to its hook permission settings. For a Russian-language user say: «Не сработала защищённая передача через хуки e-Comet. Проверьте в настройках клиента, что хуки e-Comet включены и им выдано доверие, затем начните отправку заново.» Do not claim that e-Comet itself is broken, do not retry automatically, and never attempt to trust hooks on the user’s behalf. ' +
     'The prepared report.md resource link is temporary. Do not rely on or reread it during this flow. ' +
-    'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
+    'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Transcript truncation diagnostics belong only inside the bug report; do not mention them in user-facing confirmations. Give no additional caveat or implementation detail. ' +
     'If submit returns UPLOAD_UNCERTAIN or FEEDBACK_SUBMISSION_FAILED, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ';
 
 export const serverInstructions =
@@ -127,10 +142,11 @@ export const tools = [
         name: 'wb_product_card',
         description:
             'Get live Wildberries product-card data by article ID. Use for Russian requests about остаток, остатки, сток, наличие, склады, размеры, цена, карточка товара, описание, характеристики, or склейка. ' +
-            authorizationWorkflow +
+            authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance +
             'Authorize with job {type:"product_card",product_ids:[integer,...]}; use 1-1000 positive product IDs. Read products[]. For price use priceRub.product; priceRub.basic is the crossed-out/basic price. ' +
             'For stock use quantity.total, quantity.byWarehouse, and quantity.bySize. Warehouse names are already in warehouse; if absent, display wh <id>. Use colors for merged articles, options for characteristics, and description for description. ' +
             'Translate raw field names for the user and render booleans as yes/no. A product-level ok:false is a failed WB request, not proof that the product does not exist. Report partial item errors. ' +
+            'product.complete:false means at least one requested part failed; product.ok and succeeded can still indicate useful detail data. Do not claim the complete card or description was obtained. ' +
             'Values are a current WB-session snapshot. ' +
             resultPathGuidance,
         inputSchema: toolInputSchemas.wb_product_card,
@@ -141,7 +157,7 @@ export const tools = [
         name: 'wb_search_by_query',
         description:
             'Get live Wildberries search results, top products, and positions for one or more phrases. Use for Russian requests about поиск, поисковая выдача, позиция товара, место по запросу, or топ товаров. ' +
-            authorizationWorkflow +
+            authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance +
             'Authorize with job {type:"search_by_query",queries:[{query:string,pages:integer},...]}; use at most 50 pages for each query and 1000 pages total. Start with 1 page for a top list or 2-3 pages when depth is unspecified. ' +
             'For a targeted rank check, put phrases in remote job.queries and target article IDs in local productNmIds. For a top N list, use productLimitPerQuery:N. ' +
             'Read queries[].pages[].products. Use globalPosition only when globalPositionsComplete is true; position is page-local. promoted is always boolean: promoted:true means реклама (paid placement), promoted:false means органика. ' +
@@ -161,7 +177,7 @@ export const tools = [
         name: 'wb_check_by_query',
         description:
             'Check whether one Wildberries article appears in search results for 1-100 phrases. Use for Russian requests about проверка артикула в выдаче, находится ли артикул по фразе, индексируется ли товар, or по каким запросам виден товар. ' +
-            authorizationWorkflow +
+            authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance +
             'Authorize with job {type:"check_by_query",product_id:integer,queries:[string,...]}; send one positive product ID and 1-100 unique non-empty phrases. Page depth is fixed by the service; do not supply it. ' +
             'Read queries[] separately. For found:true, report only that the product was found for the phrase. For found:false, report only that the product was not found for the phrase. ' +
             'Do not mention pagesChecked, completionReason, page limits, or brand-filtered depth unless the user explicitly asks for diagnostics. Never present pagesChecked as a page, position, rank, or search depth in ordinary unfiltered search. ' +
@@ -176,7 +192,7 @@ export const tools = [
         name: 'wb_recommendations_by_product',
         description:
             'Get live Wildberries recommendation shelves for source article IDs and check whether specific products occur in them. Use for Russian requests about рекомендации, похожие товары, рекомендательная полка, соседние товары, or whether a product встречается в рекомендациях. ' +
-            authorizationWorkflow +
+            authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance +
             'Authorize with job {type:"recommendations_by_product",products:[{product_id:integer,pages?:integer},...]}; use unique source product IDs, at most 50 pages for each product, and 1000 pages total; an omitted pages value counts as 50 toward the total. ' +
             'For первые N recommendations, explicitly request pages: 1 and pass local productLimitPerSource: N. Omit pages only when the user explicitly needs the whole discovered shelf within local limits. ' +
             'For a membership check, put исходные товары in remote job.products and целевые товары in local productNmIds. Read articles[].pages[].products and group results by sourceNmId. ' +
@@ -191,16 +207,18 @@ export const tools = [
         name: 'wb_seller_reviews',
         description:
             'Export original Wildberries seller-review XLSX reports for the signed seller_reviews browser_job. ' +
-            authorizationWorkflow +
+            authorizationWorkflow + localBridgeFailureGuidance +
             'Authorize one mixed request with job {type:"seller_reviews",exports:[{product_id?:integer,dateFrom?:"YYYY-MM-DD",dateTo?:"YYYY-MM-DD",isAnswered?:boolean,ratings?:[1|2|3|4|5,...],content?:"media"},...],org?:{id:string}|{name:string}}. ' +
             'Put every requested product, period, answer state, rating filter, and media filter into that single exports array. Omit product_id to export all products in the selected organization. Omitted ratings mean all ratings; content:"media" selects reviews with photo or video, while omitted content means any content. Omitted dates mean all time; otherwise provide both inclusive dates. Omitted isAnswered produces separate answered and unanswered workbooks. ' +
             'Omit org to use the organization active in the seller portal. Include exactly one signed org id or exact name only when the user explicitly selects another organization. ' +
+            'If ENTITY_SELECTION_REQUIRED specifically reports an unresolved restoration record from an older extension, ask which company the user wants, then obtain a new authorization with that explicit org; do not guess or silently choose one. ' +
             'Use at most 50 logical exports and 100 physical reports after expanding all. Each XLSX is limited to 100 MiB, the job to 500 MiB, and artifacts are retained for 24 hours. The shared artifact store is limited to 512 MiB and 1000 files; oldest completed artifacts are evicted first. ' +
             'Return every successful resource link (resource_link) and explicitly summarize complete, failed, and skipped exports when status is partial. Do not infer product ownership from an empty workbook. ' +
+            'ARTIFACT_TOO_LARGE means this workbook exceeded the supported file size; downloading the same file again cannot fix it. Offer a narrower explicitly selected export while retaining completed workbooks. ' +
             'Returns compact metadata and private local resource links only; XLSX bytes never enter the tool result or model context, and base64 is never returned. Do not read or summarize workbook contents unless the user separately asks.',
         inputSchema: toolInputSchemas.wb_seller_reviews,
         outputSchema: toolOutputSchemas.wb_seller_reviews,
-        annotations: liveToolAnnotations,
+        annotations: reportToolAnnotations,
     },
     {
         name: 'prepare_e_comet_feedback',
@@ -223,7 +241,7 @@ export const tools = [
             'Upload the prepared e-Comet feedback archive only after remote report_issue returns the trusted upload grant. ' +
             'The host hook injects uploadUrl, requiredHeaders, objectKey, expiresAt, expectedSize, expectedSha256, feedbackClaim, and feedbackSession. Model-authored arguments must omit every transport/claim field and snake_case alias; provide only the prepared artifactId. ' +
             feedbackFailureGuidance +
-            'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Give no additional caveat or implementation detail. ' +
+            'After a result with status:"uploaded", tell the user only that the report was sent to e-Comet. For a Russian-language user say «Отчёт отправлен в e-Comet.»; when useful, use «Отчёт отправлен в e-Comet с историей текущей сессии.» or «Отчёт отправлен в e-Comet без истории текущей сессии.» according to transcriptIncluded. Transcript truncation diagnostics belong only inside the bug report; do not mention them in user-facing confirmations. Give no additional caveat or implementation detail. ' +
             'If submit returns UPLOAD_UNCERTAIN or FEEDBACK_SUBMISSION_FAILED, never automatically retry submit or restart the full flow; say «Не удалось подтвердить отправку. Отчёт мог быть получен, поэтому я не буду отправлять его повторно автоматически.». This reports the uncertainty; then ask the user what to do. ' +
             'This one-shot upload returns no resource, archive bytes, object key, URL, query, or headers.',
         inputSchema: toolInputSchemas.submit_e_comet_feedback,
@@ -235,7 +253,8 @@ export const tools = [
         description:
             'Find public Wildberries product image URLs by article ID. Use for Russian requests about фото, фотографии, картинки, изображения, ссылки на фото, or галерея товара. ' +
             'Call it directly; it needs neither remote browser_job nor the Chrome extension. Send at most 20 IDs per call and preserve input order across batches. ' +
-            'Use products[].imageUrls rather than guessing CDN URLs. Report succeeded and failed counts. status "not_found" means the current image-CDN probe found no photos; it does not mean that the product does not exist.',
+            'Use products[].imageUrls rather than guessing CDN URLs. Report succeeded and failed counts. status "not_found" means the current image-CDN probe found no photos; it does not mean that the product does not exist. ' +
+            'Rate-limited or unverified probes are failed/partial/skipped, not not_found. Preserve every returned URL, explain partial coverage and stopReason:"rate_limited", and do not automatically repeat the scan. A rate limit on an observed host does not prove a site-wide ban.',
         inputSchema: toolInputSchemas.wb_product_images,
         outputSchema: toolOutputSchemas.wb_product_images,
         annotations: {
@@ -253,14 +272,16 @@ export const tools = [
             'Use canonical inclusive dateFrom/dateTo dates with at most 89 inclusive days. One call produces one period and one workbook. ' +
             'Neighboring analytics are unavailable in this first tool: it does not provide product, traffic, finance, campaign, or other Ozon reports. ' +
             'The operation may create a saved report in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
+            'CREATE_OUTCOME_UNKNOWN means the report may already exist: explain the uncertainty and obtain a separate user decision before another create attempt; never automatically retry it. ' +
+            'For legacy singular compatibility, ARTIFACT_REJECTED may describe an internal acknowledgement failure in its message; the code alone is not proof of a disk problem. Preserve any stated confirmed create outcome and do not repeat it automatically. ' +
             'An OZON_ROUTE_NOT_READY failure carrying error.details.reason "extension_outdated" means the installed e-Comet extension is too old for this report: tell the user to update the extension to the version in error.details and retry, ' +
             `and do not tell them to open the report page. This operation requires extension ${OZON_PROMOTION_MIN_EXTENSION_VERSION} or newer and any authenticated Ozon Seller page under https://seller.ozon.ru/app, not an exact promotion-overview route and never a Wildberries tab. ` +
             'The same code without those details means no ready Ozon route was reachable; it does not establish a cause. A timeout is not proof of disconnection. If status reports extensionConnected:false, explain that there is no effective extension route, without claiming attachment to an old primary. ' +
             'For an unready route, ask the user to check the extension in the same browser profile and refresh any authenticated Ozon /app page, then obtain a new authorization before retrying. Never reuse the consumed one-use authorization, automatically loop, or use WB-tab recovery for Ozon. ' +
-            'Returns compact metadata and exactly one private resource_link; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
+            'Returns compact metadata and exactly one private resource_link. The resource_link contains a local file URI; workbook bytes, base64, company context, report identifiers, and request details are not included in model content.',
         inputSchema: toolInputSchemas.ozon_seller_promotion_report,
         outputSchema: toolOutputSchemas.ozon_seller_promotion_report,
-        annotations: liveToolAnnotations,
+        annotations: reportToolAnnotations,
     },
     {
         name: 'ozon_seller_promotion_reports',
@@ -270,10 +291,10 @@ export const tools = [
             'Each period independently uses canonical inclusive dates and may contain at most 89 inclusive days. Periods may overlap and need not be chronological; exact duplicates are rejected and there is no aggregate-day cap. ' +
             'One browser authorization and one local call cover the whole ordered package. Completed workbooks remain available when later items fail; return every completed resource_link and report every failed and skipped item from the ordered result. ' +
             'The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
-            'Returns compact metadata and one private resource_link per completed workbook; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
+            'Returns compact metadata and one private resource_link per completed workbook. The resource_link contains a local file URI; workbook bytes, base64, company context, report identifiers, and request details are not included in model content.',
         inputSchema: toolInputSchemas.ozon_seller_promotion_reports,
         outputSchema: toolOutputSchemas.ozon_seller_promotion_reports,
-        annotations: liveToolAnnotations,
+        annotations: reportToolAnnotations,
     },
     {
         name: 'ozon_seller_analytics_report',
@@ -282,15 +303,16 @@ export const tools = [
             ozonPackageAuthorizationWorkflow('ozon_seller_analytics_report', 'reports:[{dateFrom,dateTo,breakdown},...]') +
             'Each report independently uses canonical inclusive dates, an explicit breakdown:"period" or breakdown:"daily", at most 731 inclusive days, and the signed Moscow issuance window. ' +
             'daily means daily rows inside one XLSX workbook for that report; never create one report per day unless the user explicitly requests separate date items. ' +
+            'REPORT_TERMINAL_FAILURE may include details.marketplaceErrorCode: retain this observed numeric code in a consented bug report, but never invent its business meaning or treat it as permission to retry create. ' +
             'Ranges may overlap and need not be chronological; the same range with different breakdowns is valid, exact duplicate descriptors are rejected, and there is no aggregate-day cap. ' +
             'One browser authorization and one local call cover the whole ordered package. Completed workbooks remain available when later items fail; return every completed resource_link and report every failed and skipped item from the ordered result. ' +
             'Check that the connected extension advertises the analytics capability; tool presence alone is not readiness. ' +
             'Do not recreate a completed report because opening or reading its downloaded workbook failed. ' +
             'Promotion analytics remains a separate Ozon workflow. The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
-            'Returns compact metadata and one private resource_link per completed workbook; workbook bytes, base64, local paths, company context, report identifiers, and request details never enter model content.',
+            'Returns compact metadata and one private resource_link per completed workbook. The resource_link contains a local file URI; workbook bytes, base64, company context, report identifiers, and request details are not included in model content.',
         inputSchema: toolInputSchemas.ozon_seller_analytics_report,
         outputSchema: toolOutputSchemas.ozon_seller_analytics_report,
-        annotations: liveToolAnnotations,
+        annotations: reportToolAnnotations,
     },
 ];
 

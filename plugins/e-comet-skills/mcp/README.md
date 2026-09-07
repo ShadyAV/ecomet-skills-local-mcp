@@ -1,3 +1,5 @@
+> Test package: this build trusts only Chrome extension `kfdeggpflkbafbjdhbcmfgeibhdnmaio` and uses bridge generation 6. The ordinary store extension ID is not admitted.
+
 # e-Comet local MCP
 
 Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` command. The server has no npm runtime

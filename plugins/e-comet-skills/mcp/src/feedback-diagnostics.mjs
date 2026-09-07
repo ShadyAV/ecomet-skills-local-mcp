@@ -5,7 +5,7 @@ export const FEEDBACK_DIAGNOSTIC_ERROR_TYPES = Object.freeze(['Error', 'TypeErro
 export const FEEDBACK_DIAGNOSTIC_SYSTEM_CODES = Object.freeze(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EDQUOT', 'EROFS', 'EMFILE', 'ENFILE', 'EIO', 'EEXIST', 'ENOTDIR', 'EISDIR', 'ENOTEMPTY', 'EBUSY', 'EINVAL', 'ELOOP', 'EXDEV', 'ENAMETOOLONG', 'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE']);
 export const FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES = Object.freeze(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EDQUOT', 'EROFS', 'EMFILE', 'ENFILE', 'EIO', 'EEXIST', 'ENOTDIR', 'EISDIR', 'ENOTEMPTY', 'EBUSY', 'EINVAL', 'ELOOP', 'EXDEV', 'ENAMETOOLONG']);
 export const FEEDBACK_DIAGNOSTIC_MODULES = Object.freeze(['feedback-diagnostics.mjs', 'feedback-errors.mjs', 'feedback-tools.mjs', 'feedback-upload.mjs', 'feedback-claim.mjs', 'feedback-artifact-store.mjs', 'feedback-metadata.mjs', 'feedback-report.mjs', 'feedback-zip.mjs', 'mcp-dispatcher.mjs', 'tool-schemas.mjs']);
-export const FEEDBACK_DIAGNOSTIC_REASONS = Object.freeze(['claim_missing', 'claim_already_consumed', 'claim_expired', 'claim_not_yet_valid', 'claim_binding_mismatch', 'claim_signature_invalid', 'claim_record_invalid', 'claim_capacity', 'claim_store_busy', 'storage_busy', 'storage_capacity', 'storage_cleanup_incomplete', 'artifact_missing', 'artifact_expired', 'artifact_integrity', 'invalid_headers', 'network_timeout', 'internal_error']);
+export const FEEDBACK_DIAGNOSTIC_REASONS = Object.freeze(['claim_missing', 'claim_already_consumed', 'claim_expired', 'claim_not_yet_valid', 'claim_binding_mismatch', 'claim_signature_invalid', 'claim_record_invalid', 'claim_capacity', 'claim_store_busy', 'storage_busy', 'storage_capacity', 'storage_cleanup_incomplete', 'artifact_missing', 'artifact_ambiguous', 'artifact_expired', 'artifact_integrity', 'invalid_headers', 'network_timeout', 'internal_error']);
 
 const operations = new WeakMap();
 const httpStatuses = new WeakMap();
@@ -56,6 +56,9 @@ export const feedbackDiagnostics = (error, operation = 'prepare') => {
         seen.add(current);
         let errorType = 'NonError';
         try { errorType = builtins.find(type => current instanceof type)?.name ?? 'NonError'; } catch { /* Hostile proxies are not diagnostic evidence. */ }
+        // Report the deepest inspected cause's built-in type, just like its system evidence.
+        // Outer operation wrappers are plain Error by design; reporting their type would hide
+        // useful original TypeError/RangeError failures. This is causal evidence, not proof of root cause.
         result.errorType = errorType;
         const ownedOperation = operations.get(current);
         if (ownedOperation) result.operation = ownedOperation;

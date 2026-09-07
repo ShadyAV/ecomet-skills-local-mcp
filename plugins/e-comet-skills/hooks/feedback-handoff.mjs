@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url';
 
 import { MAX_MCP_MESSAGE_BYTES } from '../mcp/src/config.mjs';
 import { issueFeedbackClaim } from '../mcp/src/feedback-claim.mjs';
+import { redactFeedbackText } from '../mcp/src/feedback-report.mjs';
+import { toolInputSchemas, validateSchemaValue } from '../mcp/src/tool-schemas.mjs';
 import { FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from '../mcp/src/feedback-diagnostics.mjs';
 
 // PostToolUse can carry one maximum-size MCP request and response. Reserve another 256 KiB for the
@@ -39,6 +41,8 @@ const MAX_REQUIRED_HEADERS = 32;
 const MAX_HEADER_NAME_BYTES = 128;
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const MAX_GRANT_PAYLOAD_BYTES = 48 * 1024;
+// Numeric expiry uses the same calendar range as the four-digit ISO wire representation.
+const MAX_EXPIRES_AT_SECONDS = 253402300799;
 const GRANT_START_WINDOW_MS = 30_000;
 const GRANT_HANDOFF_RESERVE_MS = 5_000;
 // WHY: the grant must survive ordinary Post->Pre scheduling and the start of the PUT. Its expiry
@@ -72,10 +76,10 @@ const byteLength = (value) => Buffer.byteLength(value, 'utf8');
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const wait = (delayMs) => new Promise((resolveWait) => setTimeout(resolveWait, delayMs));
-const hasProtectedOwner = async (lockPath) => {
-    for (const entry of await readdir(lockPath, { withFileTypes: true })) {
+const hasProtectedOwner = (owners) => {
+    for (const entry of owners) {
         const match = entry.isFile() && /^([1-9]\d{0,9})-[0-9a-f-]{36}$/.exec(entry.name);
-        if (!match) continue;
+        if (!match) return true;
         try { process.kill(Number(match[1]), 0); return true; }
         catch (error) { if (safeFeedbackProperty(error, 'code') !== 'ESRCH') return true; }
     }
@@ -167,16 +171,15 @@ const acquireStoreLock = async (dataDirectory, fileNow) => {
             return () => releaseStoreLock({ lockPath, ownerPath: join(lockPath, ownerId) });
         } catch (error) {
             await rm(candidatePath, { recursive: true, force: true });
-            if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
+            if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
         }
 
         try {
             const lockStat = await stat(lockPath);
-            if (fileNow() - lockStat.mtimeMs > STORE_LOCK_STALE_MS) {
-                if (await hasProtectedOwner(lockPath)) {
-                    await wait(LOCK_RETRY_DELAY_MS);
-                    continue;
-                }
+            const owners = await readdir(lockPath, { withFileTypes: true });
+            // Positively dead published ownership needs no stale grace. An unknown marker
+            // or a PID probe denied by the OS never authorizes taking another section.
+            if (!hasProtectedOwner(owners) && (owners.length > 0 || fileNow() - lockStat.mtimeMs > STORE_LOCK_STALE_MS)) {
                 const stalePath = join(dataDirectory, `.stale-lock-${process.pid}-${randomUUID()}`);
                 try {
                     const currentStat = await stat(lockPath);
@@ -190,12 +193,12 @@ const acquireStoreLock = async (dataDirectory, fileNow) => {
                     await rename(lockPath, stalePath);
                     await rm(stalePath, { recursive: true, force: true });
                 } catch (error) {
-                    if (error?.code !== 'ENOENT') throw error;
+                    if (!['ENOENT', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
                 }
                 continue;
             }
         } catch (error) {
-            if (error?.code !== 'ENOENT') throw error;
+            if (!['ENOENT', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
         }
         await wait(LOCK_RETRY_DELAY_MS);
     }
@@ -336,7 +339,7 @@ export const normalizeExpiresAt = (value, nowMs) => {
     if (
         !Number.isSafeInteger(expiresAt) ||
         expiresAt < 1 ||
-        expiresAt > Math.floor(Number.MAX_SAFE_INTEGER / 1000) ||
+        expiresAt > MAX_EXPIRES_AT_SECONDS ||
         !Number.isSafeInteger(nowMs) ||
         nowMs < 0 ||
         expiresAt * 1000 <= nowMs
@@ -361,7 +364,7 @@ const validateUploadGrant = (grant, { nowMs, expectedSize, allowExpired = false 
         !isRecord(grant.requiredHeaders) ||
         !Number.isSafeInteger(grant.expiresAt) ||
         grant.expiresAt < 1 ||
-        grant.expiresAt > Math.floor(Number.MAX_SAFE_INTEGER / 1000) ||
+        grant.expiresAt > MAX_EXPIRES_AT_SECONDS ||
         !allowExpired && grant.expiresAt * 1000 <= nowMs ||
         !Number.isSafeInteger(expectedSize) ||
         expectedSize < 1 ||
@@ -560,7 +563,7 @@ const writeAtomicReplacement = async (path, value) => {
     }
 };
 
-const MAX_TOOL_RESULT_JSON_BYTES = 8 * 1024;
+const MAX_TOOL_RESULT_JSON_BYTES = MAX_MCP_MESSAGE_BYTES;
 const PREPARED_RESULT_KEYS = [
     'artifactId',
     'kind',
@@ -1090,6 +1093,9 @@ const prepareInputWithTrustedTranscript = (event) => {
             'Trusted feedback fields must not be supplied in model-authored input.'
         );
     }
+    if (!validateSchemaValue(toolInput, toolInputSchemas.prepare_e_comet_feedback)) {
+        throw new FeedbackHandoffError('FEEDBACK_INVALID_INPUT', 'The feedback preparation arguments are invalid.');
+    }
     if (!toolInput.includeTranscript) return { ...toolInput };
     const transcriptPath = transcriptPathFromEvent(event);
     if (transcriptPath === undefined) {
@@ -1099,6 +1105,51 @@ const prepareInputWithTrustedTranscript = (event) => {
         );
     }
     return { ...toolInput, transcriptPath };
+};
+
+// Hooks receive arguments, not the host's JSON-RPC id/_meta. Leave bounded headroom
+// for supported host envelopes, in addition to measuring the injected fields themselves.
+const FEEDBACK_ENVELOPE_RESERVE_BYTES = 4096;
+const REPORT_SHORTENING_MARKER = '\n[... middle omitted to fit the feedback request size limit ...]\n';
+const shortenReportMiddle = (text, retained) => {
+    if (retained >= text.length) return text;
+    let head = Math.ceil(retained / 2);
+    let tail = text.length - Math.floor(retained / 2);
+    // Keep surrogate pairs intact without materializing a code-point array of a huge report.
+    if (head > 0 && /[\uD800-\uDBFF]/u.test(text[head - 1]) && /[\uDC00-\uDFFF]/u.test(text[head] ?? '')) head -= 1;
+    if (tail > 0 && /[\uD800-\uDBFF]/u.test(text[tail - 1]) && /[\uDC00-\uDFFF]/u.test(text[tail] ?? '')) tail += 1;
+    return text.slice(0, head) + REPORT_SHORTENING_MARKER + text.slice(tail);
+};
+const fitPrepareWireInput = (input) => {
+    const fits = (value) => byteLength(JSON.stringify({
+        ...value, feedbackClaim: 'a'.repeat(43), feedbackSession: 'a'.repeat(64),
+    })) <= MAX_MCP_MESSAGE_BYTES - FEEDBACK_ENVELOPE_RESERVE_BYTES;
+    if (fits(input)) return input;
+    // Cutting a header/key away from its credential value defeats contextual redaction.
+    // Redact whole source fields before any cut, then bind only the final safe text.
+    let fitted = { ...input, summary: redactFeedbackText(input.summary), details: redactFeedbackText(input.details) };
+    // Details are the ordinary oversized field. Summary is only a last resort when
+    // it alone exhausts the budget; normal inputs and the trusted transcript path stay unchanged.
+    for (const field of ['details', 'summary']) {
+        if (fits(fitted)) return fitted;
+        const original = fitted[field];
+        const minimumRetained = Math.min(original.length, 128);
+        const shortened = shortenReportMiddle(original, minimumRetained);
+        // An omission marker must not enlarge an ordinary field just because another field is huge.
+        if (byteLength(JSON.stringify(shortened)) >= byteLength(JSON.stringify(original))) continue;
+        const minimum = { ...fitted, [field]: shortened };
+        if (!fits(minimum)) { fitted = minimum; continue; }
+        let low = minimumRetained;
+        let high = original.length - 1;
+        while (low < high) {
+            const retained = Math.ceil((low + high) / 2);
+            if (fits({ ...fitted, [field]: shortenReportMiddle(original, retained) })) low = retained;
+            else high = retained - 1;
+        }
+        return { ...fitted, [field]: shortenReportMiddle(original, low) };
+    }
+    if (!fits(fitted)) throw new FeedbackHandoffError('FEEDBACK_INVALID_INPUT', 'The feedback request envelope is too large.');
+    return fitted;
 };
 
 const issueLocalClaim = async ({ event, effectiveInput, targetTool, env, nowMs, expiresAt, issueFeedbackClaimImpl = issueFeedbackClaim }) => {
@@ -1163,6 +1214,10 @@ export const processHookEvent = async (event, _options = {}) => {
         LOCAL_FEEDBACK_TOOL.test(toolName) &&
         toolName.endsWith('__prepare_e_comet_feedback')
     ) {
+        // A failed tool already supplies its diagnostic. Blocking PostToolUse would replace it.
+        if (isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true) {
+            return { exitCode: 0, stdout: '', stderr: '' };
+        }
         try {
             const { env = process.env, nowMs = Date.now(), fileNow = Date.now } = _options;
             const sessionId = sessionIdFromEvent(event);
@@ -1208,7 +1263,8 @@ export const processHookEvent = async (event, _options = {}) => {
     ) {
         try {
             const { env = process.env, nowMs = Date.now(), issueFeedbackClaimImpl = issueFeedbackClaim } = _options;
-            const effectiveInput = prepareInputWithTrustedTranscript(event);
+            // Bind the shortened report, never issue a claim for text that will be rewritten later.
+            const effectiveInput = fitPrepareWireInput(prepareInputWithTrustedTranscript(event));
             const claim = await issueLocalClaim({
                 event,
                 effectiveInput,

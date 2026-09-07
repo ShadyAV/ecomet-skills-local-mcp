@@ -15,10 +15,12 @@ import {
     ARTIFACT_RETENTION_MS,
 } from './config.mjs';
 import { requireStorageTarget } from './storage-layout.mjs';
+import { createOwnedLockReleaseTracker } from './owned-lock-release.mjs';
 
-const defaultFileSystem = { appendFile, chmod, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile };
+const defaultFileSystem = { appendFile, chmod, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile };
 const jobUsage = new Map();
 const activePartPaths = new Set();
+const pendingSetupCleanups = createOwnedLockReleaseTracker();
 const ARTIFACT_LOCK_RETRY_LIMIT = 200;
 const ARTIFACT_LOCK_RETRY_DELAY_MS = 25;
 const ARTIFACT_LOCK_STALE_MS = 30_000;
@@ -731,7 +733,10 @@ const acquireArtifactStoreLock = async (artifactDir, fileSystem = defaultFileSys
     }
     throw new ArtifactStoreError('ARTIFACT_STORE_BUSY', 'Artifact storage is busy; retry the export');
 };
+const ownedLockReleases = createOwnedLockReleaseTracker();
 const withArtifactStoreLock = async (artifactDir, operation, fileSystem = defaultFileSystem) => {
+    const lockPath = join(artifactDir, '.artifact-store.lock');
+    await ownedLockReleases.retryPending(lockPath);
     const release = await acquireArtifactStoreLock(artifactDir, fileSystem);
     let operationError;
     try {
@@ -741,7 +746,7 @@ const withArtifactStoreLock = async (artifactDir, operation, fileSystem = defaul
         throw error;
     } finally {
         try {
-            await release();
+            await ownedLockReleases.release(lockPath, release);
         } catch (releaseError) {
             if (!operationError) throw releaseError;
         }
@@ -922,13 +927,15 @@ export const pruneArtifacts = async (options = {}) => {
     const fs = { ...defaultFileSystem, ...(options.fileSystem ?? {}) };
     const platform = options.platform ?? process.platform;
     await ensurePrivateDirectory(artifactDir, fs, platform);
-    return withArtifactStoreLock(artifactDir, () => pruneArtifactsUnlocked(options), fs);
+    return withArtifactStoreLock(artifactDir, () => pruneArtifactsUnlocked({ ...options, artifactDir }), fs);
 };
 
 export const pruneLegacyArtifacts = async (options = {}) => {
     const artifactDir = options.artifactDir ?? LEGACY_ARTIFACT_DIR;
+    const fs = { ...defaultFileSystem, ...(options.fileSystem ?? {}) };
     try {
-        const metadata = await lstat(artifactDir);
+        // The admission probe and subsequent cleanup must observe the same filesystem adapter.
+        const metadata = await fs.lstat(artifactDir);
         if (!metadata.isDirectory() || metadata.isSymbolicLink()) return [new Error('Legacy artifact directory is invalid')];
     } catch (error) {
         if (error?.code === 'ENOENT') return [];
@@ -1031,13 +1038,30 @@ export const createArtifactWriter = async (options = {}) => {
         assertNotAborted();
     } catch (error) {
         aborted = true;
+        // Setup can still own a partial file before a writer object exists. Fast
+        // cancellation may already have requested job release, so transfer that
+        // ownership to cleanup before removing the writer reservation.
+        usage.pendingCleanups += 1;
         usage.writers -= 1;
         try {
-            await fs.rm(partialPath, { force: true });
+            // Reuse exact-owner recovery: exhausting a short sharing-violation
+            // batch must not abandon this partial or the job's release request.
+            await pendingSetupCleanups.release(partialPath, async () => {
+                try { await fs.rm(partialPath, { force: true }); }
+                catch (cleanupError) {
+                    // Also runs if a later background attempt reaches a permanent
+                    // failure. The tracker must not hide that safe diagnostic.
+                    if (!TRANSIENT_ARTIFACT_PIN_REMOVE_ERRORS.has(cleanupError?.code)) {
+                        console.error('ARTIFACT_CLEANUP_FAILED: Artifact writer setup cleanup remains pending.');
+                    }
+                    throw cleanupError;
+                }
+                usage.pendingCleanups -= 1;
+                resumeDeferredArtifactRelease(jobId, usage);
+            });
         } catch (cleanupError) {
             throw new AggregateError([asError(error), asError(cleanupError)], 'Artifact writer setup failed and cleanup failed');
         }
-        resumeDeferredArtifactRelease(jobId, usage);
         throw asError(error);
     }
     activePartPaths.add(partialPath);

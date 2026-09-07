@@ -138,15 +138,16 @@ const acquireClaimStoreLock = async (directory) => {
         }
         try {
             const before = await stat(lockPath);
-            if (Date.now() - before.mtimeMs > CLAIM_LOCK_STALE_MS) {
-                const owners = await readdir(lockPath, { withFileTypes: true });
-                const protectedOwner = owners.some(entry => {
-                    const match = entry.isFile() && /^([1-9]\d{0,9})-[0-9a-f-]{36}$/.exec(entry.name);
-                    if (!match) return false;
-                    try { process.kill(Number(match[1]), 0); return true; }
-                    catch (error) { return safeFeedbackProperty(error, 'code') !== 'ESRCH'; }
-                });
-                if (protectedOwner) { await delay(CLAIM_LOCK_RETRY_MS); continue; }
+            const owners = await readdir(lockPath, { withFileTypes: true });
+            const protectedOwner = owners.some(entry => {
+                const match = entry.isFile() && /^([1-9]\d{0,9})-[0-9a-f-]{36}$/.exec(entry.name);
+                if (!match) return true;
+                try { process.kill(Number(match[1]), 0); return true; }
+                catch (error) { return safeFeedbackProperty(error, 'code') !== 'ESRCH'; }
+            });
+            // A published, positively dead owner cannot still use this lock. Unknown/live
+            // ownership remains protected; only an empty abandoned directory needs age grace.
+            if (!protectedOwner && (owners.length > 0 || Date.now() - before.mtimeMs > CLAIM_LOCK_STALE_MS)) {
                 const stalePath = join(directory, `.stale-lock-${process.pid}-${randomUUID()}`);
                 try {
                     const current = await stat(lockPath);
@@ -156,11 +157,11 @@ const acquireClaimStoreLock = async (directory) => {
                         continue;
                     }
                 } catch (error) {
-                    if (error?.code !== 'ENOENT') throw error;
+                    if (!['ENOENT', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
                 }
             }
         } catch (error) {
-            if (error?.code !== 'ENOENT') throw error;
+            if (!['ENOENT', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
         }
         await delay(CLAIM_LOCK_RETRY_MS);
     }
