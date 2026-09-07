@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, chmod, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
@@ -17,7 +17,7 @@ import {
 import { requireStorageTarget } from './storage-layout.mjs';
 import { createOwnedLockReleaseTracker } from './owned-lock-release.mjs';
 
-const defaultFileSystem = { appendFile, chmod, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile };
+const defaultFileSystem = { appendFile, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile };
 const jobUsage = new Map();
 const activePartPaths = new Set();
 const pendingSetupCleanups = createOwnedLockReleaseTracker();
@@ -1018,7 +1018,9 @@ export const createArtifactWriter = async (options = {}) => {
     const fs = { ...defaultFileSystem, ...fileSystem };
     const identity = randomUUID();
     const partialPath = join(artifactDir, `.active-${process.pid}-${identity}.part`);
-    const artifactPath = join(artifactDir, `${identity}-${name}`);
+    // MSIX adds a package prefix to the real Windows path. Keep that path short
+    // for external workbook viewers; the descriptive name remains in metadata.
+    const artifactPath = join(artifactDir, platform === 'win32' ? `${identity}.xlsx` : `${identity}-${name}`);
     const pinPath = join(artifactDir, `.active-artifact-${process.pid}-${identity}.pin`);
     try {
         assertNotAborted();
@@ -1344,7 +1346,12 @@ export const createArtifactWriter = async (options = {}) => {
                         }
                     }, fs);
                     assertNotAborted();
-                    const artifact = { name, path: artifactPath, uri: pathToFileURL(artifactPath).href, mimeType, size: byteCount, sha256 };
+                    // The logical AppData path can exist only in the producer's
+                    // MSIX view. External Excel needs the finalized physical path;
+                    // pins and cleanup still own the original logical path.
+                    const deliveredPath = platform === 'win32' ? await fs.realpath(artifactPath) : artifactPath;
+                    assertNotAborted();
+                    const artifact = { name, path: deliveredPath, uri: pathToFileURL(deliveredPath).href, mimeType, size: byteCount, sha256 };
                     assertNotAborted();
                     registerPin();
                     assertNotAborted();

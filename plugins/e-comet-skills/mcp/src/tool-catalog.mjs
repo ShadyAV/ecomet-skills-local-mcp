@@ -40,6 +40,12 @@ const resultPathGuidance =
     'resultPath is only a fallback for the current call when the compact result is insufficient; it is not a cache and must not be reused for another request. ' +
     'Use it only when present. If storageWarnings accompany an absent path, preserve the inline data and explain the storage failure; never invent a file path.';
 
+const reportDeliveryGuidance =
+    'Use the exact returned resource_link.uri or artifact.path: name is a display name and may differ from the stored filename. ' +
+    'If opening fails, check that exact file with the host file capability that can access the MCP host filesystem. An empty filename search, an unavailable resource listing, or an Excel opening error does not prove deletion or retention cleanup. ' +
+    'When the file exists, recover delivery through the host file capability using the same workbook; if a copy is needed, preserve the original and verify the copy against the returned size and SHA-256. ' +
+    'Do not recreate a completed report because opening or reading its downloaded workbook failed. If the exact file cannot be checked from this host, report that verification gap without claiming the file is missing. ';
+
 const localBridgeFailureGuidance =
     'LOCAL_BRIDGE_* failures describe observed local pairing or listener problems, not marketplace login failures. Use the returned cause and local_bridge_status; do not prescribe opening a WB tab or obtaining repeated authorizations for a local permissions/bind failure. ' +
     'For LOCAL_STORAGE_FAILED, use details.systemCode and the message when supplied to distinguish access, space/quota and path conflicts; do not infer the cause from the generic code alone. ';
@@ -214,6 +220,7 @@ export const tools = [
             'If ENTITY_SELECTION_REQUIRED specifically reports an unresolved restoration record from an older extension, ask which company the user wants, then obtain a new authorization with that explicit org; do not guess or silently choose one. ' +
             'Use at most 50 logical exports and 100 physical reports after expanding all. Each XLSX is limited to 100 MiB, the job to 500 MiB, and artifacts are retained for 24 hours. The shared artifact store is limited to 512 MiB and 1000 files; oldest completed artifacts are evicted first. ' +
             'Return every successful resource link (resource_link) and explicitly summarize complete, failed, and skipped exports when status is partial. Do not infer product ownership from an empty workbook. ' +
+            reportDeliveryGuidance +
             'ARTIFACT_TOO_LARGE means this workbook exceeded the supported file size; downloading the same file again cannot fix it. Offer a narrower explicitly selected export while retaining completed workbooks. ' +
             'Returns compact metadata and private local resource links only; XLSX bytes never enter the tool result or model context, and base64 is never returned. Do not read or summarize workbook contents unless the user separately asks.',
         inputSchema: toolInputSchemas.wb_seller_reviews,
@@ -269,6 +276,7 @@ export const tools = [
         description:
             'Download the Ozon Seller promotion analytics report for one requested period as one XLSX workbook. ' +
             ozonAuthorizationWorkflow +
+            reportDeliveryGuidance +
             'Use canonical inclusive dateFrom/dateTo dates with at most 89 inclusive days. One call produces one period and one workbook. ' +
             'Neighboring analytics are unavailable in this first tool: it does not provide product, traffic, finance, campaign, or other Ozon reports. ' +
             'The operation may create a saved report in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
@@ -288,6 +296,7 @@ export const tools = [
         description:
             'Download an ordered package of up to 50 Ozon Seller promotion analytics XLSX workbooks. ' +
             ozonPackageAuthorizationWorkflow('ozon_seller_promotion_reports', 'periods:[{dateFrom,dateTo},...]') +
+            reportDeliveryGuidance +
             'Each period independently uses canonical inclusive dates and may contain at most 89 inclusive days. Periods may overlap and need not be chronological; exact duplicates are rejected and there is no aggregate-day cap. ' +
             'One browser authorization and one local call cover the whole ordered package. Completed workbooks remain available when later items fail; return every completed resource_link and report every failed and skipped item from the ordered result. ' +
             'The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
@@ -301,13 +310,13 @@ export const tools = [
         description:
             'Download an ordered package of up to 50 Ozon Seller general analytics XLSX workbooks. ' +
             ozonPackageAuthorizationWorkflow('ozon_seller_analytics_report', 'reports:[{dateFrom,dateTo,breakdown},...]') +
+            reportDeliveryGuidance +
             'Each report independently uses canonical inclusive dates, an explicit breakdown:"period" or breakdown:"daily", at most 731 inclusive days, and the signed Moscow issuance window. ' +
             'daily means daily rows inside one XLSX workbook for that report; never create one report per day unless the user explicitly requests separate date items. ' +
             'REPORT_TERMINAL_FAILURE may include details.marketplaceErrorCode: retain this observed numeric code in a consented bug report, but never invent its business meaning or treat it as permission to retry create. ' +
             'Ranges may overlap and need not be chronological; the same range with different breakdowns is valid, exact duplicate descriptors are rejected, and there is no aggregate-day cap. ' +
             'One browser authorization and one local call cover the whole ordered package. Completed workbooks remain available when later items fail; return every completed resource_link and report every failed and skipped item from the ordered result. ' +
             'Check that the connected extension advertises the analytics capability; tool presence alone is not readiness. ' +
-            'Do not recreate a completed report because opening or reading its downloaded workbook failed. ' +
             'Promotion analytics remains a separate Ozon workflow. The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
             'Returns compact metadata and one private resource_link per completed workbook. The resource_link contains a local file URI; workbook bytes, base64, company context, report identifiers, and request details are not included in model content.',
         inputSchema: toolInputSchemas.ozon_seller_analytics_report,
