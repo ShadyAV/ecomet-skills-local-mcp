@@ -15,9 +15,12 @@ import {
 } from './config.mjs';
 import { FeedbackPreparationError } from './feedback-errors.mjs';
 import { requireStorageTarget } from './storage-layout.mjs';
+import { classifyProcessOwner, getOwnProcessIdentity, readCurrentProcessScope, readProcessIdentity } from './process-identity.mjs';
 
 const MANIFEST_SCHEMA_VERSION = 1;
 const MAX_MANIFEST_BYTES = 64 * 1024;
+// Native identity plus its version wrapper is small; malformed owner files cannot trigger unbounded reads.
+const MAX_LOCK_OWNER_BYTES = 4096;
 const ARTIFACT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const FEEDBACK_KIND_SET = new Set(FEEDBACK_KINDS);
@@ -68,6 +71,25 @@ const isProcessAlive = (pid) => {
 
 const sameDirectoryIdentity = (first, second) => first.dev === second.dev && first.ino === second.ino;
 
+const readFeedbackStoreOwner = async (ownerPath, unpublished = false) => {
+    try {
+        const metadata = await lstat(ownerPath);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_LOCK_OWNER_BYTES) return undefined;
+        const bytes = await readFile(ownerPath);
+        if (bytes.length > MAX_LOCK_OWNER_BYTES) return undefined;
+        if (bytes.length === 0) return null; // Legacy empty markers have only PID evidence.
+        let owner;
+        try { owner = JSON.parse(bytes.toString('utf8')); }
+        catch (error) {
+            // Interrupted pending writes never became authoritative intent. A readable
+            // partial JSON file can use PID absence; failed reads and final records cannot.
+            return unpublished && error instanceof SyntaxError ? null : undefined;
+        }
+        return owner && typeof owner === 'object' && Object.keys(owner).length === 2 &&
+            owner.version === 1 && Object.hasOwn(owner, 'process') ? owner.process : undefined;
+    } catch { return undefined; }
+};
+
 const rollbackEmptyFeedbackStoreLock = async (lockPath) => {
     let ownedIdentity;
     for (let attempt = 0; attempt < FEEDBACK_STORE_LOCK_ROLLBACK_RETRY_LIMIT; attempt += 1) {
@@ -91,18 +113,17 @@ const rollbackEmptyFeedbackStoreLock = async (lockPath) => {
     }
 };
 
-const hasLiveFeedbackStoreCandidate = async (artifactDirectory) => {
+const hasLiveFeedbackStoreCandidate = async (artifactDirectory, inspectOwner) => {
     const entries = await readdir(artifactDirectory, { withFileTypes: true });
     for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const match = FEEDBACK_STORE_LOCK_CANDIDATE_PATTERN.exec(entry.name);
         if (match === null) continue;
-        const pid = Number(match[1]);
-        if (isProcessAlive(pid) === false) continue;
         const ownerId = entry.name.slice('.feedback-artifact-store-lock-'.length);
         try {
             const owners = await readdir(join(artifactDirectory, entry.name), { withFileTypes: true });
-            if (owners.some((owner) => owner.isFile() && owner.name === ownerId)) return true;
+            if (owners.some((owner) => owner.isFile() && owner.name === ownerId) &&
+                await inspectOwner(join(artifactDirectory, entry.name, ownerId), ownerId) !== 'dead') return true;
         } catch (error) {
             if (!isNotFound(error)) return true;
         }
@@ -110,19 +131,33 @@ const hasLiveFeedbackStoreCandidate = async (artifactDirectory) => {
     return false;
 };
 
-const reclaimDeadFeedbackStoreCandidates = async (artifactDirectory) => {
+const reclaimDeadFeedbackStoreCandidates = async (artifactDirectory, inspectOwner) => {
     const entries = await readdir(artifactDirectory, { withFileTypes: true });
     for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const match = FEEDBACK_STORE_LOCK_CANDIDATE_PATTERN.exec(entry.name);
         if (match === null) continue;
-        const pid = Number(match[1]);
-        if (isProcessAlive(pid) !== false) continue;
         const candidatePath = join(artifactDirectory, entry.name);
+        const ownerId = entry.name.slice('.feedback-artifact-store-lock-'.length);
         let metadata;
         try {
             metadata = await stat(candidatePath);
-            if (!metadata.isDirectory() || isProcessAlive(pid) !== false) continue;
+            if (!metadata.isDirectory()) continue;
+            const owners = await readdir(candidatePath, { withFileTypes: true });
+            let dead = false;
+            if (owners.length === 0) {
+                dead = await inspectOwner(undefined, ownerId, null) === 'dead';
+            } else if (owners.length === 1 && owners[0].isFile()) {
+                if (owners[0].name === ownerId) {
+                    dead = await inspectOwner(join(candidatePath, ownerId), ownerId) === 'dead';
+                } else if (owners[0].name === '.owner.pending') {
+                    // Only unpublished partial bytes fall back to positive ESRCH. A
+                    // complete pending birth record still carries its scope restrictions.
+                    const pending = await readFeedbackStoreOwner(join(candidatePath, '.owner.pending'), true);
+                    dead = await inspectOwner(undefined, ownerId, pending) === 'dead';
+                }
+            }
+            if (!dead) continue;
             const current = await stat(candidatePath);
             if (current.dev !== metadata.dev || current.ino !== metadata.ino || current.mtimeMs !== metadata.mtimeMs) continue;
             const stalePath = join(artifactDirectory, `.feedback-artifact-store-stale-lock-${process.pid}-${randomUUID()}`);
@@ -280,17 +315,39 @@ const writeManifest = async (artifactDirectory, manifest, platform) => {
 
 const acquireFeedbackStoreLock = async (artifactDirectory) => {
     const lockPath = join(artifactDirectory, '.feedback-artifact-store.lock');
-    await reclaimDeadFeedbackStoreCandidates(artifactDirectory);
-    for (let attempt = 0; attempt < FEEDBACK_STORE_LOCK_RETRY_LIMIT; attempt += 1) {
+    const processIdentity = await getOwnProcessIdentity();
+    const processScope = processIdentity ?? await readCurrentProcessScope();
+    const deadline = performance.now() + FEEDBACK_STORE_LOCK_RETRY_LIMIT * FEEDBACK_STORE_LOCK_RETRY_DELAY_MS;
+    const nativeObservations = new Map();
+    const inspectOwner = async (ownerPath, ownerId, recorded = undefined) => {
+        const pid = lockOwnerPid(ownerId);
+        if (pid === null) return 'unknown';
+        const identity = ownerPath === undefined ? recorded : await readFeedbackStoreOwner(ownerPath);
+        return classifyProcessOwner(pid, identity, {
+            scope: processScope, selfIdentity: processIdentity, isProcessAlive,
+            lookup: () => {
+                // Cache per immutable owner, not PID: another owner may reuse this
+                // PID while this admission is still inspecting the directory.
+                if (!nativeObservations.has(ownerId)) nativeObservations.set(ownerId, readProcessIdentity(pid, deadline - performance.now()));
+                return nativeObservations.get(ownerId);
+            },
+        });
+    };
+    await reclaimDeadFeedbackStoreCandidates(artifactDirectory, inspectOwner);
+    for (let attempt = 0; attempt < FEEDBACK_STORE_LOCK_RETRY_LIMIT && performance.now() < deadline; attempt += 1) {
         const ownerId = `${process.pid}-${randomUUID()}`;
         const candidatePath = join(artifactDirectory, `.feedback-artifact-store-lock-${ownerId}`);
         const candidateOwnerPath = join(candidatePath, ownerId);
+        const pendingOwnerPath = join(candidatePath, '.owner.pending');
         const ownerPath = join(lockPath, ownerId);
         let acquired = false;
         let published = false;
         await mkdir(candidatePath, { mode: 0o700 });
         try {
-            await writeFile(candidateOwnerPath, '', { mode: 0o600, flag: 'wx' });
+            // Publish the complete birth record before advertising candidate intent;
+            // readers must never mistake a partially written JSON file for legacy ownership.
+            await writeFile(pendingOwnerPath, JSON.stringify({ version: 1, process: processIdentity }), { mode: 0o600, flag: 'wx' });
+            await rename(pendingOwnerPath, candidateOwnerPath);
             // The final mkdir is the portable atomic claim. The populated candidate remains a
             // live intent until its owner marker moves into the lock, protecting a delayed
             // publisher while an old empty lock remains reclaimable after the stale grace.
@@ -338,17 +395,15 @@ const acquireFeedbackStoreLock = async (artifactDirectory) => {
             const metadata = await stat(lockPath);
             // Read populated intents before final owners: publication moves the marker between them,
             // so either side of the transition is observed while empty cleanup residue is ignored.
-            const liveCandidate = await hasLiveFeedbackStoreCandidate(artifactDirectory);
+            const liveCandidate = await hasLiveFeedbackStoreCandidate(artifactDirectory, inspectOwner);
             const lockEntries = await readdir(lockPath, { withFileTypes: true });
-            const owners = lockEntries
-                .filter((entry) => entry.isFile())
-                .map((entry) => lockOwnerPid(entry.name))
-                .filter((pid) => pid !== null);
+            const ownerStates = await Promise.all(lockEntries.map(entry => entry.isFile()
+                ? inspectOwner(join(lockPath, entry.name), entry.name) : 'unknown'));
             // This is deliberately conservative, not fair: any observed live/unknown publisher wins
             // protection, so overlapping publishers may make a waiter exhaust its bounded retries.
             // Identifiable dead owners need no age grace. Live/unknown processes remain protected.
-            if (!liveCandidate && !owners.some((pid) => isProcessAlive(pid) !== false) &&
-                (owners.length > 0 || Date.now() - metadata.mtimeMs > FEEDBACK_STORE_LOCK_STALE_MS)) {
+            if (!liveCandidate && ownerStates.every(state => state === 'dead') &&
+                (ownerStates.length > 0 || Date.now() - metadata.mtimeMs > FEEDBACK_STORE_LOCK_STALE_MS)) {
                 const current = await stat(lockPath);
                 if (current.dev === metadata.dev && current.ino === metadata.ino && current.mtimeMs === metadata.mtimeMs) {
                     // WHY: a pathname rename could move a live successor installed after the stat above.
@@ -399,19 +454,13 @@ const reportResource = (artifactDirectory, artifactId) => ({
     mimeType: 'text/markdown',
 });
 
-const pruneEntries = (entries, { maxArtifacts, maxTotalBytes, retentionMs, nowMs, physicalBytes }) => {
+const pruneEntries = (entries, { retentionMs, nowMs }) => {
     const ordered = [...entries].sort((left, right) => left.createdAtMs - right.createdAtMs || left.artifactId.localeCompare(right.artifactId));
     const expired = ordered.filter((entry) => nowMs - entry.createdAtMs > retentionMs);
     const retained = ordered.filter((entry) => !expired.includes(entry));
-    let total = totalEntryBytes(retained, physicalBytes);
-    const removed = [...expired];
-    while (retained.length > maxArtifacts || total > maxTotalBytes) {
-        const entry = retained.shift();
-        if (!entry) break;
-        total -= physicalBytes.get(entry.artifactId);
-        removed.push(entry);
-    }
-    return { retained, removed };
+    // Active entries are prepared work until successful upload retires them.
+    // Quota pressure must reject new admission, not erase another session's archive.
+    return { retained, removed: expired };
 };
 
 const totalEntryBytes = (entries, physicalBytes) => entries.reduce((sum, entry) => sum + physicalBytes.get(entry.artifactId), 0);
@@ -496,6 +545,7 @@ const reconcileStoreUnlocked = async ({
     platform,
     writeManifestImpl,
     removeArtifactImpl,
+    enforceCapacity = true,
 }) => {
     const pendingCleanup = await retryPendingCleanup(artifactDirectory, manifest.pendingCleanup, removeArtifactImpl);
     const withPendingRetried = { ...manifest, pendingCleanup };
@@ -507,18 +557,15 @@ const reconcileStoreUnlocked = async ({
     const pendingCleanupBytes = totalEntryBytes(pendingCleanup, physicalBytes);
     // WHY: registration passes candidate-reserved limits here. If surviving tombstones alone exceed either
     // limit, admission is impossible and must fail before pruning otherwise-valid active artifacts.
-    if (pendingCleanup.length > maxArtifacts) {
+    if (enforceCapacity && pendingCleanup.length > maxArtifacts) {
         throw storageError('Feedback artifact directory capacity is exhausted by pending cleanup', 'storage_capacity');
     }
-    if (pendingCleanupBytes > maxTotalBytes) {
+    if (enforceCapacity && pendingCleanupBytes > maxTotalBytes) {
         throw storageError('Feedback artifact byte capacity is exhausted by pending cleanup', 'storage_capacity');
     }
     const { retained, removed } = pruneEntries(existing, {
-        maxArtifacts: Math.max(0, maxArtifacts - pendingCleanup.length),
-        maxTotalBytes: Math.max(0, maxTotalBytes - pendingCleanupBytes),
         retentionMs,
         nowMs,
-        physicalBytes,
     });
     const nextPendingCleanup = [...pendingCleanup, ...removed];
     if (retained.length + nextPendingCleanup.length > FEEDBACK_ARTIFACT_MAX_FILES) {
@@ -540,11 +587,11 @@ const reconcileStoreUnlocked = async ({
     if (!manifestEquals(tombstonedManifest, nextManifest)) {
         await writeManifestImpl(artifactDirectory, nextManifest, platform);
     }
-    if (nextManifest.artifacts.length + nextManifest.pendingCleanup.length > maxArtifacts) {
-        throw storageError('Feedback artifact directory capacity is exhausted by pending cleanup', 'storage_capacity');
+    if (enforceCapacity && nextManifest.artifacts.length + nextManifest.pendingCleanup.length > maxArtifacts) {
+        throw storageError('Feedback artifact directory capacity is exhausted by retained artifacts or pending cleanup', 'storage_capacity');
     }
-    if (totalEntryBytes([...nextManifest.artifacts, ...nextManifest.pendingCleanup], physicalBytes) > maxTotalBytes) {
-        throw storageError('Feedback artifact byte capacity is exhausted by pending cleanup', 'storage_capacity');
+    if (enforceCapacity && totalEntryBytes([...nextManifest.artifacts, ...nextManifest.pendingCleanup], physicalBytes) > maxTotalBytes) {
+        throw storageError('Feedback artifact byte capacity is exhausted by retained artifacts or pending cleanup', 'storage_capacity');
     }
     return nextManifest;
 };
@@ -775,6 +822,9 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
             platform,
             writeManifestImpl,
             removeArtifactImpl,
+            // Retirement only releases existing capacity. An inherited over-budget
+            // store must still be able to remove its definitively uploaded archive.
+            enforceCapacity: false,
         });
         const entry = manifest.artifacts.find((candidate) => candidate.artifactId === request.artifactId);
         if (!entry) {
@@ -796,7 +846,9 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
             artifacts: manifest.artifacts.filter((candidate) => candidate.artifactId !== entry.artifactId),
             pendingCleanup,
         };
-        if (tombstoned.artifacts.length + tombstoned.pendingCleanup.length > maxArtifacts) {
+        // Moving an indexed entry into cleanup creates no additional directory;
+        // preserve the manifest's hard bound rather than applying admission quota.
+        if (tombstoned.artifacts.length + tombstoned.pendingCleanup.length > FEEDBACK_ARTIFACT_MAX_FILES) {
             throw storageError('Feedback artifact cleanup backlog is full', 'storage_capacity');
         }
         // WHY: publish and verify the tombstone before deleting either report.md or feedback.zip. A failed

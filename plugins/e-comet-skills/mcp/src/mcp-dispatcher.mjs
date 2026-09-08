@@ -71,6 +71,7 @@ const OZON_AUTHORIZATION_ROUTE_CODES = new Set([
 const storageCreationEvidence = new WeakMap();
 const resultCreationFailure = (cause) => {
     const messages = {
+        EBUSY: 'Local output storage is busy. Let any other pending work finish, then retry; report a persistent failure to e-Comet.',
         EEXIST: 'A local output path conflicts with an existing entry. Check the configured output location.',
         EACCES: 'The agent process cannot access local output storage. Restore access to the configured output location.',
         EPERM: 'The operating system denied access to local output storage. Check access or a file sharing lock.',
@@ -116,6 +117,13 @@ export const classifyOzonAuthorizationFailure = (error, status, packageFamily) =
     if (packageFamily === undefined && error instanceof ToolExecutionError && OZON_AUTHORIZATION_ROUTE_CODES.has(error.code)
         && status?.extensionConnected === true && status.ozonSellerPromotionReportSupported === false) {
         return ozonExtensionOutdatedError(status.extensionVersion);
+    }
+    if (error instanceof ToolExecutionError && error.code === 'EXTENSION_DISCONNECTED' && status?.extensionConnected !== true) {
+        const localFailure = bridgeUnavailableError(status);
+        // A locally observed pairing/listener failure precedes any Seller probe. Preserve
+        // its recovery within the existing Ozon authorization schema, not a Seller diagnosis.
+        if (localFailure.stage === 'local') return new ToolExecutionError(
+            'OZON_AUTHORIZATION_REJECTED', localFailure.message, 'authorization', false, { cause: error });
     }
     if (error instanceof ToolExecutionError && error.code === 'BROWSER_JOB_AUTHORIZATION_TIMEOUT') {
         // No Seller probe has occurred. A missing authorization response cannot
@@ -750,7 +758,10 @@ export const createMcpMessageHandler = ({
             // авторизация на заведомо неисполнимую операцию.
             const outdatedExtension = ozonExtensionOutdated(currentOzonStatus());
             if (outdatedExtension) throw outdatedExtension;
-            if (!(await waitForExtensionReady())) throw ozonRouteUnavailableError('disconnected');
+            if (!(await waitForExtensionReady())) {
+                throw classifyOzonAuthorizationFailure(
+                    new ToolExecutionError('EXTENSION_DISCONNECTED', 'disconnected', 'extension'), currentOzonStatus());
+            }
             // WHY: readiness can attach an older extension after the first snapshot; do not spend its signed authorization.
             const readyExtensionOutdated = ozonExtensionOutdated(currentOzonStatus());
             if (readyExtensionOutdated) throw readyExtensionOutdated;

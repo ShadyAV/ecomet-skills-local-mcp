@@ -2,7 +2,8 @@ import { posix, win32 } from 'node:path';
 import { resolveLocalStateDir } from './state-paths.mjs';
 
 const OUTPUT_SUBTREE = 'local-mcp-output-v2';
-const UNEXPANDED_PATH = /(?:\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|%[^%]+%|^~(?:[\\/]|$))/;
+const UNEXPANDED_BRACED_PATH = /\$\{[^}]+\}/;
+const UNEXPANDED_COMPONENT = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|%[^%]+%)$/;
 
 const pathApi = (platform) => (platform === 'win32' ? win32 : posix);
 const unavailable = (reason) => Object.freeze({ state: 'unavailable', reason });
@@ -27,7 +28,11 @@ export const requireStorageTarget = (target, store) => {
 const normalizedAbsolutePath = (value, platform) => {
     if (typeof value !== 'string') return undefined;
     const trimmed = value.trim();
-    if (!trimmed || trimmed !== value || UNEXPANDED_PATH.test(trimmed)) return undefined;
+    if (!trimmed || trimmed !== value || UNEXPANDED_BRACED_PATH.test(trimmed)) return undefined;
+    // Hosts and overrides provide literal paths. Bare variable markers must occupy
+    // a whole component; '$' in a username and '%' in separate names are not expansion.
+    const components = trimmed.split(platform === 'win32' ? /[\\/]/ : /\//);
+    if (components.some(component => UNEXPANDED_COMPONENT.test(component))) return undefined;
     const api = pathApi(platform);
     if (!api.isAbsolute(trimmed)) return undefined;
     return api.resolve(trimmed);

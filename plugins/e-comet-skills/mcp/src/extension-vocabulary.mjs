@@ -111,7 +111,7 @@ export const OZON_ANALYTICS_CAPABILITY = 'ozon_seller_analytics_report@1';
 // or its public error-details schema. Runtime admission checks the advertised capability.
 export const OZON_PROMOTION_MIN_EXTENSION_VERSION = '1.5.6';
 // Единственный поддерживаемый канал обновления расширения.
-export const EXTENSION_UPDATE_URL = 'https://chromewebstore.google.com/detail/e-comet/kfdeggpflkbafbjdhbcmfgeibhdnmaio';
+export const EXTENSION_UPDATE_URL = 'https://chromewebstore.google.com/detail/e-comet/apeallgchpgibifmbgefkhifidihmodh';
 export const OZON_PROMOTION_CLIENT_MESSAGE_TYPES = Object.freeze([
     MESSAGE_TYPES.ozonPromotionOperation,
     MESSAGE_TYPES.ozonPromotionStreamAck,

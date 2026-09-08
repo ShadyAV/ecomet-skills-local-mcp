@@ -44,8 +44,8 @@ export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-06-18'];
 export const LATEST_MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0];
 // 5: a build that can proxy indexed Ozon report packages must replace an already-running generation-4 primary;
 // otherwise the capable secondary remains behind a primary that cannot advertise or route the package operation.
-// The test identity must replace older primaries that trust the store extension.
-const DEFAULT_BRIDGE_GENERATION = 6;
+// Replace older test primaries and adopt the published extension identity.
+const DEFAULT_BRIDGE_GENERATION = 7;
 export const resolveBridgeGeneration = ({ env = process.env } = {}) => {
     const mode = env.NODE_ENV;
     if (mode !== 'test' && mode !== 'development') return DEFAULT_BRIDGE_GENERATION;
@@ -211,7 +211,7 @@ export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES', 64 * 1024 * 1024);
 export const FEEDBACK_ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_FILES', 100);
 export const SESSION_NONCE = randomUUID();
-export const OFFICIAL_EXTENSION_ID = 'kfdeggpflkbafbjdhbcmfgeibhdnmaio';
+export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
 export const EXTENSION_ID_OVERRIDE_ENABLED =
     process.env.ECOMET_ENABLE_EXTENSION_ID_OVERRIDE === '1' && ['test', 'development'].includes(process.env.NODE_ENV);
 const extensionIdOverride = new Set(

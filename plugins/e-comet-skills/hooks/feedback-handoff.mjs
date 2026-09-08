@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rename, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { MAX_MCP_MESSAGE_BYTES } from '../mcp/src/config.mjs';
@@ -10,6 +10,7 @@ import { issueFeedbackClaim } from '../mcp/src/feedback-claim.mjs';
 import { redactFeedbackText } from '../mcp/src/feedback-report.mjs';
 import { toolInputSchemas, validateSchemaValue } from '../mcp/src/tool-schemas.mjs';
 import { FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from '../mcp/src/feedback-diagnostics.mjs';
+import { classifyProcessOwner, getOwnProcessIdentity, readCurrentProcessScope, readProcessIdentity } from '../mcp/src/process-identity.mjs';
 
 // PostToolUse can carry one maximum-size MCP request and response. Reserve another 256 KiB for the
 // host's session/tool metadata and platform paths while keeping malformed stdin decisively bounded.
@@ -76,14 +77,64 @@ const byteLength = (value) => Buffer.byteLength(value, 'utf8');
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const wait = (delayMs) => new Promise((resolveWait) => setTimeout(resolveWait, delayMs));
-const hasProtectedOwner = (owners) => {
+const HANDOFF_OWNER_PATTERN = /^([1-9]\d{0,9})-[0-9a-f-]{36}$/;
+const HANDOFF_LOCK_RESIDUE_PATTERN = /^\.(?:lock-candidate|stale-lock)-([1-9]\d{0,9}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
+const readOwnerIdentity = async (path, unpublishedCandidate = false) => {
+    try {
+        const metadata = await lstat(path);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096) return undefined;
+        const contents = await readFile(path, 'utf8');
+        if (contents === '') return null;
+        let record;
+        try { record = JSON.parse(contents); }
+        catch (error) {
+            // A crash can interrupt an unpublished candidate's owner write. Only
+            // this readable syntax failure may fall back to creator PID evidence;
+            // published locks and quarantines must keep malformed ownership unknown.
+            return unpublishedCandidate && error instanceof SyntaxError ? null : undefined;
+        }
+        return record?.version === 1 && Object.keys(record).length === 2 && Object.hasOwn(record, 'process')
+            ? record.process ?? undefined : undefined;
+    } catch { return undefined; }
+};
+const createOwnerObserver = async () => {
+    // Probe self before starting the lock wait budget. Foreign probes are bounded
+    // and memoized by immutable marker name plus birth, never by PID alone.
+    const selfIdentity = await getOwnProcessIdentity();
+    const scope = selfIdentity ?? await readCurrentProcessScope();
+    const deadline = performance.now() + LOCK_RETRY_LIMIT * LOCK_RETRY_DELAY_MS;
+    const probes = new Map();
+    return { selfIdentity, scope, deadline, lookup: (pid, ownerKey) => {
+        if (!probes.has(ownerKey)) {
+            const remaining = deadline - performance.now();
+            probes.set(ownerKey, remaining < 1 ? Promise.resolve(null) : readProcessIdentity(pid, remaining));
+        }
+        return probes.get(ownerKey);
+    } };
+};
+const classifyHandoffOwner = (pid, recorded, ownerId, observer) => classifyProcessOwner(pid, recorded, {
+    scope: observer.scope, selfIdentity: observer.selfIdentity,
+    lookup: currentPid => observer.lookup(currentPid, `${ownerId}:${JSON.stringify(recorded)}`),
+});
+const hasProtectedOwner = async (directory, owners, observer) => {
     for (const entry of owners) {
-        const match = entry.isFile() && /^([1-9]\d{0,9})-[0-9a-f-]{36}$/.exec(entry.name);
-        if (!match) return true;
-        try { process.kill(Number(match[1]), 0); return true; }
-        catch (error) { if (safeFeedbackProperty(error, 'code') !== 'ESRCH') return true; }
+        const match = entry.isFile() && HANDOFF_OWNER_PATTERN.exec(entry.name);
+        if (!match || await classifyHandoffOwner(Number(match[1]), await readOwnerIdentity(join(directory, entry.name)), entry.name, observer) !== 'dead') return true;
     }
     return false;
+};
+const reclaimLockResidue = async (path, creatorId, observer) => {
+    try {
+        const entries = await readdir(path, { withFileTypes: true });
+        const creator = entries.find(entry => entry.name === creatorId);
+        // Quarantine contents may name the displaced owner rather than the
+        // quarantine creator. Never attribute that other process's birth to it.
+        if (entries.length > 0 && (entries.length !== 1 || !creator?.isFile())) return;
+        const unpublishedCandidate = basename(path) === '.lock-candidate-' + creatorId;
+        const recorded = creator ? await readOwnerIdentity(join(path, creatorId), unpublishedCandidate) : null;
+        if (await classifyHandoffOwner(Number(creatorId.split('-')[0]), recorded, creatorId, observer) !== 'dead') return;
+        await rm(path, { recursive: true, force: true });
+    } catch { /* Residue cleanup cannot revoke an otherwise valid handoff. */ }
 };
 
 const validateSessionId = (sessionId) => {
@@ -160,15 +211,16 @@ const releaseStoreLock = async ({ lockPath, ownerPath }) => {
 
 const acquireStoreLock = async (dataDirectory, fileNow) => {
     const lockPath = join(dataDirectory, STORE_LOCK_NAME);
+    const observer = await createOwnerObserver();
     for (let attempt = 0; attempt < LOCK_RETRY_LIMIT; attempt += 1) {
         const ownerId = `${process.pid}-${randomUUID()}`;
         const candidatePath = join(dataDirectory, `.lock-candidate-${ownerId}`);
         const candidateOwnerPath = join(candidatePath, ownerId);
         await mkdir(candidatePath, { mode: 0o700 });
         try {
-            await writeFile(candidateOwnerPath, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+            await writeFile(candidateOwnerPath, observer.selfIdentity ? JSON.stringify({ version: 1, process: observer.selfIdentity }) : '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
             await rename(candidatePath, lockPath);
-            return () => releaseStoreLock({ lockPath, ownerPath: join(lockPath, ownerId) });
+            return { observer, release: () => releaseStoreLock({ lockPath, ownerPath: join(lockPath, ownerId) }) };
         } catch (error) {
             await rm(candidatePath, { recursive: true, force: true });
             if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
@@ -179,8 +231,7 @@ const acquireStoreLock = async (dataDirectory, fileNow) => {
             const owners = await readdir(lockPath, { withFileTypes: true });
             // Positively dead published ownership needs no stale grace. An unknown marker
             // or a PID probe denied by the OS never authorizes taking another section.
-            if (!hasProtectedOwner(owners) && (owners.length > 0 || fileNow() - lockStat.mtimeMs > STORE_LOCK_STALE_MS)) {
-                const stalePath = join(dataDirectory, `.stale-lock-${process.pid}-${randomUUID()}`);
+            if (!await hasProtectedOwner(lockPath, owners, observer) && (owners.length > 0 || fileNow() - lockStat.mtimeMs > STORE_LOCK_STALE_MS)) {
                 try {
                     const currentStat = await stat(lockPath);
                     if (
@@ -190,10 +241,12 @@ const acquireStoreLock = async (dataDirectory, fileNow) => {
                     ) {
                         continue;
                     }
-                    await rename(lockPath, stalePath);
-                    await rm(stalePath, { recursive: true, force: true });
+                    // A successor's unique marker survives even if it was installed
+                    // immediately after the stat above; rmdir then refuses removal.
+                    for (const owner of owners) await rm(join(lockPath, owner.name), { force: true });
+                    await rmdir(lockPath);
                 } catch (error) {
-                    if (!['ENOENT', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
+                    if (!['ENOENT', 'EPERM', 'EBUSY', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) throw error;
                 }
                 continue;
             }
@@ -206,10 +259,10 @@ const acquireStoreLock = async (dataDirectory, fileNow) => {
 };
 
 const withStoreLock = async (dataDirectory, fileNow, operation) => {
-    const release = await acquireStoreLock(dataDirectory, fileNow);
+    const { release, observer } = await acquireStoreLock(dataDirectory, fileNow);
     let operationFailed = false;
     try {
-        return await operation();
+        return await operation(observer);
     } catch (error) {
         operationFailed = true;
         throw error;
@@ -474,7 +527,7 @@ const parseGrantEntry = (entry, { nowMs, retentionMs, allowExpired = false }) =>
 const isFreshEntry = (entry, nowMs, retentionMs) =>
     entry.createdAtMs <= nowMs + CLOCK_SKEW_MS && nowMs - entry.createdAtMs <= retentionMs;
 
-const cleanupStore = async (dataDirectory, nowMs, retentionMs) => {
+const cleanupStore = async (dataDirectory, nowMs, retentionMs, observer) => {
     let entries;
     try {
         entries = await readdir(dataDirectory, { withFileTypes: true });
@@ -484,6 +537,11 @@ const cleanupStore = async (dataDirectory, nowMs, retentionMs) => {
     }
     let active = 0;
     for (const entry of entries) {
+        const residue = entry.isDirectory() && HANDOFF_LOCK_RESIDUE_PATTERN.exec(entry.name);
+        if (residue) {
+            await reclaimLockResidue(join(dataDirectory, entry.name), residue[1], observer);
+            continue;
+        }
         if (!entry.isFile()) continue;
         const match = STATE_FILE_PATTERN.exec(entry.name);
         const path = join(dataDirectory, entry.name);
@@ -751,10 +809,10 @@ export const stagePreparedArtifact = async ({
         throw new FeedbackHandoffError('FEEDBACK_INVALID_STATE', 'The feedback handoff state is invalid.');
     }
     await ensurePrivateStoreDirectory(dataDirectory);
-    await withStoreLock(dataDirectory, fileNow, async () => {
+    await withStoreLock(dataDirectory, fileNow, async observer => {
         const preparedPath = preparedPathForSession(dataDirectory, sessionId);
         const grantPath = grantPathForSession(dataDirectory, sessionId);
-        const active = await cleanupStore(dataDirectory, nowMs, retentionMs);
+        const active = await cleanupStore(dataDirectory, nowMs, retentionMs, observer);
         const ownsCapacitySlot = await Promise.all([preparedPath, grantPath].map(path =>
             stat(path).then(() => true, error => {
                 if (safeFeedbackProperty(error, 'code') === 'ENOENT') return false;
@@ -798,8 +856,8 @@ export const stageUploadGrant = async ({
         throw new FeedbackHandoffError('FEEDBACK_INVALID_STATE', 'The feedback handoff state is invalid.');
     }
     await ensurePrivateStoreDirectory(dataDirectory);
-    await withStoreLock(dataDirectory, fileNow, async () => {
-        await cleanupStore(dataDirectory, nowMs, retentionMs);
+    await withStoreLock(dataDirectory, fileNow, async observer => {
+        await cleanupStore(dataDirectory, nowMs, retentionMs, observer);
         const preparedPath = preparedPathForSession(dataDirectory, sessionId);
         const grantPath = grantPathForSession(dataDirectory, sessionId);
         if (await stat(grantPath).then(() => true, () => false)) {
@@ -944,8 +1002,8 @@ export const claimUploadGrant = async ({
         throw new FeedbackHandoffError('FEEDBACK_INVALID_STATE', 'The feedback handoff state is invalid.');
     }
     await ensurePrivateStoreDirectory(dataDirectory);
-    return withStoreLock(dataDirectory, fileNow, async () => {
-        await cleanupStore(dataDirectory, nowMs, retentionMs);
+    return withStoreLock(dataDirectory, fileNow, async observer => {
+        await cleanupStore(dataDirectory, nowMs, retentionMs, observer);
         const grantPath = grantPathForSession(dataDirectory, sessionId);
         let entry;
         try {

@@ -1,10 +1,11 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 import { MAX_MCP_MESSAGE_BYTES } from './config.mjs';
 import { resolvePeerTokenDir } from './state-paths.mjs';
 import { safeFeedbackProperty, withFeedbackOperation } from './feedback-diagnostics.mjs';
+import { classifyProcessOwner, getOwnProcessIdentity, readCurrentProcessScope, readProcessIdentity } from './process-identity.mjs';
 
 const CLAIM_DIRECTORY_NAME = 'feedback-local-claims-v1';
 const CLAIM_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -48,6 +49,66 @@ const byteLength = (value) => Buffer.byteLength(value, 'utf8');
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+const CLAIM_OWNER_PATTERN = /^([1-9]\d{0,9})-[0-9a-f-]{36}$/;
+const readOwnerIdentity = async (path, unpublishedCandidate = false) => {
+    try {
+        const metadata = await lstat(path);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096) return undefined;
+        const contents = await readFile(path, 'utf8');
+        if (contents === '') return null; // Compatible legacy PID-only marker.
+        let record;
+        try { record = JSON.parse(contents); }
+        catch (error) {
+            // A crash can interrupt an unpublished candidate's owner write. Only
+            // this readable syntax failure may fall back to creator PID evidence;
+            // published locks and quarantines must keep malformed ownership unknown.
+            return unpublishedCandidate && error instanceof SyntaxError ? null : undefined;
+        }
+        return record?.version === 1 && Object.keys(record).length === 2 && Object.hasOwn(record, 'process')
+            ? record.process ?? undefined : undefined;
+    } catch { return undefined; }
+};
+const createOwnerObserver = async () => {
+    // Self lookup is outside the existing lock wait budget. Cache foreign probes only
+    // for this operation; repeated contention must not launch PowerShell every poll.
+    const selfIdentity = await getOwnProcessIdentity();
+    const scope = selfIdentity ?? await readCurrentProcessScope();
+    const deadline = performance.now() + CLAIM_LOCK_RETRY_LIMIT * CLAIM_LOCK_RETRY_MS;
+    const probes = new Map();
+    return { selfIdentity, scope, deadline, lookup: (pid, ownerKey) => {
+        if (!probes.has(ownerKey)) {
+            const remaining = deadline - performance.now();
+            probes.set(ownerKey, remaining < 1 ? Promise.resolve(null) : readProcessIdentity(pid, remaining));
+        }
+        return probes.get(ownerKey);
+    } };
+};
+const classifyClaimOwner = (pid, recorded, ownerId, observer) => classifyProcessOwner(pid, recorded, {
+    scope: observer.scope, selfIdentity: observer.selfIdentity,
+    lookup: currentPid => observer.lookup(currentPid, `${ownerId}:${JSON.stringify(recorded)}`),
+});
+const hasProtectedClaimOwner = async (directory, entries, observer) => {
+    for (const entry of entries) {
+        const match = entry.isFile() && CLAIM_OWNER_PATTERN.exec(entry.name);
+        if (!match || await classifyClaimOwner(Number(match[1]), await readOwnerIdentity(join(directory, entry.name)), entry.name, observer) !== 'dead') return true;
+    }
+    return false;
+};
+const reclaimClaimLockResidue = async (path, creatorId, observer) => {
+    try {
+        const entries = await readdir(path, { withFileTypes: true });
+        const creator = entries.find(entry => entry.name === creatorId);
+        // An old quarantine may contain a different process's marker: it records
+        // no birth evidence for the creator named by this directory.
+        if (entries.length > 0 && (entries.length !== 1 || !creator?.isFile())) return false;
+        const unpublishedCandidate = basename(path) === '.claim-store-lock-' + creatorId;
+        const recorded = creator ? await readOwnerIdentity(join(path, creatorId), unpublishedCandidate) : null;
+        if (await classifyClaimOwner(Number(creatorId.split('-')[0]), recorded, creatorId, observer) !== 'dead') return false;
+        // These names are unique to one ended creator, never a published lock path.
+        await rm(path, { recursive: true, force: true });
+        return true;
+    } catch (error) { return safeFeedbackProperty(error, 'code') === 'ENOENT'; }
+};
 
 const canonicalize = (value, depth = 0) => {
     if (depth > 8) throw invalidClaim();
@@ -118,20 +179,21 @@ const ensurePrivateDirectory = async (directory) => {
 
 const acquireClaimStoreLock = async (directory) => {
     const lockPath = join(directory, '.feedback-claim-store.lock');
-    const deadline = performance.now() + CLAIM_LOCK_RETRY_LIMIT * CLAIM_LOCK_RETRY_MS;
+    const observer = await createOwnerObserver();
+    const { deadline } = observer;
     for (let attempt = 0; attempt < CLAIM_LOCK_RETRY_LIMIT && performance.now() < deadline; attempt += 1) {
         const ownerId = `${process.pid}-${randomUUID()}`;
         const candidatePath = join(directory, `.claim-store-lock-${ownerId}`);
         await mkdir(candidatePath, { mode: 0o700 });
         try {
-            await writeFile(join(candidatePath, ownerId), '', { mode: 0o600, flag: 'wx' });
+            await writeFile(join(candidatePath, ownerId), observer.selfIdentity ? JSON.stringify({ version: 1, process: observer.selfIdentity }) : '', { mode: 0o600, flag: 'wx' });
             await rename(candidatePath, lockPath);
-            return async () => {
+            return { observer, release: async () => {
                 // An old owner can remove only its own marker, never a successor's directory contents.
                 await rm(join(lockPath, ownerId), { force: true });
                 try { await rmdir(lockPath); }
                 catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(safeFeedbackProperty(error, 'code'))) throw error; }
-            };
+            } };
         } catch (error) {
             await rm(candidatePath, { recursive: true, force: true });
             if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EBUSY'].includes(safeFeedbackProperty(error, 'code'))) throw error;
@@ -139,25 +201,21 @@ const acquireClaimStoreLock = async (directory) => {
         try {
             const before = await stat(lockPath);
             const owners = await readdir(lockPath, { withFileTypes: true });
-            const protectedOwner = owners.some(entry => {
-                const match = entry.isFile() && /^([1-9]\d{0,9})-[0-9a-f-]{36}$/.exec(entry.name);
-                if (!match) return true;
-                try { process.kill(Number(match[1]), 0); return true; }
-                catch (error) { return safeFeedbackProperty(error, 'code') !== 'ESRCH'; }
-            });
+            const protectedOwner = await hasProtectedClaimOwner(lockPath, owners, observer);
             // A published, positively dead owner cannot still use this lock. Unknown/live
             // ownership remains protected; only an empty abandoned directory needs age grace.
             if (!protectedOwner && (owners.length > 0 || Date.now() - before.mtimeMs > CLAIM_LOCK_STALE_MS)) {
-                const stalePath = join(directory, `.stale-lock-${process.pid}-${randomUUID()}`);
                 try {
                     const current = await stat(lockPath);
                     if (current.dev === before.dev && current.ino === before.ino && current.mtimeMs === before.mtimeMs) {
-                        await rename(lockPath, stalePath);
-                        await rm(stalePath, { recursive: true, force: true });
+                        // Remove only observed marker names. A successor installed after
+                        // this stat has a fresh name and makes nonrecursive rmdir fail.
+                        for (const owner of owners) await rm(join(lockPath, owner.name), { force: true });
+                        await rmdir(lockPath);
                         continue;
                     }
                 } catch (error) {
-                    if (!['ENOENT', 'EPERM', 'EBUSY'].includes(error?.code)) throw error;
+                    if (!['ENOENT', 'EPERM', 'EBUSY', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) throw error;
                 }
             }
         } catch (error) {
@@ -169,10 +227,10 @@ const acquireClaimStoreLock = async (directory) => {
 };
 
 const withClaimStoreLock = async (directory, operation) => {
-    const release = await acquireClaimStoreLock(directory);
+    const { release, observer } = await acquireClaimStoreLock(directory);
     let failed = false;
     try {
-        return await operation();
+        return await operation(observer);
     } catch (error) {
         failed = true;
         throw error;
@@ -240,7 +298,7 @@ const readClaimRecord = async (path) => {
     return record;
 };
 
-const cleanupClaimDirectory = async (directory, nowMs) => {
+const cleanupClaimDirectory = async (directory, nowMs, observer) => {
     const entries = await readdir(directory, { withFileTypes: true });
     let active = 0;
     for (const entry of entries) {
@@ -248,16 +306,11 @@ const cleanupClaimDirectory = async (directory, nowMs) => {
         const lockResidue = CLAIM_LOCK_RESIDUE_PATTERN.exec(entry.name);
         if (lockResidue) {
             let removed = false;
-            // Candidate/quarantine names carry their creator PID even if it died before writing a marker.
-            // Only positively dead owners may be reclaimed; age cannot displace a stalled live hook.
+            // A populated residue may prove PID reuse. Empty legacy residues retain
+            // PID-only protection, and malformed/foreign creator records fail closed.
             if (entry.isDirectory()) {
-                let dead = false;
-                try { process.kill(Number(lockResidue[1]), 0); }
-                catch (error) { dead = safeFeedbackProperty(error, 'code') === 'ESRCH'; }
-                if (dead) {
-                    try { await rm(path, { recursive: true, force: true }); removed = true; }
-                    catch (error) { removed = safeFeedbackProperty(error, 'code') === 'ENOENT'; }
-                }
+                const creatorId = entry.name.replace(/^\.(?:claim-store-lock|stale-lock)-/, '');
+                removed = await reclaimClaimLockResidue(path, creatorId, observer);
             }
             // Unreadable, unremovable, live, and unknown-owner residues never bypass admission accounting.
             if (!removed) active += 1;
@@ -312,8 +365,8 @@ export const issueFeedbackClaim = async (claim, options = {}) => {
         const inputHash = inputBinding(claim.input, maximumBindingBytes(targetTool));
         const claimDirectory = options.claimDirectory ?? resolveFeedbackClaimDirectory(options.env ?? process.env);
         await ensurePrivateDirectory(claimDirectory);
-        return await withClaimStoreLock(claimDirectory, async () => {
-            await cleanupClaimDirectory(claimDirectory, nowMs);
+        return await withClaimStoreLock(claimDirectory, async observer => {
+            await cleanupClaimDirectory(claimDirectory, nowMs, observer);
 
             const claimToken = randomBytes(32).toString('base64url');
             const tokenHash = sha256(claimToken);

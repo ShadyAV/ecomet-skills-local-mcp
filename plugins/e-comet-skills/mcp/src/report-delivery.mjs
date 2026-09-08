@@ -53,6 +53,7 @@ const copyReport = async (artifact, directory, stage) => {
     let destination;
     let outputPath;
     let owned;
+    let operationError;
     try {
         if (!(await source.stat()).isFile()) throw new Error('source_not_file');
         stage('copy');
@@ -72,16 +73,19 @@ const copyReport = async (artifact, directory, stage) => {
         // its file presenter recognizes this namespace, while private originals retain native paths.
         return { ...artifact, path: outputPath, uri: pathToFileURL(outputPath).href };
     } catch (error) {
-        await destination?.close();
-        destination = undefined;
-        if (owned) {
+        operationError = error;
+        throw error;
+    } finally {
+        // Each handle gets its own close attempt. A close rejection must not skip
+        // the other handle or replace an earlier copy/verification failure.
+        const closed = await Promise.allSettled([destination, source].filter(Boolean)
+            .map(handle => Promise.resolve().then(() => handle.close())));
+        const closeFailure = closed.find(result => result.status === 'rejected');
+        if ((operationError || closeFailure) && owned) {
             const current = await lstat(outputPath).catch(() => undefined);
             if (current?.ino === owned.ino && current?.dev === owned.dev) await unlink(outputPath).catch(() => undefined);
         }
-        throw error;
-    } finally {
-        await destination?.close();
-        await source.close();
+        if (!operationError && closeFailure) throw closeFailure.reason;
     }
 };
 

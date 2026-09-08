@@ -190,7 +190,7 @@ export const toolErrorSchema = object({
     retryable: boolean,
     details: object({
         operation: { const: 'create_result' },
-        systemCode: { type: 'string', enum: ['EEXIST', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT', 'EROFS', 'ENOTDIR'] },
+        systemCode: { type: 'string', enum: ['EEXIST', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT', 'EROFS', 'ENOTDIR', 'EBUSY'] },
     }, ['operation', 'systemCode']),
     resultPath: string,
     storageWarnings,

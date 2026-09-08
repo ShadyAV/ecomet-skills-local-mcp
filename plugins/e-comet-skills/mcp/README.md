@@ -1,4 +1,4 @@
-> Test package: this build trusts only Chrome extension `kfdeggpflkbafbjdhbcmfgeibhdnmaio` and uses bridge generation 6. The ordinary store extension ID is not admitted.
+> Test channel: local MCP only, official Chrome extension identity, bridge generation 7. Updates come from this test repository.
 
 # e-Comet local MCP
 
