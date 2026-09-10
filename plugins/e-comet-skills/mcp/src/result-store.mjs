@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, chmod, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import {
     RESULT_STORAGE,
@@ -12,8 +12,8 @@ import {
     RESULT_RETENTION_MS,
 } from './config.mjs';
 import { requireStorageTarget } from './storage-layout.mjs';
-import { createOwnedLockReleaseTracker, isTransientReleaseError } from './owned-lock-release.mjs';
-import { classifyProcessOwner, getOwnProcessIdentity, hasComparableProcessScope, readCurrentProcessScope, readProcessIdentity } from './process-identity.mjs';
+import { createOwnedLockReleaseTracker, isTransientReleaseError, releaseOwnedLock, OWNED_RELEASE_PENDING } from './owned-lock-release.mjs';
+import { classifyProcessOwner, getOwnProcessIdentity, hasComparableProcessScope, processPresence, readCurrentProcessScope, readProcessIdentity } from './process-identity.mjs';
 
 const RESULT_JOB_ID_FILE_PART_LENGTH = 128;
 const safeFilePart = (value) => value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, RESULT_JOB_ID_FILE_PART_LENGTH);
@@ -25,12 +25,13 @@ const PENDING_PIN_SUFFIX = '.pending';
 const RESULT_LOCK_OWNER_PATTERN = /^([1-9]\d{0,9})-[0-9a-f-]{36}$/;
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const ownedLockReleases = createOwnedLockReleaseTracker();
-// Unique pins enter this tracker only after their response owner has ended.
+// One generic obligation per affected directory, never a retained writer closure.
 const endedPinReleases = createOwnedLockReleaseTracker();
-const isProcessAlive = (pid) => {
-    try { process.kill(pid, 0); return true; }
-    catch (error) { return error?.code !== 'ESRCH'; }
-};
+const pinRuntime = randomUUID();
+const livePinNames = new Set();
+const PIN_CLEANUP_BATCH = 8;
+// Unknown presence remains protected in boolean ownership checks.
+const isProcessAlive = pid => processPresence(pid) !== false;
 
 // Same on-disk owner election as the artifact store: an in-process mutex cannot
 // coordinate the separate MCP processes sharing this result directory.
@@ -135,6 +136,78 @@ const ensurePrivateResultDirectory = async (resultDir) => {
     await mkdir(resultDir, { recursive: true, mode: 0o700 });
     if (process.platform !== 'win32') {
         await chmod(resultDir, 0o700);
+    }
+};
+// The runtime nonce and live set prove which pins belong to ended responses in
+// this module instance, including when process-birth evidence is unavailable.
+// Other runtimes, legacy records and unknown owners remain protected. On process
+// exit, the ordinary birth-aware retention sweep takes over from this scheduler.
+const createEndedPinSweep = resultDir => {
+    let cursor = '';
+    let cycleError;
+    let cycleVersion;
+    // The initiating caller observes its own error. This latch belongs to the
+    // deferred obligation: that earlier error cannot diagnose a later hard
+    // failure. Report pending background cleanup once without exposing paths.
+    let reportedHardFailure = false;
+    const reportFailure = error => {
+        if (!isTransientReleaseError(error) && !reportedHardFailure) {
+            reportedHardFailure = true;
+            console.error('RESULT_CLEANUP_FAILED: Ended result cleanup remains pending.');
+        }
+    };
+    return version => withResultStoreLock(resultDir, async () => {
+        cycleVersion ??= version;
+        const names = (await readdir(resultDir)).filter(name =>
+            RESULT_PIN_PATTERN.test(name) || (name.endsWith(PENDING_PIN_SUFFIX) &&
+                RESULT_PIN_PATTERN.test(name.slice(0, -PENDING_PIN_SUFFIX.length)))).sort();
+        const remaining = names.filter(name => name > cursor);
+        let batchError;
+        for (const name of remaining.slice(0, PIN_CLEANUP_BATCH)) {
+            cursor = name;
+            const path = join(resultDir, name);
+            try {
+                if (name.endsWith(PENDING_PIN_SUFFIX)) {
+                    // Candidate publication and this sweep hold the same lock.
+                    await rm(path, { force: true });
+                    continue;
+                }
+                // The random pin identity is independent of directory aliases
+                // and Windows path case; a path spelling is not owner identity.
+                if (livePinNames.has(name)) continue;
+                const owner = JSON.parse(await readFile(path, 'utf8'));
+                if (owner?.version !== 1 || owner.runtime !== pinRuntime ||
+                    typeof owner.resultName !== 'string' || !/^[a-zA-Z0-9_-]+\.ndjson$/.test(owner.resultName)) continue;
+                await rm(join(resultDir, `${ACTIVE_RESULT_PREFIX}${owner.resultName}`), { force: true });
+                await rm(path, { force: true });
+            } catch (error) {
+                if (error?.code !== 'ENOENT') {
+                    cycleError ??= error;
+                    batchError ??= error;
+                    reportFailure(error);
+                }
+            }
+        }
+        if (remaining.length > PIN_CLEANUP_BATCH) {
+            if (batchError) throw batchError;
+            return OWNED_RELEASE_PENDING;
+        }
+        cursor = '';
+        const error = cycleError;
+        cycleError = undefined;
+        const rescan = cycleVersion !== version;
+        cycleVersion = undefined;
+        if (error) throw error;
+        // A response can end between batches behind the lexical cursor. Keep a
+        // full follow-up pass when registration changed during this scan cycle.
+        if (rescan) return OWNED_RELEASE_PENDING;
+    }).catch(error => { reportFailure(error); throw error; });
+};
+const releaseEndedPin = async (resultDir, release) => {
+    try { await releaseOwnedLock(release); }
+    catch (error) {
+        endedPinReleases.defer(resultDir, createEndedPinSweep(resultDir));
+        throw error;
     }
 };
 const ensurePrivateResultFile = async (resultPath) => {
@@ -304,7 +377,8 @@ export const createJobWriter = async (
     const activeResultPath = join(resultDir, `${ACTIVE_RESULT_PREFIX}${resultName}`);
     const pinPath = join(resultDir, `.result-owner-${process.pid}-${randomUUID()}.pin`);
     const pendingPinPath = `${pinPath}${PENDING_PIN_SUFFIX}`;
-    const pinContents = JSON.stringify({ version: 1, process: await getOwnProcessIdentity(), resultName });
+    const pinContents = JSON.stringify({ version: 1, process: await getOwnProcessIdentity(), runtime: pinRuntime, resultName });
+    livePinNames.add(basename(pinPath));
     let setupStarted = false;
     try {
         await withResultStoreLock(resultDir, async () => {
@@ -317,11 +391,12 @@ export const createJobWriter = async (
             await ensurePrivateResultFile(activeResultPath);
         });
     } catch (error) {
+        livePinNames.delete(basename(pinPath));
         // A setup or lock-release failure returns no writer to the caller. Transfer
         // these invocation-unique paths to ended-owner cleanup, including partial writes.
         if (setupStarted) {
             try {
-                await endedPinReleases.release(pinPath, async () => {
+                await releaseEndedPin(resultDir, async () => {
                     try {
                         await withResultStoreLock(resultDir, async () => {
                             await rm(activeResultPath, { force: true });
@@ -410,7 +485,8 @@ export const createJobWriter = async (
             // Direct callers must close before releasing; dispatcher does this in
             // its response-finally path, including failed jobs with partial rows.
             await this.close();
-            await endedPinReleases.release(pinPath, () => withResultStoreLock(resultDir, async () => {
+            livePinNames.delete(basename(pinPath));
+            await releaseEndedPin(resultDir, () => withResultStoreLock(resultDir, async () => {
                 if (!published) await rm(activeResultPath, { force: true });
                 await rm(pinPath, { force: true });
                 released = true;

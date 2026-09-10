@@ -105,7 +105,6 @@ export const executeOzonReportPackage = async ({
     createArtifactWriter,
     artifactName,
     normalizeError,
-    now = Date.now,
 }) => {
     const resultProperty = family === 'promotion' ? 'periods' : 'reports';
     const results = new Array(items.length);

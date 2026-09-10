@@ -44,8 +44,7 @@ export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-06-18'];
 export const LATEST_MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0];
 // 5: a build that can proxy indexed Ozon report packages must replace an already-running generation-4 primary;
 // otherwise the capable secondary remains behind a primary that cannot advertise or route the package operation.
-// Replace older test primaries and adopt the published extension identity.
-const DEFAULT_BRIDGE_GENERATION = 7;
+const DEFAULT_BRIDGE_GENERATION = 8;
 export const resolveBridgeGeneration = ({ env = process.env } = {}) => {
     const mode = env.NODE_ENV;
     if (mode !== 'test' && mode !== 'development') return DEFAULT_BRIDGE_GENERATION;
@@ -184,8 +183,6 @@ export { resolveLocalStateDir, resolvePeerTokenDir };
 
 // Result-directory relocation is intentionally user-configurable in production; quota and retention overrides above are not.
 export const resolveResultDir = (options = {}) => resolveStorageLayout(options).results;
-export const resolveArtifactDir = (options = {}) => resolveStorageLayout(options).marketplaceArtifacts;
-export const resolveFeedbackArtifactDir = (options = {}) => resolveStorageLayout(options).feedbackArtifacts;
 
 export const PEER_TOKEN_DIR = resolvePeerTokenDir();
 export const LEGACY_LOCAL_STATE_DIR = resolveLocalStateDir();

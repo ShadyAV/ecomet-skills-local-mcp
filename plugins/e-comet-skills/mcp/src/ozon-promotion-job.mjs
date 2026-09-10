@@ -4,7 +4,7 @@ import { parsePromotionPeriods } from './ozon-report-package-domain.mjs';
 import { executeOzonReportPackage } from './ozon-report-package-job.mjs';
 import { SELLER_AUTHORIZATION_SCOPE_MAX_MS } from './config.mjs';
 import { OZON_PROMOTION_OPERATION_MAX_MS } from './request-broker.mjs';
-import { safeOzonPromotionToolError, ToolExecutionError } from './tool-errors.mjs';
+import { ArtifactSetupCleanupPendingError, safeOzonPromotionToolError, ToolExecutionError } from './tool-errors.mjs';
 import { StorageUnavailableError } from './storage-layout.mjs';
 
 const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -126,6 +126,7 @@ export const executeOzonPromotionJob = async ({
                 throw artifactRejected(new AggregateError([error, cleanupError], 'Ozon artifact cleanup failed'));
             }
         }
+        if (error instanceof ArtifactSetupCleanupPendingError) throw safeOzonPromotionToolError(error);
         if (error instanceof ToolExecutionError || error instanceof StorageUnavailableError) throw error;
         throw artifactRejected(error);
     }
@@ -174,6 +175,5 @@ export const executeOzonPromotionPackageJob = async ({
             return { code: safe.code, message: safe.message, stage: safe.stage, retryable: false,
                 ...(safe.code === 'OZON_EXECUTION_INTERRUPTED' && safe.details ? { details: safe.details } : {}) };
         },
-        now,
     });
 };

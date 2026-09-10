@@ -14,6 +14,7 @@ import {
 import { createArtifactWriter, releaseArtifactJob } from './artifact-store.mjs';
 import { prepareECometFeedback, submitECometFeedback } from './feedback-tools.mjs';
 import { FeedbackPreparationError, feedbackPreparationFailure, feedbackSubmissionFailure } from './feedback-errors.mjs';
+import { feedbackHostResultUnavailable, hasFeedbackHostAdapterMarker, isValidFeedbackHostAdapterInput } from './feedback-host-adapter.mjs';
 import { feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from './feedback-diagnostics.mjs';
 import { feedbackDiagnosticsSchema, validateSchemaValue } from './tool-schemas.mjs';
 import { executeAuthorizedBrowserJob, executeSellerReviewsJob, extractBrowserJobToken, validateAuthorizedJobLimits } from './browser-job.mjs';
@@ -366,6 +367,14 @@ export const createMcpMessageHandler = ({
     };
 
     const handleFeedbackPrepare = async (id, args = {}) => {
+        if (hasFeedbackHostAdapterMarker(args)) {
+            if (!validateToolArguments('prepare_e_comet_feedback', args) || !isValidFeedbackHostAdapterInput('prepare_e_comet_feedback', args)) {
+                sendResult(id, textResult(feedbackPrepareFailure(new FeedbackPreparationError('FEEDBACK_INPUT_INVALID')), true));
+                return;
+            }
+            sendResult(id, textResult(feedbackHostResultUnavailable('prepare_e_comet_feedback', args.feedbackAdapter)));
+            return;
+        }
         if (!validateToolArguments('prepare_e_comet_feedback', args)) {
             sendResult(id, textResult(feedbackPrepareFailure(new FeedbackPreparationError('FEEDBACK_INPUT_INVALID')), true));
             return;
@@ -383,6 +392,17 @@ export const createMcpMessageHandler = ({
     };
 
     const handleFeedbackSubmit = async (id, args = {}) => {
+        if (hasFeedbackHostAdapterMarker(args)) {
+            if (!validateToolArguments('submit_e_comet_feedback', args) || !isValidFeedbackHostAdapterInput('submit_e_comet_feedback', args)) {
+                sendResult(id, textResult(
+                    { ok: false, status: 'failed', error: { code: 'UPLOAD_GRANT_INVALID', message: 'The feedback upload grant is invalid or has expired.', stage: 'grant', retryable: false, details: feedbackDiagnostics(undefined, 'input_validation') } },
+                    true
+                ));
+                return;
+            }
+            sendResult(id, textResult(feedbackHostResultUnavailable('submit_e_comet_feedback', args.feedbackAdapter)));
+            return;
+        }
         if (!validateToolArguments('submit_e_comet_feedback', args)) {
             sendResult(
                 id,

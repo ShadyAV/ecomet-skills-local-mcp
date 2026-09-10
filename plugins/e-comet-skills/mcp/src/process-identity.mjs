@@ -110,7 +110,7 @@ export const isDifferentProcess = (recorded, current) => {
     return recorded.started !== current.started;
 };
 
-const processPresence = pid => {
+export const processPresence = pid => {
     try { process.kill(pid, 0); return true; }
     catch (error) { return error?.code === 'ESRCH' ? false : undefined; }
 };

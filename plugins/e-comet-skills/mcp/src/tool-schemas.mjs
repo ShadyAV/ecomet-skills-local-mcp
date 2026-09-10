@@ -12,6 +12,7 @@ import {
 } from './config.mjs';
 import { PEER_REJECTION_CODES } from './connection-state.mjs';
 import { FEEDBACK_DIAGNOSTIC_OPERATIONS, FEEDBACK_DIAGNOSTIC_ERROR_TYPES, FEEDBACK_DIAGNOSTIC_SYSTEM_CODES, FEEDBACK_DIAGNOSTIC_MODULES, FEEDBACK_DIAGNOSTIC_REASONS } from './feedback-diagnostics.mjs';
+import { feedbackHostAdapterMarkerSchema } from './feedback-host-adapter.mjs';
 import {
     EXTENSION_UPDATE_URL,
     FETCH_ERROR_CODES,
@@ -762,6 +763,7 @@ const feedbackPrepareSchema = object(
         transcriptPath: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 4096, description: 'Trusted local transcript path.' }),
         feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'One-use local feedback handoff claim.' }),
         feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
+        feedbackAdapter: hookOnlyFeedbackField({ ...feedbackHostAdapterMarkerSchema, description: 'Host feedback result adapter marker.' }),
     },
     ['kind', 'summary', 'details', 'includeTranscript']
 );
@@ -776,6 +778,7 @@ const feedbackSubmitSchema = object(
         expectedSha256: hookOnlyFeedbackField({ ...feedbackSha256, description: 'Expected archive SHA-256.' }),
         feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'One-use local feedback handoff claim.' }),
         feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
+        feedbackAdapter: hookOnlyFeedbackField({ ...feedbackHostAdapterMarkerSchema, description: 'Host feedback result adapter marker.' }),
     },
     ['artifactId']
 );
@@ -820,6 +823,29 @@ const feedbackSubmitSuccessSchema = object(
 const feedbackSubmitFailureSchema = object(
     { ok: { const: false }, status: { type: 'string', enum: ['failed', 'rejected', 'uncertain'] }, artifactId: feedbackArtifactId, error: feedbackErrorSchema },
     ['ok', 'status', 'error']
+);
+const feedbackCloudNotStartedSchema = object({
+    ok: { const: false }, status: { const: 'not_started' }, artifactId: feedbackArtifactId,
+    reason: { type: 'string', enum: ['insufficient_execution_budget', 'FEEDBACK_GRANT_REFRESH_REQUIRED'] },
+    error: feedbackErrorObject({ code: { type: 'string', enum: ['insufficient_execution_budget', 'FEEDBACK_GRANT_REFRESH_REQUIRED', 'FEEDBACK_GRANT_MISSING', 'FEEDBACK_SUBMISSION_FAILED'] },
+        message: { type: 'string', minLength: 1, maxLength: 500 }, stage: { const: 'handoff' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+}, ['ok', 'status', 'artifactId', 'error']);
+const feedbackHostUnavailableSchema = (targetTool) => object(
+    {
+        ok: { const: false },
+        status: { const: 'host_result_unavailable' },
+        adapter: object({
+            ...feedbackHostAdapterMarkerSchema.properties,
+            targetTool: { const: targetTool },
+        }, ['version', 'operationId', 'nonce', 'targetTool']),
+        error: object({
+            code: { const: 'FEEDBACK_HOST_RESULT_UNAVAILABLE' },
+            message: { type: 'string', minLength: 1, maxLength: 500 },
+            stage: { const: 'handoff' },
+            retryable: { const: false },
+        }, ['code', 'message', 'stage', 'retryable']),
+    },
+    ['ok', 'status', 'adapter', 'error']
 );
 
 export const toolInputSchemas = {
@@ -896,8 +922,8 @@ export const toolOutputSchemas = {
     wb_check_by_query: objectUnion(...liveAggregateSchemas(checkSuccessSchema), toolErrorSchema),
     wb_recommendations_by_product: objectUnion(...liveAggregateSchemas(recommendationsSuccessSchema), toolErrorSchema),
     wb_seller_reviews: objectUnion(sellerReviewsSuccessSchema, toolErrorSchema),
-    prepare_e_comet_feedback: objectUnion(feedbackPrepareSuccessSchema, feedbackPrepareFailureSchema),
-    submit_e_comet_feedback: objectUnion(feedbackSubmitSuccessSchema, feedbackSubmitFailureSchema),
+    prepare_e_comet_feedback: objectUnion(feedbackPrepareSuccessSchema, feedbackPrepareFailureSchema, feedbackHostUnavailableSchema('prepare_e_comet_feedback')),
+    submit_e_comet_feedback: objectUnion(feedbackSubmitSuccessSchema, feedbackSubmitFailureSchema, feedbackCloudNotStartedSchema, feedbackHostUnavailableSchema('submit_e_comet_feedback')),
     wb_product_images: objectUnion(...liveAggregateSchemas(imagesSuccessSchema), toolErrorSchema),
     ozon_seller_promotion_report: objectUnion(ozonPromotionSuccessSchema, ozonPromotionFailureSchema, ozonPromotionPreflightFailureSchema),
     ozon_seller_promotion_reports: packageResultSchema(

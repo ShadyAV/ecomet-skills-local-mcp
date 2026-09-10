@@ -80,6 +80,5 @@ export const executeOzonAnalyticsJob = async ({
         artifactName: ({ dateFrom, dateTo, breakdown }) =>
             ozonAnalyticsArtifactName(dateFrom, dateTo, breakdown, authorization.issuedAt),
         normalizeError: safeOzonAnalyticsToolError,
-        now,
     });
 };
