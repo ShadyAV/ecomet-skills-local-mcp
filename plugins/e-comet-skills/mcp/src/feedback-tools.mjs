@@ -3,7 +3,7 @@ import { isUtf8 } from 'node:buffer';
 import { lstat, open } from 'node:fs/promises';
 
 import { BRIDGE_VERSION, FEEDBACK_MAX_BYTES, FEEDBACK_MAX_SUMMARY_LENGTH } from './config.mjs';
-import { consumeFeedbackClaim } from './feedback-claim.mjs';
+import { assertHookFields, loadHookSecret, verifyHookSignature } from './hook-signature.mjs';
 import { feedbackArtifactStorageUnavailable, loadVerifiedFeedbackArtifact, registerFeedbackArtifact, retireFeedbackArtifact } from './feedback-artifact-store.mjs';
 import { serializeFeedbackMetadata } from './feedback-metadata.mjs';
 import { redactFeedbackText, renderFeedbackReport } from './feedback-report.mjs';
@@ -18,6 +18,25 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const transcriptUnavailable = (cause) => new FeedbackPreparationError('TRANSCRIPT_UNAVAILABLE', cause);
 const claimInvalid = (cause) => new FeedbackPreparationError('FEEDBACK_CLAIM_INVALID', cause);
 const hookHandoffUnavailable = (cause) => new FeedbackPreparationError('FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', cause);
+const signatureInvalid = () => Object.assign(
+    new Error('The trusted feedback handoff claim could not be verified.'),
+    { code: 'FEEDBACK_CLAIM_INVALID', feedbackReason: 'claim_signature_invalid' },
+);
+
+/**
+ * Verifies the fields the trusted hook injected against the shared local secret. A malformed request
+ * fails as a binding mismatch before any filesystem access; only a well-formed one reads the secret.
+ * @param {{ tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }} request
+ */
+const verifyHookFields = async ({ tool, sessionHash, signature, fields }) => {
+    try {
+        assertHookFields({ tool, sessionHash, fields });
+        const secret = await loadHookSecret({ create: false });
+        if (!verifyHookSignature({ secret, tool, sessionHash, fields, signature })) throw signatureInvalid();
+    } catch (error) {
+        throw withFeedbackOperation(error, 'claim_consume');
+    }
+};
 const safeSummary = (summary) => {
     const text = redactFeedbackText(summary.replace(/\r\n?/g, '\n')).toWellFormed();
     let end = Math.min(text.length, FEEDBACK_MAX_SUMMARY_LENGTH);
@@ -123,14 +142,14 @@ const readTrustedTranscript = (path, options) => readTrustedFeedbackTranscript(p
  * `dependencies` is an internal composition/test seam; production supplies only getBridgeStatus
  * and uses the validated built-in persistence, ZIP, claim, clock, and runtime metadata functions.
  * @param {{ kind?: string, summary?: string, details?: string, includeTranscript?: boolean, transcriptPath?: string, feedbackClaim?: string, feedbackSession?: string }} input
- * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, consumeClaim?: typeof consumeFeedbackClaim, createZip?: FeedbackZipCreator, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number }} dependencies
+ * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown, createZip?: FeedbackZipCreator, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number }} dependencies
  */
 export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const {
         getBridgeStatus,
         registerArtifact = registerFeedbackArtifact,
         readTranscript = readTrustedTranscript,
-        consumeClaim = consumeFeedbackClaim,
+        verifySignature = verifyHookFields,
         createZip = createFeedbackZip,
         now = Date.now,
         platform = process.platform,
@@ -138,18 +157,18 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         version = BRIDGE_VERSION,
         maxBytes = FEEDBACK_MAX_BYTES,
     } = dependencies;
-    if (typeof getBridgeStatus !== 'function' || typeof registerArtifact !== 'function' || typeof readTranscript !== 'function' || typeof consumeClaim !== 'function' || typeof createZip !== 'function' || typeof now !== 'function' || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    if (typeof getBridgeStatus !== 'function' || typeof registerArtifact !== 'function' || typeof readTranscript !== 'function' || typeof verifySignature !== 'function' || typeof createZip !== 'function' || typeof now !== 'function' || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
         throw new TypeError('Feedback preparation dependencies are invalid');
     }
     const { kind, summary, details, includeTranscript, transcriptPath, feedbackClaim, feedbackSession } = input;
     if (feedbackClaim === undefined && feedbackSession === undefined && transcriptPath === undefined) {
         throw hookHandoffUnavailable();
     }
-    const claimInput = { kind, summary, details, includeTranscript, ...(transcriptPath === undefined ? {} : { transcriptPath }) };
+    const hookFields = transcriptPath === undefined ? {} : { transcriptPath };
     try {
-        // WHY: hook fields are only data until the local process consumes the matching private capability.
-        // Burning it first prevents a skipped/untrusted hook from reaching a transcript or artifact write.
-        await consumeClaim({ claimToken: feedbackClaim, sessionBinding: feedbackSession, targetTool: 'prepare_e_comet_feedback', input: claimInput });
+        // WHY: hook fields are only data until this process verifies the trusted signature over them.
+        // Verifying first prevents a skipped or untrusted hook from reaching a transcript or artifact write.
+        await verifySignature({ tool: 'prepare_e_comet_feedback', sessionHash: feedbackSession, signature: feedbackClaim, fields: hookFields });
     } catch (error) {
         throw claimInvalid(error);
     }
@@ -254,12 +273,12 @@ const uploadFailure = (artifactId, code, error = undefined, operation = 'upload'
 /**
  * Re-verifies and uploads one stored archive. Transport fields are injected by the trusted host hook.
  * @param {{ artifactId?: string, uploadUrl?: string, requiredHeaders?: Record<string, string>, objectKey?: string, expiresAt?: number, expectedSize?: number, expectedSha256?: string, feedbackClaim?: string, feedbackSession?: string }} input
- * @param {{ loadArtifact?: typeof loadVerifiedFeedbackArtifact, retireArtifact?: typeof retireFeedbackArtifact, upload?: typeof putFeedbackArchive, now?: () => number, consumeClaim?: typeof consumeFeedbackClaim }} dependencies
+ * @param {{ loadArtifact?: typeof loadVerifiedFeedbackArtifact, retireArtifact?: typeof retireFeedbackArtifact, upload?: typeof putFeedbackArchive, now?: () => number, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown }} dependencies
  */
 const submitFeedback = async (input = {}, dependencies = {}) => {
-    const { loadArtifact = loadVerifiedFeedbackArtifact, retireArtifact = retireFeedbackArtifact, upload = putFeedbackArchive, now = Date.now, consumeClaim = consumeFeedbackClaim } = dependencies;
+    const { loadArtifact = loadVerifiedFeedbackArtifact, retireArtifact = retireFeedbackArtifact, upload = putFeedbackArchive, now = Date.now, verifySignature = verifyHookFields } = dependencies;
     const artifactId = safeArtifactId(input.artifactId);
-    if (typeof loadArtifact !== 'function' || typeof retireArtifact !== 'function' || typeof upload !== 'function' || typeof now !== 'function' || typeof consumeClaim !== 'function') {
+    if (typeof loadArtifact !== 'function' || typeof retireArtifact !== 'function' || typeof upload !== 'function' || typeof now !== 'function' || typeof verifySignature !== 'function') {
         throw new TypeError('Feedback submission dependencies are invalid.');
     }
     if (
@@ -275,7 +294,7 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
     ) {
         return submitError(artifactId, 'failed', 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', 'The trusted e-Comet hook handoff is unavailable.', 'handoff', false, undefined, 'handoff_submit');
     }
-    const claimInput = {
+    const hookFields = {
         artifactId: input.artifactId,
         uploadUrl: input.uploadUrl,
         requiredHeaders: input.requiredHeaders,
@@ -285,8 +304,9 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
         expectedSha256: input.expectedSha256,
     };
     try {
-        // WHY: consume before artifact reads or request creation so raw transport values never confer authority.
-        await consumeClaim({ claimToken: input.feedbackClaim, sessionBinding: input.feedbackSession, targetTool: 'submit_e_comet_feedback', input: claimInput });
+        // WHY: verify before artifact reads or request creation so raw transport values never confer
+        // authority. The signature covers this artifactId, so a swapped one cannot reuse another grant.
+        await verifySignature({ tool: 'submit_e_comet_feedback', sessionHash: input.feedbackSession, signature: input.feedbackClaim, fields: hookFields });
     } catch (error) {
         return submitError(artifactId, 'failed', 'UPLOAD_GRANT_INVALID', 'The trusted feedback handoff claim could not be verified.', 'grant', false, error, 'claim_verification');
     }

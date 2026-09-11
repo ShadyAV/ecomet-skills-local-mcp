@@ -14,8 +14,6 @@ const IMMEDIATE_ABORT_CODES = new Set([
     'OZON_EXECUTION_INTERRUPTED',
     'ARTIFACT_CLEANUP_FAILED',
     'JOB_ARTIFACT_QUOTA_EXCEEDED',
-    'ARTIFACT_FILE_QUOTA_EXCEEDED',
-    'ARTIFACT_TOTAL_QUOTA_EXCEEDED',
 ]);
 const SYSTEMIC_CODES = new Set([
     'CREATE_SERVICE_UNAVAILABLE',
@@ -28,8 +26,6 @@ const SYSTEMIC_CODES = new Set([
 const PRIVATE_ARTIFACT_CODES = new Set([
     'ARTIFACT_CLEANUP_FAILED',
     'JOB_ARTIFACT_QUOTA_EXCEEDED',
-    'ARTIFACT_FILE_QUOTA_EXCEEDED',
-    'ARTIFACT_TOTAL_QUOTA_EXCEEDED',
 ]);
 const artifactResources = new WeakMap();
 
@@ -103,6 +99,7 @@ export const executeOzonReportPackage = async ({
     packageDeadline,
     requestOzonReportPackage,
     createArtifactWriter,
+    jobBudget,
     artifactName,
     normalizeError,
 }) => {
@@ -134,8 +131,8 @@ export const executeOzonReportPackage = async ({
         try {
             const cleanup = stream.writer.abort();
             if (deferCleanup) {
-                // The broker fenced this item's active writer. Its store retains pending
-                // cleanup and pins; a blocked syscall cannot delay the authenticated failure.
+                // The broker fenced this item's active writer. Its writer removes only its own
+                // `.part`; a blocked syscall cannot delay the authenticated failure.
                 void cleanup.catch(() => undefined);
                 return undefined;
             }
@@ -174,6 +171,7 @@ export const executeOzonReportPackage = async ({
                         fileName: artifactName(items[itemIndex], itemIndex),
                         mimeType: XLSX_MIME_TYPE,
                         validateXlsx: true,
+                        jobBudget,
                         ...(signal === undefined ? {} : { signal }),
                     });
                     if (stream.cancelled) void stream.writer.abort().catch(() => undefined);

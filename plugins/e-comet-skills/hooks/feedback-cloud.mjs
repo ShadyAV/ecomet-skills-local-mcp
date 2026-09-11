@@ -1,6 +1,6 @@
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { MAX_MCP_MESSAGE_BYTES } from '../mcp/src/config.mjs';
-import { issueFeedbackClaim, consumeFeedbackClaim } from '../mcp/src/feedback-claim.mjs';
 import { prepareECometFeedback, submitECometFeedback } from '../mcp/src/feedback-tools.mjs';
 import { registerFeedbackArtifact, loadVerifiedFeedbackArtifact, retireFeedbackArtifact } from '../mcp/src/feedback-artifact-store.mjs';
 import { putFeedbackArchive } from '../mcp/src/feedback-upload.mjs';
@@ -106,7 +106,7 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
     // Explicit artifactDirectory prevents canonical legacy/native-root fallback.
     const artifactOptions = { artifactDirectory: paths.artifacts, now };
     const retireArtifact = options.cloud?.retireArtifact ?? (value => retireFeedbackArtifact(value, artifactOptions));
-    const store = new CloudFeedbackStore(paths, { now, retireArtifact, ...options.cloud?.state });
+    const store = new CloudFeedbackStore(paths, { now, ...options.cloud?.state });
     const input = hostValue(event, 'tool_input', 'toolInput');
     if (eventName === 'PreToolUse') {
         const authored = authoredInput(target, input);
@@ -145,17 +145,15 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
     let grantClaimed = false;
     let notStarted;
     let loadedMetadata;
-    let loadedKind;
-    const consumeClaim = value => consumeFeedbackClaim(value, { claimDirectory: paths.claims, now });
-    const freshClaim = async effectiveInput => {
-        const claim = await issueFeedbackClaim({ sessionId: binding.sessionId, targetTool: target, input: effectiveInput }, { claimDirectory: paths.claims, now });
-        return { ...effectiveInput, feedbackClaim: claim.claimToken, feedbackSession: claim.sessionBinding };
-    };
+    // The cloud hook prepares and uploads inside this process, so it is itself the trusted party: it
+    // never reads the shared hook secret and issues no signature to verify against itself.
+    const trusted = { verifySignature: () => true, now };
+    const feedbackSession = createHash('sha256').update(binding.sessionId, 'utf8').digest('hex');
     try {
         if (target === 'prepare_e_comet_feedback') {
             const effective = { ...op.input.authored, ...(op.input.transcriptPath ? { transcriptPath: op.input.transcriptPath } : {}) };
-            result = await prepareECometFeedback(await freshClaim(effective), {
-                consumeClaim, now, getBridgeStatus: () => ({ nativeBridgeDiagnostics: 'unavailable_in_cloud_hook' }),
+            result = await prepareECometFeedback({ ...effective, feedbackSession }, {
+                ...trusted, getBridgeStatus: () => ({ nativeBridgeDiagnostics: 'unavailable_in_cloud_hook' }),
                 registerArtifact: value => registerFeedbackArtifact(value, artifactOptions),
                 ...(options.cloud?.readTranscript ? { readTranscript: options.cloud.readTranscript } : {}),
             });
@@ -166,22 +164,20 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
             const outcome = await store.readArtifactOutcome(binding.sessionId, normalized.artifactId);
             if (blocksUpload(outcome)) result = outcome.result;
             else {
-                const granted = await claimUploadGrant({ dataDirectory: paths.handoff, sessionId: binding.sessionId,
-                    artifactId: normalized.artifactId, targetTool: target, nowMs: now(),
-                    publishClaim: transport => freshClaim({ ...normalized, ...transport }) });
+                const transport = await claimUploadGrant({ dataDirectory: paths.handoff, sessionId: binding.sessionId,
+                    artifactId: normalized.artifactId, targetTool: target, nowMs: now() });
                 grantClaimed = true;
-                const effective = granted.publication;
+                const effective = { ...normalized, ...transport, feedbackSession };
                 result = await submitECometFeedback(effective, {
-                    consumeClaim, now, retireArtifact,
+                    ...trusted, retireArtifact,
                     loadArtifact: async value => {
                         const artifact = await (options.cloud?.loadArtifact ?? (request => loadVerifiedFeedbackArtifact(request, artifactOptions)))(value);
                         loadedMetadata = { artifactId: normalized.artifactId, sizeBytes: effective.expectedSize, sha256: effective.expectedSha256, transcriptIncluded: artifact.transcriptIncluded };
-                        loadedKind = artifact.kind;
                         return artifact;
                     },
                     upload: async uploadInput => {
-                        // Canonical validation has already consumed a fresh claim
-                        // and verified immutable ZIP bytes. This is the sole PUT seam.
+                        // Canonical validation has already verified the trusted fields and the
+                        // immutable ZIP bytes. This is the sole PUT seam.
                         const previous = await store.readArtifactOutcome(binding.sessionId, normalized.artifactId);
                         if (blocksUpload(previous)) throw invalid();
                         const refuse = reason => {
@@ -191,33 +187,31 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
                         const beforeIntentRefusal = refusalReason(HOOK_BUDGET_MS - (monotonicNow() - started), effective.expiresAt * 1000 - now());
                         if (beforeIntentRefusal) refuse(beforeIntentRefusal);
                         let attempt;
-                        try { attempt = await store.beginUploadAttempt(binding.sessionId, loadedMetadata, binding); }
+                        try { attempt = await store.beginUploadAttempt(binding.sessionId, loadedMetadata); }
                         catch (error) {
-                            // Only the live publishing owner can supply this proof,
-                            // after a matching no-request terminal is durable. A
-                            // generic older terminal is not proof for this attempt.
-                            if (error?.uploadNotStarted?.status === 'not_started'
-                                && error.uploadNotStarted.artifactId === normalized.artifactId) {
-                                notStarted = error.uploadNotStarted;
-                            }
-                            // A concurrent/partial intent is never a not-started
-                            // outcome for the artifact. Read errors stay uncertain.
+                            // A concurrent or partial attempt is never a no-request outcome for this
+                            // artifact. An unreadable guard stays uncertain.
                             try {
                                 if (!await store.readArtifactOutcome(binding.sessionId, normalized.artifactId))
                                     notStarted = safeFailure(error, normalized.artifactId, 'not_started');
                             } catch (readbackError) {
-                                // Failure to inspect the guard must not erase the
-                                // initiating cause, or prove that replay is safe.
+                                // Failure to inspect the guard must not erase the initiating cause,
+                                // or prove that replay is safe.
                                 throw Object.assign(new Error('Upload state readback failed.', { cause: error }), { readbackError });
                             }
                             throw error;
                         }
-                        // Intent fsync and capacity maintenance are awaited work;
-                        // recheck immediately before constructing the request too.
+                        // Admission is awaited work; recheck immediately before constructing the request.
                         const afterIntentRefusal = refusalReason(HOOK_BUDGET_MS - (monotonicNow() - started), effective.expiresAt * 1000 - now());
                         if (afterIntentRefusal) {
+                            // No request was constructed, so this owner releases its own guard and the
+                            // next submit can authorize the same artifact again.
                             notStarted = { ...safeFailure(undefined, normalized.artifactId, 'not_started', afterIntentRefusal), reason: afterIntentRefusal };
-                            await store.recordUploadOutcome(attempt, notStarted);
+                            // The refusal is known before the guard is released. A guard that cannot be
+                            // removed is recorded as this no-request outcome instead, which a fresh
+                            // authorization may replace; only a failure of both leaves it uncertain.
+                            try { await store.releaseUploadAttempt(attempt); }
+                            catch { await store.recordUploadOutcome(attempt, notStarted).catch(() => undefined); }
                             throw invalid(); // This owner never invokes the uploader.
                         }
                         try {
@@ -227,8 +221,8 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
                             await store.recordUploadOutcome(attempt, safeFailure(error, normalized.artifactId, status, status === 'rejected' ? 'UPLOAD_REJECTED' : 'UPLOAD_UNCERTAIN')).catch(() => undefined);
                             throw error;
                         }
-                        // Do not resolve until the immutable receipt is durable:
-                        // canonical submit retires the ZIP immediately after this.
+                        // Do not resolve until the receipt is recorded: canonical submit retires the
+                        // ZIP immediately after this.
                         await store.recordUploadOutcome(attempt, { ok: true, status: 'uploaded', artifactId: normalized.artifactId, transcriptIncluded: loadedMetadata.transcriptIncluded });
                     },
                 });
@@ -268,16 +262,6 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
                     message: 'This call did not start upload, but the saved outcome of other attempts could not be read. Do not resend this artifact until its upload history can be established.' } };
             }
         }
-    }
-    if (notStarted && loadedMetadata && result.status === 'not_started') {
-        // Also repair after a transient readback failure was resolved in catch.
-        // Restore metadata only, never the consumed upload capability or a newer slot.
-        await stagePreparedArtifact({ dataDirectory: paths.handoff, sessionId: binding.sessionId,
-            metadata: { ...loadedMetadata, kind: loadedKind }, nowMs: now(), onlyIfVacant: true }).catch(error => {
-            result = { ...result, error: { ...result.error,
-                message: 'This call did not start upload. Prepared-state recovery did not complete; inspect the latest prepared result and existing authorization before continuing.',
-                details: feedbackDiagnostics(error, 'handoff_prepare') } };
-        });
     }
     try { await store.finishOperation(binding, result); }
     catch (error) {

@@ -11,7 +11,7 @@ import {
     MAX_IMAGE_BASKET,
     SUPPORTED_MCP_PROTOCOL_VERSIONS,
 } from './config.mjs';
-import { createArtifactWriter, releaseArtifactJob } from './artifact-store.mjs';
+import { createArtifactWriter } from './artifact-store.mjs';
 import { prepareECometFeedback, submitECometFeedback } from './feedback-tools.mjs';
 import { FeedbackPreparationError, feedbackPreparationFailure, feedbackSubmissionFailure } from './feedback-errors.mjs';
 import { feedbackHostResultUnavailable, hasFeedbackHostAdapterMarker, isValidFeedbackHostAdapterInput } from './feedback-host-adapter.mjs';
@@ -180,9 +180,7 @@ export const createMcpMessageHandler = ({
     artifactStorageTarget = ARTIFACT_STORAGE,
     reportOutputDirectory = undefined,
     createSellerArtifactWriter = createArtifactWriter,
-    releaseSellerArtifactJob = releaseArtifactJob,
     createOzonArtifactWriter = createArtifactWriter,
-    releaseOzonArtifactJob = releaseArtifactJob,
     renderOzonResult = resourceLinkResult,
     sendError = mcpError,
     sendResult = mcpResult,
@@ -613,6 +611,8 @@ export const createMcpMessageHandler = ({
         let sellerResult;
         let sellerArtifacts = [];
         const artifactJobId = randomUUID();
+        // One byte counter per call: every writer of this export shares it (spec §4.2).
+        const jobBudget = { bytes: 0 };
         try {
             requireStorageTarget(artifactStorageTarget, 'marketplace-artifacts');
             if (!(await waitForExtensionReady())) {
@@ -643,6 +643,7 @@ export const createMcpMessageHandler = ({
                 requestSellerOperation: authorizationLease.requestSellerOperation,
                 createArtifactWriter: createSellerArtifactWriter,
                 artifactJobId,
+                jobBudget,
             });
             sellerArtifacts = sellerResult.exports.flatMap((item) =>
                 item.status === 'complete' && 'artifact' in item ? [item.artifact] : []
@@ -685,18 +686,7 @@ export const createMcpMessageHandler = ({
                 terminalResult = textResult(failure, true);
             }
         }
-        try {
-            sendResult(id, await deliverReportResult(terminalResult, sellerArtifacts, reportOutputDirectory));
-        } finally {
-            try {
-                // Cancellation may publish a partial response while another writer
-                // still owns cleanup. Register this response owner's release now;
-                // the store completes it when the final writer/cleanup leaves.
-                await releaseSellerArtifactJob(artifactJobId, { deferWhileActive: true });
-            } catch (error) {
-                log('failed to release seller artifact pins after terminal response:', error?.message);
-            }
-        }
+        sendResult(id, await deliverReportResult(terminalResult, sellerArtifacts, reportOutputDirectory));
     };
 
     // Диагноз строится только по статусу, который явно сообщил про возможность. Статус без этого
@@ -719,6 +709,8 @@ export const createMcpMessageHandler = ({
         const dateFrom = args?.dateFrom;
         const dateTo = args?.dateTo;
         const artifactJobId = randomUUID();
+        // One byte counter per call: every writer of this export shares it (spec §4.2).
+        const jobBudget = { bytes: 0 };
         let authorizationLease;
         let terminalResult;
         let reportArtifacts = [];
@@ -809,6 +801,7 @@ export const createMcpMessageHandler = ({
                 requestOzonPromotionReport: authorizationLease.requestOzonPromotionReport,
                 createArtifactWriter: createOzonArtifactWriter,
                 artifactJobId,
+                jobBudget,
                 now,
             });
             reportArtifacts = [getOzonPromotionArtifactResource(result)];
@@ -824,15 +817,7 @@ export const createMcpMessageHandler = ({
             authorizationLease = undefined;
             releaseAuthorizationInBackground(currentLease, 'after Ozon promotion report completion');
         }
-        try {
-            sendResult(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
-        } finally {
-            try {
-                await releaseOzonArtifactJob(artifactJobId, { deferWhileActive: true });
-            } catch (error) {
-                log('failed to release Ozon promotion artifact pins after terminal response:', error?.message);
-            }
-        }
+        sendResult(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
     };
 
     // Keep package admission/result shaping distinct from the released singular contract:
@@ -844,6 +829,8 @@ export const createMcpMessageHandler = ({
         const itemProperty = family === 'promotion' ? 'periods' : 'reports';
         const items = args?.[itemProperty];
         const artifactJobId = randomUUID();
+        // One byte counter per call: every writer of this export shares it (spec §4.2).
+        const jobBudget = { bytes: 0 };
         let authorizationLease;
         let terminalResult;
         let reportArtifacts = [];
@@ -936,6 +923,7 @@ export const createMcpMessageHandler = ({
                 requestOzonReportPackage: authorizationLease.requestOzonReportPackage,
                 createArtifactWriter: createOzonArtifactWriter,
                 artifactJobId,
+                jobBudget,
                 now,
             };
             const result =
@@ -957,15 +945,7 @@ export const createMcpMessageHandler = ({
             authorizationLease = undefined;
             releaseAuthorizationInBackground(currentLease, `after Ozon ${family} report package completion`);
         }
-        try {
-            sendResult(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
-        } finally {
-            try {
-                await releaseOzonArtifactJob(artifactJobId, { deferWhileActive: true });
-            } catch (error) {
-                log(`failed to release Ozon ${family} package artifact pins after terminal response:`, error?.message);
-            }
-        }
+        sendResult(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
     };
 
     // `needsBridge` declares which operational tools depend on the bridge, so the wake-up is applied once at

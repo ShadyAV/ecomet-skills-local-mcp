@@ -4,7 +4,7 @@ import { parsePromotionPeriods } from './ozon-report-package-domain.mjs';
 import { executeOzonReportPackage } from './ozon-report-package-job.mjs';
 import { SELLER_AUTHORIZATION_SCOPE_MAX_MS } from './config.mjs';
 import { OZON_PROMOTION_OPERATION_MAX_MS } from './request-broker.mjs';
-import { ArtifactSetupCleanupPendingError, safeOzonPromotionToolError, ToolExecutionError } from './tool-errors.mjs';
+import { safeOzonPromotionToolError, ToolExecutionError } from './tool-errors.mjs';
 import { StorageUnavailableError } from './storage-layout.mjs';
 
 const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -40,6 +40,7 @@ export const executeOzonPromotionJob = async ({
     requestOzonPromotionReport,
     createArtifactWriter,
     artifactJobId = authorization?.job?.jobId,
+    jobBudget = { bytes: 0 },
     now = Date.now,
 }) => {
     try {
@@ -82,6 +83,7 @@ export const executeOzonPromotionJob = async ({
                         fileName: ozonPromotionArtifactName(dateFrom, dateTo),
                         mimeType: XLSX_MIME_TYPE,
                         validateXlsx: true,
+                        jobBudget,
                         ...(signal === undefined ? {} : { signal }),
                     });
                 },
@@ -126,7 +128,6 @@ export const executeOzonPromotionJob = async ({
                 throw artifactRejected(new AggregateError([error, cleanupError], 'Ozon artifact cleanup failed'));
             }
         }
-        if (error instanceof ArtifactSetupCleanupPendingError) throw safeOzonPromotionToolError(error);
         if (error instanceof ToolExecutionError || error instanceof StorageUnavailableError) throw error;
         throw artifactRejected(error);
     }
@@ -138,6 +139,7 @@ export const executeOzonPromotionPackageJob = async ({
     requestOzonReportPackage,
     createArtifactWriter,
     artifactJobId = authorization?.job?.jobId,
+    jobBudget = { bytes: 0 },
     now = Date.now,
 }) => {
     try {
@@ -166,6 +168,7 @@ export const executeOzonPromotionPackageJob = async ({
         packageDeadline,
         requestOzonReportPackage,
         createArtifactWriter,
+        jobBudget,
         artifactName: ({ dateFrom, dateTo }) => ozonPromotionArtifactName(dateFrom, dateTo),
         normalizeError: (error) => {
             if (error instanceof StorageUnavailableError) {

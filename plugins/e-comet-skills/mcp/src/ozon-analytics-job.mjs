@@ -48,6 +48,7 @@ export const executeOzonAnalyticsJob = async ({
     requestOzonReportPackage,
     createArtifactWriter,
     artifactJobId = authorization?.job?.jobId,
+    jobBudget = { bytes: 0 },
     now = Date.now,
 }) => {
     try {
@@ -77,6 +78,7 @@ export const executeOzonAnalyticsJob = async ({
         packageDeadline,
         requestOzonReportPackage,
         createArtifactWriter,
+        jobBudget,
         artifactName: ({ dateFrom, dateTo, breakdown }) =>
             ozonAnalyticsArtifactName(dateFrom, dateTo, breakdown, authorization.issuedAt),
         normalizeError: safeOzonAnalyticsToolError,

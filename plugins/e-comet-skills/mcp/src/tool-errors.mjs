@@ -78,17 +78,6 @@ export class ToolExecutionError extends Error {
     }
 }
 
-// This diagnosis is constructed only by the local writer admission gate. A plain
-// object from an extension/peer must not acquire its trusted message or cause.
-export class ArtifactSetupCleanupPendingError extends ToolExecutionError {
-    constructor(cause) {
-        super('ARTIFACT_STORE_BUSY',
-            'Artifact storage is waiting for cleanup of a previous writer. Cleanup continues automatically; no output file was created for this export.',
-            'storage', false, { cause });
-        this.name = 'ArtifactSetupCleanupPendingError';
-    }
-}
-
 export const safeExternalToolError = (value, fallbackMessage = 'Browser job authorization failed.') => {
     const code = typeof value?.code === 'string' && SAFE_CODE.test(value.code) ? value.code : 'BROWSER_JOB_AUTHORIZATION_FAILED';
     const message =
@@ -100,9 +89,6 @@ export const safeExternalToolError = (value, fallbackMessage = 'Browser job auth
 };
 
 export const safeOzonPromotionToolError = (value) => {
-    if (value instanceof ArtifactSetupCleanupPendingError) {
-        return new ToolExecutionError('ARTIFACT_REJECTED', value.message, 'artifact', false, { cause: value });
-    }
     const expectedStage = OZON_PROMOTION_TERMINAL_CODE_STAGES[value?.code];
     if (
         expectedStage === undefined ||

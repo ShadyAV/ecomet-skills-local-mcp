@@ -14,7 +14,7 @@ import {
 } from './config.mjs';
 import { isValidOzonPromotionOperation, isValidSellerOperation } from './extension-protocol.mjs';
 import { SELLER_OPERATION_STAGES } from './extension-vocabulary.mjs';
-import { ArtifactSetupCleanupPendingError, OZON_PROMOTION_TERMINAL_CODE_STAGES, safeOzonPromotionToolError, ToolExecutionError } from './tool-errors.mjs';
+import { OZON_PROMOTION_TERMINAL_CODE_STAGES, ToolExecutionError } from './tool-errors.mjs';
 import { StorageUnavailableError } from './storage-layout.mjs';
 import { isAllowedWbUrl, validTimeout } from './wb-domain.mjs';
 
@@ -28,7 +28,6 @@ const ozonPromotionError = (code, message) => {
     return new ToolExecutionError(code, message, stage, false);
 };
 const normalizeOzonPromotionError = (error, fallbackCode, fallbackMessage) =>
-    error instanceof ArtifactSetupCleanupPendingError ? safeOzonPromotionToolError(error) :
     // The consumer's own writer can fail before opening a stream. Preserve this local
     // diagnosis without adding storage errors to the extension/peer terminal vocabulary.
     error instanceof StorageUnavailableError || (error instanceof ToolExecutionError &&

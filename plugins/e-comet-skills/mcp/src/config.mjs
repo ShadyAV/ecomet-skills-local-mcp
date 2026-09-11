@@ -44,7 +44,7 @@ export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-06-18'];
 export const LATEST_MCP_PROTOCOL_VERSION = SUPPORTED_MCP_PROTOCOL_VERSIONS[0];
 // 5: a build that can proxy indexed Ozon report packages must replace an already-running generation-4 primary;
 // otherwise the capable secondary remains behind a primary that cannot advertise or route the package operation.
-const DEFAULT_BRIDGE_GENERATION = 8;
+const DEFAULT_BRIDGE_GENERATION = 5;
 export const resolveBridgeGeneration = ({ env = process.env } = {}) => {
     const mode = env.NODE_ENV;
     if (mode !== 'test' && mode !== 'development') return DEFAULT_BRIDGE_GENERATION;
@@ -170,10 +170,7 @@ export const SELLER_JOB_MAX_DURATION_MS = sellerJobDurationMs(
 export const HANDOFF_MAX_DRAIN_MS = positiveIntegerEnv('ECOMET_HANDOFF_MAX_DRAIN_MS', 10_000);
 export const MAX_ACTIVE_AUTHORIZATION_SCOPES = positiveIntegerEnv('ECOMET_MAX_ACTIVE_AUTHORIZATION_SCOPES', 32);
 export const RESULT_RETENTION_MS = positiveIntegerEnv('ECOMET_RESULT_RETENTION_MS', 24 * 60 * 60 * 1000);
-export const RESULT_ACTIVE_STALE_MS = positiveIntegerEnv('ECOMET_RESULT_ACTIVE_STALE_MS', 24 * 60 * 60 * 1000);
-export const RESULT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_RESULT_MAX_TOTAL_BYTES', 512 * 1024 * 1024);
 export const RESULT_MAX_FILE_BYTES = positiveIntegerEnv('ECOMET_RESULT_MAX_FILE_BYTES', 64 * 1024 * 1024);
-export const RESULT_MAX_FILES = positiveIntegerEnv('ECOMET_RESULT_MAX_FILES', 1000);
 export const IMAGE_BASKET_BOUNDS = [
     143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601, 1655, 1919, 2045, 2189, 2405, 2621, 2837, 3053, 3269, 3485, 3701, 3917, 4133,
     4349, 4565, 4877, 5189, 5501, 5813, 6125, 6437, 6749, 7061, 7373, 7685, 7997, 8309, 8741, 9173, 9605, 10373, 11141, 11909, 12677, 13445,
@@ -185,19 +182,13 @@ export { resolveLocalStateDir, resolvePeerTokenDir };
 export const resolveResultDir = (options = {}) => resolveStorageLayout(options).results;
 
 export const PEER_TOKEN_DIR = resolvePeerTokenDir();
-export const LEGACY_LOCAL_STATE_DIR = resolveLocalStateDir();
-export const LEGACY_RESULT_DIR = LEGACY_LOCAL_STATE_DIR;
-export const LEGACY_ARTIFACT_DIR = join(LEGACY_LOCAL_STATE_DIR, 'artifacts');
-export const LEGACY_FEEDBACK_ARTIFACT_DIR = join(LEGACY_LOCAL_STATE_DIR, 'feedback-artifacts');
 export const STORAGE_LAYOUT = resolveStorageLayout();
 export const RESULT_STORAGE = STORAGE_LAYOUT.results;
 export const ARTIFACT_STORAGE = STORAGE_LAYOUT.marketplaceArtifacts;
 export const FEEDBACK_ARTIFACT_STORAGE = STORAGE_LAYOUT.feedbackArtifacts;
 export const ARTIFACT_RETENTION_MS = positiveIntegerEnv('ECOMET_ARTIFACT_RETENTION_MS', 24 * 60 * 60 * 1000);
-export const ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_TOTAL_BYTES', 512 * 1024 * 1024);
 export const ARTIFACT_MAX_FILE_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_FILE_BYTES', 100 * 1024 * 1024);
 export const ARTIFACT_MAX_JOB_BYTES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_JOB_BYTES', 500 * 1024 * 1024);
-export const ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_ARTIFACT_MAX_FILES', 1000);
 export const ARTIFACT_MAX_CHUNK_BYTES = 256 * 1024;
 export const FEEDBACK_MAX_SUMMARY_LENGTH = 512;
 // This is the remote report_issue contract. Every local validator must consume this one list so a report that
@@ -205,8 +196,6 @@ export const FEEDBACK_MAX_SUMMARY_LENGTH = 512;
 export const FEEDBACK_KINDS = Object.freeze(['bug', 'wrong_data', 'missing_capability', 'unclear_contract']);
 export const FEEDBACK_MAX_BYTES = 32 * 1024 * 1024;
 export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
-export const FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_TOTAL_BYTES', 64 * 1024 * 1024);
-export const FEEDBACK_ARTIFACT_MAX_FILES = positiveIntegerEnv('ECOMET_FEEDBACK_ARTIFACT_MAX_FILES', 100);
 export const SESSION_NONCE = randomUUID();
 export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
 export const EXTENSION_ID_OVERRIDE_ENABLED =
